@@ -6,9 +6,11 @@ import json
 import pytz
 from datetime import datetime
 
-LINE_TOKEN = "ใส่ Token ของคุณ"
-LINE_USER_ID = "ใส่ User ID ของคุณ"
-WATCHLIST = ["NVDA", "AAPL", "TSLA"]
+LINE_TOKEN = "0JZHbJ2b/Vu71Ex3Xe2T5a2PDVk1iu5rEe+p4r0icSE1lbFZxoBUbxIDFqUxEp5CTsu6o2Iku9ECQcAzir4V+b PFE+5KBZJ1WsNJPWto8wkYXwrnHXYhBToIVXzAIbg8ZxoWWnPvyk99S7VLuZY98gdB04t89/1O/w1cDnyilFU="
+LINE_USER_ID = "U4eaab8ca41c138c8b8a9c18768ee2d31"
+
+US_STOCKS = ["NVDA", "AAPL", "TSLA"]
+TH_STOCKS = ["PTT.BK", "ADVANC.BK", "AOT.BK", "CPALL.BK", "SCB.BK"]
 TH = pytz.timezone("Asia/Bangkok")
 
 def get_stock_data(symbol):
@@ -72,17 +74,18 @@ def send_line(msg):
     print(f"Response: {r.status_code}")
     return r.status_code
 
-def daily_report():
+def send_report(stocks, label):
     now = datetime.now(TH).strftime("%d/%m/%Y %H:%M")
-    print(f"[{now}] กำลังส่งรายงาน...")
-    for symbol in WATCHLIST:
+    print(f"[{now}] ส่งรายงาน{label}...")
+    for symbol in stocks:
         try:
             data = get_stock_data(symbol)
             signals, verdict = analyze_signal(data)
             sign = "+" if data['change_pct'] > 0 else ""
+            currency = "บาท" if ".BK" in symbol else "$"
             msg = "\n".join([
-                f"[{symbol}] รายงานหุ้น",
-                f"ราคา: ${data['price']:.2f}",
+                f"[{symbol}] หุ้น{label}",
+                f"ราคา: {data['price']:.2f} {currency}",
                 f"เปลี่ยนแปลง: {sign}{data['change_pct']:.2f}%",
                 "",
                 "TECHNICAL",
@@ -98,14 +101,5 @@ def daily_report():
         except Exception as e:
             print(f"Error {symbol}: {e}")
 
-# ตั้งเวลา UTC (ไทย -7 ชั่วโมง)
-schedule.every().day.at("02:00").do(daily_report)  # 09:00 ไทย
-schedule.every().day.at("13:00").do(daily_report)  # 20:00 ไทย
-
-print("Bot เริ่มทำงาน 24/7")
-print(f"เวลาปัจจุบัน: {datetime.now(TH).strftime('%d/%m/%Y %H:%M')}")
-daily_report()
-
-while True:
-    schedule.run_pending()
-    time.sleep(30)
+def us_report():
+    send_report(US_S
