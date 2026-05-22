@@ -71,16 +71,17 @@ def report_file(filename):
     return send_from_directory(REPORT_DIR, filename)
 
 @app.route("/line/webhook", methods=["POST"])
-def line_webhook():           
-    WATCHLIST = os.getenv("WATCHLIST", "").split(",")
+def line_webhook():   
+    return "OK"
+WATCHLIST = os.getenv("WATCHLIST", "").split(",")
 
-    last_alerts = {}
+last_alerts = {}
 
-    def check_alerts():
-        global last_alerts
+def check_alerts():
+    global last_alerts
 
-        for symbol in WATCHLIST:
-            symbol = symbol.strip()
+    for symbol in WATCHLIST:
+        symbol = symbol.strip()
 
         try:
             result = analyze_asset(symbol)
