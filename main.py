@@ -148,17 +148,15 @@ def normalize_asset(user_text):
             "asset_type": "GOLD"
         }
 
-    
     if key in THAI_SYMBOL_MAP:
-    symbol, exchange, currency = THAI_SYMBOL_MAP[key]
-    return {
+        symbol, exchange, currency = THAI_SYMBOL_MAP[key]
+        return {
             "display": f"{symbol}.BKK",
             "symbol": f"{symbol}.BKK",
             "exchange": None,
             "currency": currency,
             "asset_type": "THAI_STOCK"
         }
-
     if key.endswith(".BK"):
         symbol = key.replace(".BK", "")
         return {
