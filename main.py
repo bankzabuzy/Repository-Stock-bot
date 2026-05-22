@@ -153,7 +153,7 @@ def normalize_asset(user_text):
         return {
             "display": f"{symbol}.SET",
             "symbol": f"{symbol}.SET",
-            "exchange": SET,
+            "exchange": "SET",
             "currency": currency,
             "asset_type": "THAI_STOCK"
         }
