@@ -86,13 +86,7 @@ def line_webhook():
         try:
             result = analyze_asset(user_text)
 
-            prices = [
-                result["price"] * 0.97,
-                result["price"] * 0.99,
-                result["price"],
-                result["price"] * 1.01,
-                result["price"] * 1.02
-            ]
+            prices, _ = td_get_series(result["asset"])
 
             chart_file = create_chart(user_text.upper(), prices)
 
@@ -109,10 +103,6 @@ def line_webhook():
                 f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, GOLD\n\nError: {e}",
                 None
             )
-        except Exception as e:
-            print("ERROR:", repr(e))
-            reply_line(reply_token, f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, GOLD\n\nError: {e}", None)
-
     return "OK"
 
 def verify_line_signature():
