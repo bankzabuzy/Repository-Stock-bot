@@ -65,7 +65,26 @@ def test_alert():
 def report_file(filename):
     return send_from_directory(REPORT_DIR, filename)
 
+def push_line(to, text):
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        print("LINE_CHANNEL_ACCESS_TOKEN missing")
+        return
 
+    r = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "to": to,
+            "messages": [{"type": "text", "text": text[:4900]}]
+        },
+        timeout=20
+    )
+
+    print("PUSH STATUS:", r.status_code)
+    print("PUSH RESPONSE:", r.text)
 @app.route("/line/webhook", methods=["POST"])
 def line_webhook():
     verify_line_signature()
