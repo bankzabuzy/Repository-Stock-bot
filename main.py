@@ -41,7 +41,7 @@ THAI_SYMBOL_MAP = {
 GOLD_WORDS = {"GOLD", "ทอง", "XAUUSD", "XAU/USD"}
 
 def now_text():
-    return datetime.now().strftime("%d/%m/%Y %H:%M")
+    from datetime import datetime, timedelta
 def create_chart(symbol, prices):
     plt.figure(figsize=(8,4))
 
