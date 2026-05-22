@@ -227,8 +227,11 @@ def td_get_series(asset):
 
     if asset["asset_type"] == "GOLD":
         rate = usd_to_thb()
-        closes = [x * rate for x in closes]
-
+        price *= rate
+        high *= rate
+        low *= rate
+        prev_close *= rate
+        
     return closes, volumes
 
 
@@ -358,10 +361,11 @@ def analyze_asset(user_text):
     gold_note = ""
     if asset["asset_type"] == "GOLD":
         gold_note = "\nหมายเหตุทองคำ: ราคาแสดงเป็นเงินบาทต่อ 1 ออนซ์ จาก XAU/USD × USD/THB"
-
+        gold_baht_price = price / 31.1035 * 15.244 if asset["asset_type"] == "GOLD" else 0
     text = f"""[{asset['display']}] รายงานราคาปัจจุบัน
 
 ราคา: {unit}{price:,.2f}
+ราคาทองไทยประมาณ: ฿{gold_baht_price:,.2f} / บาททองคำ
 เปลี่ยนแปลง: {change_pct:+.2f}%
 สูงสุด/ต่ำสุด: {unit}{high:,.2f} / {unit}{low:,.2f}
 
