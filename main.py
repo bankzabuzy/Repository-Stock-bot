@@ -85,18 +85,11 @@ def line_webhook():
 
         try:
             result = analyze_asset(user_text)
-
-prices, _ = td_get_series(result["asset"])
-prices = prices[-60:]
-
-chart_file = create_chart(user_text.upper(), prices)
-
-image_path = Path(chart_file)
-
-image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
-
-reply_line(reply_token, result["text"], image_url)
-
+            prices, _ = td_get_series(result["asset"])
+            prices = prices[-60:]
+            chart_file = create_chart(user_text.upper(), prices)
+            image_path = Path(chart_file)
+            image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
             reply_line(reply_token, result["text"], image_url)
 
         except Exception as e:
