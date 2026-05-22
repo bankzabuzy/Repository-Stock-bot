@@ -109,7 +109,7 @@ def line_webhook():
             chart_file = create_chart(result["asset"]["display"], closes[-60:])
             image_path = Path(chart_file)
             image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
-            reply_line(reply_token, result["text"], image_url)
+            push_line(LINE_USER_ID, result["text"])
 
         except Exception as e:
             print("ERROR:", repr(e))
