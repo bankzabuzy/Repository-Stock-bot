@@ -105,10 +105,6 @@ def line_webhook():
             user_text = "XAU/USD"
         try:
             result = analyze_asset(user_text)
-            closes, _ = td_get_series(result["asset"])
-            chart_file = create_chart(result["asset"]["display"], closes[-60:])
-            image_path = Path(chart_file)
-            image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
             push_line(LINE_USER_ID, result["text"])
 
         except Exception as e:
