@@ -375,7 +375,7 @@ AI วิเคราะห์: {ai_view}
 
 หมายเหตุ: เป็นข้อมูลเชิงระบบ ไม่ใช่คำแนะนำการลงทุนเฉพาะบุคคล"""
 
-    return {
+return {
         "asset": asset,
         "price": price,
         "change_pct": change_pct,
