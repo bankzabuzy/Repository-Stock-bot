@@ -101,7 +101,8 @@ def line_webhook():
 
         reply_token = event.get("replyToken")
         user_text = message.get("text", "").strip()
-
+        if user_text in ["ทองคำ", "ทอง", "gold", "GOLD"]:
+            user_text = "XAU/USD"
         try:
             result = analyze_asset(user_text)
             closes, _ = td_get_series(result["asset"])
