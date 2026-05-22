@@ -377,4 +377,15 @@ AI วิเคราะห์: {ai_view}
 
     return {
         "asset": asset,
-        "price": pri
+        "price": price,
+        "change_pct": change_pct,
+        "high": high,
+        "low": low,
+        "ema6": ema6,
+        "ema12": ema12,
+        "sma20": sma20,
+        "rsi14": rsi14,
+        "status": status,
+        "unit": unit,
+        "text": text
+    }
