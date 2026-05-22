@@ -400,6 +400,6 @@ def alert_loop():
         except Exception as e:
             print("ALERT ERROR:", e)
 
-        time.sleep(300)  # 5 นาที
+        time.sleep(21600)  # 5 นาที
 
 threading.Thread(target=alert_loop, daemon=True).start()
