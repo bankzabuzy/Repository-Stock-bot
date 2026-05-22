@@ -92,13 +92,10 @@ def line_webhook():
             image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
             reply_line(reply_token, result["text"], image_url)
 
-        except Exception as e:
+       except Exception as e:
             print("ERROR:", repr(e))
-            reply_line(
-                reply_token,
-                f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, GOLD\n\nError: {e}",
-                None
-            )
+            reply_line(reply_token, f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, GOLD\n\nError: {e}", None)
+                
     return "OK"
 
 def verify_line_signature():
