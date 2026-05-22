@@ -355,7 +355,7 @@ def analyze_asset(user_text):
 
     gold_note = ""
     gold_baht_price = price / 31.1035 * 15.244 if asset["asset_type"] == "GOLD" else 0
-
+    gold_factor = 15.244 / 31.1035 if asset["asset_type"] == "GOLD" else 1
 if asset["asset_type"] == "GOLD":
     gold_note = "\nหมายเหตุทองคำ: ราคา Spot แสดงเป็นเงินบาทต่อ 1 ออนซ์ ส่วนราคาทองไทยเป็นราคาประมาณต่อ 1 บาททองคำ"
     text = f"""[{asset['display']}] รายงานราคาปัจจุบัน
@@ -372,16 +372,16 @@ SMA 20: {fmt(sma20, unit)}
 RSI 14: {rsi_text}
 
 จุดเข้าซื้อ 3 ไม้
-ไม้ 1: {unit}{buy1:,.2f}
-ไม้ 2: {unit}{buy2:,.2f}
-ไม้ 3: {unit}{buy3:,.2f}
+ไม้ 1: {unit}{buy1 * gold_factor:,.2f}
+ไม้ 2: {unit}{buy2 * gold_factor:,.2f}
+ไม้ 3: {unit}{buy3 * gold_factor:,.2f}
 
 จุดขายออก 3 ไม้
-ขาย 1: {unit}{sell1:,.2f}
-ขาย 2: {unit}{sell2:,.2f}
-ขาย 3: {unit}{sell3:,.2f}
+ขาย 1: {unit}{sell1 * gold_factor:,.2f}
+ขาย 2: {unit}{sell2 * gold_factor:,.2f}
+ขาย 3: {unit}{sell3 * gold_factor:,.2f}
 
-จุดคุมความเสี่ยง: ต่ำกว่า {unit}{stop_loss:,.2f}
+จุดคุมความเสี่ยง: ต่ำกว่า {unit}{stop_loss * gold_factor:,.2f}
 
 สรุป: {status}
 AI วิเคราะห์: {ai_view}
