@@ -62,7 +62,10 @@ def create_chart(symbol, prices):
 @app.route("/health")
 def health():
     return "OK"
-
+@app.route("/test-alert")
+def test_alert():
+    push_line(LINE_USER_ID, "✅ ทดสอบแจ้งเตือน LINE สำเร็จ")
+    return "OK"
 @app.route("/reports/<path:filename>")
 def report_file(filename):
     return send_from_directory(REPORT_DIR, filename)
