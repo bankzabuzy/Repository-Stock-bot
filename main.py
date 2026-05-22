@@ -389,20 +389,20 @@ AI วิเคราะห์: {ai_view}
 {gold_note}
 
 หมายเหตุ: เป็นข้อมูลเชิงระบบ ไม่ใช่คำแนะนำการลงทุนเฉพาะบุคคล"""
-    
+
     return {
-            "asset": asset,
-            "price": price,
-            "change_pct": change_pct,
-            "high": high,
-            "low": low,
-            "ema6": ema6,
-            "ema12": ema12,
-            "sma20": sma20,
-            "rsi14": rsi14,
-            "status": status,
-            "unit": unit,
-            "text": text
+        "asset": asset,
+        "price": price,
+        "change_pct": change_pct,
+        "high": high,
+        "low": low,
+        "ema6": ema6,
+        "ema12": ema12,
+        "sma20": sma20,
+        "rsi14": rsi14,
+        "status": status,
+        "unit": unit,
+        "text": text
     }
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
