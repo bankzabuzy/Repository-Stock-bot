@@ -72,7 +72,7 @@ def report_file(filename):
 
 @app.route("/line/webhook", methods=["POST"])
 def line_webhook():        
-    return "OK"
+   
     
 WATCHLIST = os.getenv("WATCHLIST", "").split(",")
 
