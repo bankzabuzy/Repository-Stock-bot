@@ -387,3 +387,16 @@ def create_report_image(result):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+    import threading
+import time
+
+def alert_loop():
+    while True:
+        try:
+            check_alerts()
+        except Exception as e:
+            print("ALERT ERROR:", e)
+
+        time.sleep(300)  # 5 นาที
+
+threading.Thread(target=alert_loop, daemon=True).start()
