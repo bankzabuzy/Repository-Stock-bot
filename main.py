@@ -225,12 +225,7 @@ def td_get_series(asset):
         except Exception:
             pass
 
-    if asset["asset_type"] == "GOLD":
-        rate = usd_to_thb()
-        price *= rate
-        high *= rate
-        low *= rate
-        prev_close *= rate
+    
         
     return closes, volumes
 
@@ -359,9 +354,10 @@ def analyze_asset(user_text):
     rsi_text = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
 
     gold_note = ""
-    if asset["asset_type"] == "GOLD":
-        gold_note = "\nหมายเหตุทองคำ: ราคาแสดงเป็นเงินบาทต่อ 1 ออนซ์ จาก XAU/USD × USD/THB"
-        gold_baht_price = price / 31.1035 * 15.244 if asset["asset_type"] == "GOLD" else 0
+    gold_baht_price = price / 31.1035 * 15.244 if asset["asset_type"] == "GOLD" else 0
+
+if asset["asset_type"] == "GOLD":
+    gold_note = "\nหมายเหตุทองคำ: ราคา Spot แสดงเป็นเงินบาทต่อ 1 ออนซ์ ส่วนราคาทองไทยเป็นราคาประมาณต่อ 1 บาททองคำ"
     text = f"""[{asset['display']}] รายงานราคาปัจจุบัน
 
 ราคา: {unit}{price:,.2f}
