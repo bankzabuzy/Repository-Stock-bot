@@ -8,6 +8,8 @@ from pathlib import Path
 
 import requests
 from flask import Flask, request, abort, send_from_directory
+import matplotlib.pyplot as plt
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
