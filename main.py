@@ -148,7 +148,7 @@ def normalize_asset(user_text):
             "asset_type": "GOLD"
         }
 
-    if key in THAI_SYMBOL_MAP:
+    
     if key in THAI_SYMBOL_MAP:
     symbol, exchange, currency = THAI_SYMBOL_MAP[key]
     return {
