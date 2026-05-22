@@ -229,7 +229,7 @@ def analyze_asset(user_text):
     ema12 = ema(closes, 12) if closes else None
     sma20 = sma(closes, 20) if closes else None
     rsi14 = rsi(closes, 14) if closes else None
-ai_view = ai_trend_analysis(price, ema6, ema12, sma20, rsi14)
+    ai_view = ai_trend_analysis(price, ema6, ema12, sma20, rsi14)
     buy1 = round(price * 0.99, 2)
     buy2 = round(price * 0.97, 2)
     buy3 = round(price * 0.95, 2)
