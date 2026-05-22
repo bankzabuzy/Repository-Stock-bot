@@ -64,7 +64,7 @@ def health():
     return "OK"
 @app.route("/test-alert")
 def test_alert():
-    push_line(LINE_USER_ID, "✅ ทดสอบแจ้งเตือน LINE สำเร็จ")
+    reply_line(LINE_USER_ID, "✅ ทดสอบแจ้งเตือน LINE สำเร็จ", None)
     return "OK"
 @app.route("/reports/<path:filename>")
 def report_file(filename):
