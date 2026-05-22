@@ -203,7 +203,15 @@ def fmt(value, unit):
     if value is None:
         return "N/A"
     return f"{unit}{value:,.2f}"
-
+def ai_trend_analysis(price, ema6, ema12, sma20, rsi14):
+    if ema6 and ema12 and sma20 and rsi14:
+        if price > sma20 and ema6 > ema12 and 45 <= rsi14 <= 70:
+            return "Bullish / แนวโน้มขาขึ้น"
+        elif price < sma20 and ema6 < ema12 and rsi14 < 50:
+            return "Bearish / แนวโน้มขาลง"
+        else:
+            return "Sideway / แกว่งตัว รอเลือกทาง"
+    return "Sideway / ข้อมูลยังไม่พอ"
 def analyze_asset(user_text):
     asset = normalize_asset(user_text)
     quote = td_get_quote(asset)
@@ -221,7 +229,7 @@ def analyze_asset(user_text):
     ema12 = ema(closes, 12) if closes else None
     sma20 = sma(closes, 20) if closes else None
     rsi14 = rsi(closes, 14) if closes else None
-
+ai_view = ai_trend_analysis(price, ema6, ema12, sma20, rsi14)
     buy1 = round(price * 0.99, 2)
     buy2 = round(price * 0.97, 2)
     buy3 = round(price * 0.95, 2)
@@ -266,6 +274,7 @@ RSI 14: {rsi_text}
 จุดคุมความเสี่ยง: ต่ำกว่า {unit}{stop_loss:,.2f}
 
 สรุป: {status}
+AI วิเคราะห์: {ai_view}
 อัปเดต: {now_text()}
 
 หมายเหตุ: เป็นข้อมูลเชิงระบบ ไม่ใช่คำแนะนำการลงทุนเฉพาะบุคคล"""
