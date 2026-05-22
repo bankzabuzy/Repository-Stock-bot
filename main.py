@@ -85,9 +85,20 @@ def line_webhook():
 
         try:
             result = analyze_asset(user_text)
-            image_path = create_report_image(result)
-            image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
-            reply_line(reply_token, result["text"], image_url)
+
+prices = [
+    result["price"] * 0.97,
+    result["price"] * 0.99,
+    result["price"],
+    result["price"] * 1.01,
+    result["price"] * 1.02
+]
+
+chart_file = create_chart(user_text.upper(), prices)
+
+image_path = create_report_image(result)
+image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
+reply_line(reply_token, result["text"], image_url)
         except Exception as e:
             print("ERROR:", repr(e))
             reply_line(reply_token, f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, GOLD\n\nError: {e}", None)
