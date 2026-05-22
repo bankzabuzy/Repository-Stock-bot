@@ -86,13 +86,16 @@ def line_webhook():
         try:
             result = analyze_asset(user_text)
 
-            prices, _ = td_get_series(result["asset"])
+prices, _ = td_get_series(result["asset"])
+prices = prices[-60:]
 
-            chart_file = create_chart(user_text.upper(), prices)
+chart_file = create_chart(user_text.upper(), prices)
 
-            image_path = Path(chart_file)
+image_path = Path(chart_file)
 
-            image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
+image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
+
+reply_line(reply_token, result["text"], image_url)
 
             reply_line(reply_token, result["text"], image_url)
 
@@ -155,7 +158,7 @@ def td_get_quote(asset):
     return data
 
 def td_get_series(asset):
-    params = {"symbol": asset["symbol"], "interval": "15min", "outputsize": 80, "apikey": TWELVEDATA_API_KEY}
+    params = {"symbol": asset["symbol"], "interval": "15min", "outputsize": 120, "apikey": TWELVEDATA_API_KEY}
     if asset.get("exchange"):
         params["exchange"] = asset["exchange"]
 
