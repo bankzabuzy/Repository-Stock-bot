@@ -3,7 +3,7 @@ import hmac
 import hashlib
 import base64
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -39,9 +39,9 @@ THAI_SYMBOL_MAP = {
 }
 
 GOLD_WORDS = {"GOLD", "ทอง", "XAUUSD", "XAU/USD"}
-
 def now_text():
-    from datetime import datetime, timedelta
+    thai_time = datetime.utcnow() + timedelta(hours=7)
+    return thai_time.strftime("%d/%m/%Y %H:%M")
 def create_chart(symbol, prices):
     plt.figure(figsize=(8,4))
 
