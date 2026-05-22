@@ -92,7 +92,7 @@ def line_webhook():
             image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
             reply_line(reply_token, result["text"], image_url)
 
-       except Exception as e:
+    except Exception as e:       
             print("ERROR:", repr(e))
             
                 
