@@ -1,4 +1,4 @@
-yfinance
+flask
 requests
-schedule
-pytz
+pillow
+gunicorn
