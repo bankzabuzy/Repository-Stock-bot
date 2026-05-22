@@ -150,8 +150,8 @@ def normalize_asset(user_text):
 
     if key in THAI_SYMBOL_MAP:
     if key in THAI_SYMBOL_MAP:
-        symbol, exchange, currency = THAI_SYMBOL_MAP[key]
-        return {
+    symbol, exchange, currency = THAI_SYMBOL_MAP[key]
+    return {
             "display": f"{symbol}.BKK",
             "symbol": f"{symbol}.BKK",
             "exchange": None,
