@@ -342,7 +342,6 @@ def analyze_asset(user_text):
     stop_loss = round(price * 0.93, 2)
 
     status = "รอสังเกตการณ์"
-
     if ema6 and ema12 and ema6 > ema12 and (rsi14 is None or rsi14 < 70):
         status = "โมเมนตัมบวก / รอย่อซื้อ"
     elif rsi14 and rsi14 >= 70:
@@ -351,13 +350,18 @@ def analyze_asset(user_text):
         status = "โมเมนตัมอ่อน / รอฐานชัด"
 
     unit = "฿" if asset["currency"] == "THB" else "$"
+    if asset["asset_type"] == "GOLD":
+        unit = "฿"
+
     rsi_text = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
 
     gold_note = ""
     gold_baht_price = price / 31.1035 * 15.244 if asset["asset_type"] == "GOLD" else 0
     gold_factor = 15.244 / 31.1035 if asset["asset_type"] == "GOLD" else 1
-if asset["asset_type"] == "GOLD":
-    gold_note = "\nหมายเหตุทองคำ: ราคา Spot แสดงเป็นเงินบาทต่อ 1 ออนซ์ ส่วนราคาทองไทยเป็นราคาประมาณต่อ 1 บาททองคำ"
+
+    if asset["asset_type"] == "GOLD":
+        gold_note = "\nหมายเหตุทองคำ: ราคา Spot แสดงเป็นเงินบาทต่อ 1 ออนซ์ ส่วนราคาทองไทยเป็นราคาประมาณต่อ 1 บาททองคำ"
+
     text = f"""[{asset['display']}] รายงานราคาปัจจุบัน
 
 ราคา: {unit}{price:,.2f}
@@ -391,18 +395,18 @@ AI วิเคราะห์: {ai_view}
 หมายเหตุ: เป็นข้อมูลเชิงระบบ ไม่ใช่คำแนะนำการลงทุนเฉพาะบุคคล"""
 
     return {
-            "asset": asset,
-            "price": price,
-            "change_pct": change_pct,
-            "high": high,
-            "low": low,
-            "ema6": ema6,
-            "ema12": ema12,
-            "sma20": sma20,
-            "rsi14": rsi14,
-            "status": status,
-            "unit": unit,
-            "text": text
+        "asset": asset,
+        "price": price,
+        "change_pct": change_pct,
+        "high": high,
+        "low": low,
+        "ema6": ema6,
+        "ema12": ema12,
+        "sma20": sma20,
+        "rsi14": rsi14,
+        "status": status,
+        "unit": unit,
+        "text": text
     }
 
 if __name__ == "__main__":
