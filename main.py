@@ -64,7 +64,7 @@ def health():
     return "OK"
 @app.route("/test-alert")
 def test_alert():
-    reply_line(LINE_USER_ID, "✅ ทดสอบแจ้งเตือน LINE สำเร็จ", None)
+    push_line(LINE_USER_ID, "✅ ทดสอบแจ้งเตือน LINE สำเร็จ")
     return "OK"
 @app.route("/reports/<path:filename>")
 def report_file(filename):
@@ -401,3 +401,17 @@ def alert_loop():
         time.sleep(21600)  # 5 นาที
 
 threading.Thread(target=alert_loop, daemon=True).start()
+def push_line(to, text):
+    r = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "to": to,
+            "messages": [{"type": "text", "text": text}]
+        },
+        timeout=20
+    )
+    print("LINE push:", r.status_code, r.text)
