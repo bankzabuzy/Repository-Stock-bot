@@ -152,7 +152,7 @@ def normalize_asset(user_text):
         symbol, exchange, currency = THAI_SYMBOL_MAP[key]
         return {
             "display": f"{symbol}.SET",
-            "symbol": f"{symbol}.SET",
+            "symbol": symbol,
             "exchange": "SET",
             "currency": currency,
             "asset_type": "THAI_STOCK"
@@ -180,12 +180,16 @@ def td_get_quote(asset):
     if not TWELVEDATA_API_KEY:
         raise RuntimeError("ยังไม่ได้ตั้งค่า TWELVEDATA_API_KEY")
 
+    symbol = asset["symbol"]
+
     params = {
-        "symbol": asset["symbol"],
+        "symbol": symbol,
         "apikey": TWELVEDATA_API_KEY
     }
 
-    if asset.get("exchange"):
+    if asset["asset_type"] == "THAI_STOCK":
+        params["exchange"] = "SET"
+    elif asset.get("exchange"):
         params["exchange"] = asset["exchange"]
 
     r = requests.get("https://api.twelvedata.com/quote", params=params, timeout=20)
