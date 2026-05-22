@@ -96,7 +96,7 @@ def line_webhook():
 
             chart_file = create_chart(user_text.upper(), prices)
 
-            image_path = create_report_image(result)
+            image_path = Path(chart_file)
 
             image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
 
