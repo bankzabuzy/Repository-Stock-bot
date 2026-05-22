@@ -113,11 +113,10 @@ def line_webhook():
 
         except Exception as e:
             print("ERROR:", repr(e))
-            reply_line(
-                reply_token,
-                f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\nError: {e}",
-                None
-            )
+            push_line(
+    LINE_USER_ID,
+    f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\nError: {e}"
+)
 
     return "OK"
 
