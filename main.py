@@ -68,35 +68,55 @@ def report_file(filename):
     return send_from_directory(REPORT_DIR, filename)
 
 @app.route("/line/webhook", methods=["POST"])
-def line_webhook():
-    verify_line_signature()
-    body = request.get_json(force=True, silent=True) or {}
-    events = body.get("events", [])
+def line_webhook():        
+    return "OK"
+    
+WATCHLIST = os.getenv("WATCHLIST", "").split(",")
 
-    for event in events:
-        if event.get("type") != "message":
-            continue
-        message = event.get("message", {})
-        if message.get("type") != "text":
-            continue
+last_alerts = {}
 
-        reply_token = event.get("replyToken")
-        user_text = message.get("text", "").strip()
+def check_alerts():
+    global last_alerts
+
+    for symbol in WATCHLIST:
+        symbol = symbol.strip()
 
         try:
-            result = analyze_asset(user_text)
-            prices, _ = td_get_series(result["asset"])
-            prices = prices[-60:]
-            chart_file = create_chart(user_text.upper(), prices)
-            image_path = Path(chart_file)
-            image_url = f"{PUBLIC_BASE_URL}/reports/{image_path.name}" if PUBLIC_BASE_URL else None
-            reply_line(reply_token, result["text"], image_url)
+            result = analyze_asset(symbol)
 
-        except Exception as e:       
-            print("ERROR:", repr(e))
-            
-                
-    return "OK"
+            text = result["text"]
+
+            alerts = []
+
+            if "Bullish" in text:
+                alerts.append("📈 Bullish")
+
+            if "Bearish" in text:
+                alerts.append("📉 Bearish")
+
+            if "RSI 14" in text:
+                alerts.append("🔥 RSI Signal")
+
+            if "EMA 6" in text and "EMA 12" in text:
+                alerts.append("⚡ EMA Cross")
+
+            if alerts:
+                alert_text = f"""
+🚨 STOCK ALERT
+
+หุ้น: {symbol}
+
+{chr(10).join(alerts)}
+
+เวลา: {now_text()}
+"""
+
+                if last_alerts.get(symbol) != alert_text:
+                    push_line(LINE_USER_ID, alert_text)
+                    last_alerts[symbol] = alert_text
+
+        except Exception as e:
+            print("ALERT ERROR:", e)
 
 def verify_line_signature():
     if not LINE_CHANNEL_SECRET:
