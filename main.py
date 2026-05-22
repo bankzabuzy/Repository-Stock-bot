@@ -42,7 +42,23 @@ GOLD_WORDS = {"GOLD", "ทอง", "XAUUSD", "XAU/USD"}
 
 def now_text():
     return datetime.now().strftime("%d/%m/%Y %H:%M")
+def create_chart(symbol, prices):
+    plt.figure(figsize=(8,4))
 
+    df = pd.DataFrame(prices, columns=["price"])
+
+    plt.plot(df["price"])
+
+    plt.title(f"{symbol} Price Chart")
+    plt.xlabel("Time")
+    plt.ylabel("Price")
+
+    filename = f"reports/{symbol}.png"
+
+    plt.savefig(filename)
+    plt.close()
+
+    return filename
 @app.route("/health")
 def health():
     return "OK"
