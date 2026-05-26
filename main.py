@@ -40,6 +40,14 @@ ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
 AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
+# Auto Signal Pro
+ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
+SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
+STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
+STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
+
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
@@ -1815,7 +1823,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.3.3 PT Station Oil Default
+    return """V7.4 Auto Signal Pro
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1862,7 +1870,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.3.3 PT Station Oil Default",
+        "service": "AI Market LINE Bot V7.4 Auto Signal Pro",
         "time_th": now_text(),
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
@@ -1911,15 +1919,34 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.3.3 PT Station Oil Default</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.4 Auto Signal Pro</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
 
 
-@app.route("/oil-test", methods=["GET"])
+@app.route("/oil-test", "/signal-status", methods=["GET"])
 def oil_test():
     return jsonify(get_thai_oil_prices())
+
+
+
+@app.route("/signal-status", methods=["GET"])
+def signal_status():
+    return jsonify({
+        "enable_auto_alerts": ENABLE_AUTO_ALERTS,
+        "watchlist": WATCHLIST,
+        "alert_user_ids_count": len(ALERT_USER_IDS),
+        "signal_scan_seconds": SIGNAL_SCAN_SECONDS,
+        "enable_us_session_only": ENABLE_US_SESSION_ONLY,
+        "us_session_start_th": US_SESSION_START_TH,
+        "us_session_end_th": US_SESSION_END_TH,
+        "strong_call_score": STRONG_CALL_SCORE,
+        "strong_put_score": STRONG_PUT_SCORE,
+        "auto_alert_min_score": AUTO_ALERT_MIN_SCORE,
+        "auto_alert_max_score": AUTO_ALERT_MAX_SCORE,
+        "time_th": now_text(),
+    })
 
 
 @app.route("/webhook", methods=["POST"])
@@ -1943,6 +1970,174 @@ def webhook():
     return "OK", 200
 
 
+
+# ============================================================
+# AUTO SIGNAL PRO
+# ============================================================
+def parse_hhmm(value):
+    try:
+        hh, mm = value.split(":")
+        return int(hh), int(mm)
+    except Exception:
+        return 0, 0
+
+
+def now_th_datetime():
+    return datetime.utcnow() + timedelta(hours=7)
+
+
+def is_in_time_window(now_dt, start_hhmm, end_hhmm):
+    sh, sm = parse_hhmm(start_hhmm)
+    eh, em = parse_hhmm(end_hhmm)
+
+    now_minutes = now_dt.hour * 60 + now_dt.minute
+    start_minutes = sh * 60 + sm
+    end_minutes = eh * 60 + em
+
+    if start_minutes <= end_minutes:
+        return start_minutes <= now_minutes <= end_minutes
+
+    # overnight session e.g. 21:30 to 04:00
+    return now_minutes >= start_minutes or now_minutes <= end_minutes
+
+
+def should_scan_symbol_by_session(asset):
+    if not ENABLE_US_SESSION_ONLY:
+        return True
+
+    # Always allow Thai/gold/oil style checks if in watchlist, but US session filter applies to US stocks/options.
+    if asset.get("asset_type") != "US_STOCK":
+        return True
+
+    return is_in_time_window(now_th_datetime(), US_SESSION_START_TH, US_SESSION_END_TH)
+
+
+def signal_type_from_analysis(asset, analysis):
+    score = analysis.get("score", 50)
+    if asset.get("asset_type") == "US_STOCK":
+        if score >= STRONG_CALL_SCORE:
+            return "STRONG_CALL"
+        if score <= STRONG_PUT_SCORE:
+            return "STRONG_PUT"
+    else:
+        if score >= AUTO_ALERT_MIN_SCORE:
+            return "BUY"
+        if score <= AUTO_ALERT_MAX_SCORE:
+            return "SELL"
+    return "NONE"
+
+
+def build_auto_signal_message(symbol, asset, analysis):
+    price = analysis.get("price")
+    atr = analysis.get("atr") or (price * 0.015 if price else None)
+    score = analysis.get("score")
+    prob = analysis.get("probability")
+    regime = analysis.get("regime")
+    alignment = analysis.get("alignment")
+    price_label = "$" if asset.get("currency") == "USD" else "฿"
+
+    if not price or not atr:
+        return None
+
+    sig = signal_type_from_analysis(asset, analysis)
+
+    if sig == "STRONG_CALL":
+        entry_low = price - atr * 0.20
+        entry_high = price + atr * 0.10
+        sl = price - atr * 0.90
+        tp1 = price + atr * 0.80
+        tp2 = price + atr * 1.50
+        tp3 = price + atr * 2.20
+        return f"""🟢 STRONG CALL SIGNAL
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+ราคา: {price_label}{fmt_num(price)}
+AI Score: {score}/100
+Probability: {prob}%
+Regime: {regime}
+Alignment: {alignment}
+
+Entry Zone:
+{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
+
+SL:
+{price_label}{fmt_num(sl)}
+
+TP1:
+{price_label}{fmt_num(tp1)}
+
+TP2:
+{price_label}{fmt_num(tp2)}
+
+TP3:
+{price_label}{fmt_num(tp3)}
+
+เหตุผลหลัก:
+{chr(10).join("- " + r for r in analysis.get("reasons", [])[:4])}
+
+หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
+
+    if sig == "STRONG_PUT":
+        entry_low = price - atr * 0.10
+        entry_high = price + atr * 0.20
+        sl = price + atr * 0.90
+        tp1 = price - atr * 0.80
+        tp2 = price - atr * 1.50
+        tp3 = price - atr * 2.20
+        return f"""🔴 STRONG PUT SIGNAL
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+ราคา: {price_label}{fmt_num(price)}
+AI Score: {score}/100
+Probability: {prob}%
+Regime: {regime}
+Alignment: {alignment}
+
+Entry Zone:
+{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
+
+SL:
+{price_label}{fmt_num(sl)}
+
+TP1:
+{price_label}{fmt_num(tp1)}
+
+TP2:
+{price_label}{fmt_num(tp2)}
+
+TP3:
+{price_label}{fmt_num(tp3)}
+
+เหตุผลหลัก:
+{chr(10).join("- " + r for r in analysis.get("reasons", [])[:4])}
+
+หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
+
+    if sig in {"BUY", "SELL"}:
+        direction = "🟢 BUY ALERT" if sig == "BUY" else "🔴 SELL ALERT"
+        return f"""{direction}
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+ราคา: {price_label}{fmt_num(price)}
+AI Score: {score}/100
+มุมมอง: {analysis.get('bias')}
+Regime: {regime}
+
+แนวรับ: {price_label}{fmt_num(analysis.get('support'))}
+แนวต้าน: {price_label}{fmt_num(analysis.get('resistance'))}
+SL: {price_label}{fmt_num(analysis.get('stop_loss'))}
+TP: {price_label}{fmt_num(analysis.get('take_profit'))}
+
+หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
+
+    return None
+
 # ============================================================
 # AUTO ALERTS
 # ============================================================
@@ -1964,19 +2159,41 @@ def auto_alert_loop():
                 for symbol in WATCHLIST:
                     try:
                         asset = normalize_asset(symbol)
+
+                        if not should_scan_symbol_by_session(asset):
+                            continue
+
                         quote, closes, highs, lows, opens, volumes = get_market_data(asset)
                         analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-                        if should_send_alert(symbol, analysis["score"]):
-                            report = build_asset_report(symbol)
-                            header = f"🚨 BUY/MOMENTUM ALERT: {symbol}\n\n" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else f"⚠️ SELL/WEAKNESS ALERT: {symbol}\n\n"
-                            for user_id in ALERT_USER_IDS:
-                                line_push(user_id, header + report)
+                        sig = signal_type_from_analysis(asset, analysis)
+
+                        if sig != "NONE" and should_send_alert(f"{symbol}:{sig}", analysis["score"]):
+                            message = build_auto_signal_message(symbol, asset, analysis)
+                            if message:
+                                for user_id in ALERT_USER_IDS:
+                                    line_push(user_id, message)
+
+                                save_signal(
+                                    asset["symbol"],
+                                    asset["asset_type"],
+                                    analysis.get("price"),
+                                    analysis.get("score"),
+                                    analysis.get("bias"),
+                                    sig,
+                                    analysis.get("regime"),
+                                    analysis.get("probability"),
+                                    message,
+                                )
+
                         time.sleep(3)
+
                     except Exception as e:
-                        print(f"Auto alert error for {symbol}: {e}")
-            time.sleep(60)
+                        print(f"Auto Signal Pro error for {symbol}: {e}")
+
+            time.sleep(max(30, SIGNAL_SCAN_SECONDS))
+
         except Exception as e:
-            print(f"Auto alert loop error: {e}")
+            print(f"Auto Signal Pro loop error: {e}")
             time.sleep(60)
 
 
