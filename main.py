@@ -224,6 +224,45 @@ def cache_set(key, value):
     CACHE[key] = (time.time(), value)
 
 
+
+# ============================================================
+# DYNAMIC THAI STOCK DETECTION V7.3
+# ============================================================
+def looks_like_stock_symbol(key):
+    return bool(re.fullmatch(r"[A-Z0-9]{1,12}", key))
+
+
+def yahoo_bk_exists(symbol):
+    """Return True if Yahoo Finance has data for SYMBOL.BK.
+    This lets the bot support Thai stocks without maintaining THAI_SYMBOLS manually.
+    """
+    if not looks_like_stock_symbol(symbol):
+        return False
+
+    cache_key = f"YF_BK_EXISTS:{symbol}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return bool(cached)
+
+    # Avoid obvious US ETFs/indices from being tested as Thai first.
+    known_us = {
+        "NVDA", "AAPL", "TSLA", "MSFT", "META", "GOOGL", "GOOG", "AMZN",
+        "NFLX", "AMD", "INTC", "QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ",
+        "SOXL", "SOXS", "PLTR", "COIN", "MSTR", "AVGO", "SMCI"
+    }
+    if symbol in known_us:
+        cache_set(cache_key, False)
+        return False
+
+    try:
+        data = yf.Ticker(f"{symbol}.BK").history(period="10d", interval="1d", auto_adjust=False)
+        exists = data is not None and not data.empty and "Close" in data.columns
+        cache_set(cache_key, exists)
+        return bool(exists)
+    except Exception:
+        cache_set(cache_key, False)
+        return False
+
 # ============================================================
 # ASSET NORMALIZATION
 # ============================================================
@@ -232,20 +271,73 @@ def normalize_asset(user_text):
     key = raw.upper().replace(" ", "")
 
     if raw in GOLD_WORDS or key in GOLD_WORDS:
-        return {"display": "ทองคำ / XAUUSD", "symbol": "XAU/USD", "yf_symbol": "GC=F", "currency": "USD", "asset_type": "GOLD", "news_symbol": "XAU"}
+        return {
+            "display": "ทองคำ / XAUUSD",
+            "symbol": "XAU/USD",
+            "yf_symbol": "GC=F",
+            "currency": "USD",
+            "asset_type": "GOLD",
+            "news_symbol": "XAU",
+        }
 
     if key in US_INDEX_SYMBOLS:
         key = US_INDEX_SYMBOLS[key]
 
     if key.endswith(".BK"):
         key = key.replace(".BK", "")
+        return {
+            "display": f"{key}.BK",
+            "symbol": key,
+            "yf_symbol": f"{key}.BK",
+            "currency": "THB",
+            "asset_type": "THAI_STOCK",
+            "news_symbol": key,
+        }
+
     if key.endswith(".SET"):
         key = key.replace(".SET", "")
+        return {
+            "display": f"{key}.BK",
+            "symbol": key,
+            "yf_symbol": f"{key}.BK",
+            "currency": "THB",
+            "asset_type": "THAI_STOCK",
+            "news_symbol": key,
+        }
 
+    # 1) Known Thai symbols.
     if key in THAI_SYMBOLS:
-        return {"display": f"{key}.BK", "symbol": key, "yf_symbol": f"{key}.BK", "currency": "THB", "asset_type": "THAI_STOCK", "news_symbol": key}
+        return {
+            "display": f"{key}.BK",
+            "symbol": key,
+            "yf_symbol": f"{key}.BK",
+            "currency": "THB",
+            "asset_type": "THAI_STOCK",
+            "news_symbol": key,
+        }
 
-    return {"display": key, "symbol": key, "yf_symbol": key, "currency": "USD", "asset_type": "US_STOCK", "news_symbol": key}
+    # 2) Dynamic Thai detection:
+    # If Yahoo Finance has KEY.BK data, treat it as Thai stock.
+    # This fixes BEAUTY, HANA, DOHOME and future Thai tickers without manually editing THAI_SYMBOLS.
+    if yahoo_bk_exists(key):
+        return {
+            "display": f"{key}.BK",
+            "symbol": key,
+            "yf_symbol": f"{key}.BK",
+            "currency": "THB",
+            "asset_type": "THAI_STOCK",
+            "news_symbol": key,
+        }
+
+    # 3) Otherwise treat as US stock / ETF and use Twelve Data.
+    return {
+        "display": key,
+        "symbol": key,
+        "yf_symbol": key,
+        "currency": "USD",
+        "asset_type": "US_STOCK",
+        "news_symbol": key,
+    }
 
 
 # ============================================================
@@ -542,10 +634,31 @@ def get_market_data(asset):
 
     if asset["asset_type"] == "THAI_STOCK":
         result = yf_get_quote_and_series(asset)
+
     elif asset["asset_type"] == "US_STOCK":
-        quote = td_get_quote(asset)
-        closes, highs, lows, opens, volumes = td_get_series(asset)
-        result = (quote, closes, highs, lows, opens, volumes)
+        try:
+            quote = td_get_quote(asset)
+            closes, highs, lows, opens, volumes = td_get_series(asset)
+            result = (quote, closes, highs, lows, opens, volumes)
+        except Exception as e:
+            # V7.3 safety fallback:
+            # If user typed a Thai ticker not in THAI_SYMBOLS and Yahoo dynamic check failed due timeout,
+            # try SYMBOL.BK one last time before returning Twelve Data error.
+            test_asset = {
+                "display": f"{asset['symbol']}.BK",
+                "symbol": asset["symbol"],
+                "yf_symbol": f"{asset['symbol']}.BK",
+                "currency": "THB",
+                "asset_type": "THAI_STOCK",
+                "news_symbol": asset["symbol"],
+            }
+            try:
+                result = yf_get_quote_and_series(test_asset)
+                # Mutate current asset so downstream report labels correctly.
+                asset.update(test_asset)
+            except Exception:
+                raise e
+
     elif asset["asset_type"] == "GOLD":
         try:
             quote = td_get_quote(asset)
@@ -554,6 +667,7 @@ def get_market_data(asset):
         except Exception as e:
             print("Gold Twelve Data fallback to Yahoo:", e)
             result = yf_get_quote_and_series(asset)
+
     else:
         result = yf_get_quote_and_series(asset)
 
@@ -1553,11 +1667,11 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.2 Oil Thailand + Dividend + Valuation
+    return """V7.3 Dynamic Thai Yahoo + Oil + Dividend + Valuation
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
-หุ้นไทย: SCB, AOT, PTT, HANA, DOHOME, KBANK, CPALL, ADVANC
+หุ้นไทย: SCB, AOT, PTT, HANA, DOHOME, BEAUTY, KBANK, CPALL, ADVANC
 ทองคำ: ทองคำ, GOLD, XAUUSD
 น้ำมันไทย: น้ำมัน, ราคาน้ำมัน, oil
 
@@ -1600,7 +1714,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.2 Oil Thailand + Dividend + Valuation",
+        "service": "AI Market LINE Bot V7.3 Dynamic Thai Yahoo + Oil + Dividend + Valuation",
         "time_th": now_text(),
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
@@ -1649,7 +1763,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.2 Oil Thailand + Dividend + Valuation</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.3 Dynamic Thai Yahoo + Oil + Dividend + Valuation</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
