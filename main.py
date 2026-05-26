@@ -381,4 +381,225 @@ def fetch_news(asset):
             return "ไม่พบข่าวล่าสุดจาก Finnhub", 0
 
         headlines = []
- 
+        for item in items[:3]:
+            headline = item.get("headline")
+            if headline:
+                headlines.append(f"- {headline}")
+
+        return "\n".join(headlines) if headlines else "ไม่มีหัวข้อข่าวสำคัญ", len(headlines)
+
+    except Exception as e:
+        return f"ดึงข่าวไม่สำเร็จ: {e}", 0
+
+
+def build_asset_report(user_text):
+    asset = normalize_asset(user_text)
+    quote = td_get_quote(asset)
+    closes, highs, lows, opens, volumes = td_get_series(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    news_text, news_count = fetch_news(asset)
+
+    currency = asset["currency"]
+    price_label = "$" if currency == "USD" else "฿"
+
+    reasons = analysis["reasons"][:5]
+    if not reasons:
+        reasons = ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
+
+    text = f"""📊 วิเคราะห์ {asset['display']}
+เวลาไทย: {now_text()}
+
+ราคา: {price_label}{fmt_num(analysis['price'])}
+เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
+
+AI Score: {analysis['score']}/100
+มุมมอง: {analysis['bias']}
+
+📈 Technical
+EMA6: {fmt_num(analysis['ema6'])}
+EMA12: {fmt_num(analysis['ema12'])}
+EMA50: {fmt_num(analysis['ema50'])}
+RSI14: {fmt_num(analysis['rsi'])}
+ATR14: {fmt_num(analysis['atr'])}
+
+🎯 โซนราคา
+แนวรับประมาณ: {price_label}{fmt_num(analysis['support'])}
+แนวต้านประมาณ: {price_label}{fmt_num(analysis['resistance'])}
+Stop loss เชิงระบบ: {price_label}{fmt_num(analysis['stop_loss'])}
+Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profit'])}
+
+เหตุผลหลัก:
+{chr(10).join("- " + r for r in reasons)}
+
+📰 ข่าว/บริบท:
+{news_text}
+
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ใช้เพื่อช่วยคัดกรองเท่านั้น"""
+    return text
+
+
+def line_reply(reply_token, text):
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        print("LINE_CHANNEL_ACCESS_TOKEN is missing")
+        return
+
+    url = "https://api.line.me/v2/bot/message/reply"
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": text[:4900]}],
+    }
+
+    requests.post(url, headers=headers, json=payload, timeout=20)
+
+
+def line_push(user_id, text):
+    if not LINE_CHANNEL_ACCESS_TOKEN or not user_id:
+        return
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "to": user_id,
+        "messages": [{"type": "text", "text": text[:4900]}],
+    }
+
+    requests.post(url, headers=headers, json=payload, timeout=20)
+
+
+def verify_line_signature(body, signature):
+    if not LINE_CHANNEL_SECRET:
+        return True
+
+    digest = hmac.new(
+        LINE_CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).digest()
+
+    valid_signature = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(valid_signature, signature or "")
+
+
+def help_text():
+    return """พิมพ์ชื่อสินทรัพย์ที่ต้องการวิเคราะห์ เช่น
+
+NVDA
+AAPL
+TSLA
+QQQ
+SPY
+SCB
+AOT
+PTT
+ทองคำ
+GOLD
+
+คำสั่งพิเศษ:
+watchlist = ดูรายการเฝ้าดู
+help = วิธีใช้งาน"""
+
+
+def handle_message(user_id, text):
+    clean = text.strip()
+
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        return "User นี้ยังไม่ได้รับอนุญาตให้ใช้งานระบบ"
+
+    lower = clean.lower()
+
+    if lower in {"help", "วิธีใช้", "เมนู"}:
+        return help_text()
+
+    if lower == "watchlist":
+        return "รายการเฝ้าดู:\n" + "\n".join(f"- {x}" for x in WATCHLIST)
+
+    try:
+        return build_asset_report(clean)
+    except Exception as e:
+        return (
+            "ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\n"
+            "ลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\n"
+            f"Error: {e}"
+        )
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return {
+        "status": "ok",
+        "service": "AI Market LINE Bot",
+        "time_th": now_text(),
+        "watchlist": WATCHLIST,
+    }
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    body = request.get_data()
+    signature = request.headers.get("X-Line-Signature", "")
+
+    if not verify_line_signature(body, signature):
+        abort(400)
+
+    payload = request.get_json(silent=True) or {}
+
+    for event in payload.get("events", []):
+        event_type = event.get("type")
+        reply_token = event.get("replyToken")
+        source = event.get("source", {})
+        user_id = source.get("userId", "")
+
+        if event_type != "message":
+            continue
+
+        message = event.get("message", {})
+        if message.get("type") != "text":
+            line_reply(reply_token, "ตอนนี้รองรับเฉพาะข้อความเท่านั้นครับ")
+            continue
+
+        user_text = message.get("text", "")
+        response_text = handle_message(user_id, user_text)
+        line_reply(reply_token, response_text)
+
+    return "OK", 200
+
+
+def auto_alert_loop():
+    while True:
+        try:
+            if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+                for symbol in WATCHLIST:
+                    try:
+                        report = build_asset_report(symbol)
+                        header = f"🔔 Auto Alert: {symbol}\n\n"
+                        for user_id in ALERT_USER_IDS:
+                            line_push(user_id, header + report)
+                        time.sleep(3)
+                    except Exception as e:
+                        print(f"Auto alert error for {symbol}: {e}")
+
+            time.sleep(ALERT_EVERY_MINUTES * 60)
+
+        except Exception as e:
+            print(f"Auto alert loop error: {e}")
+            time.sleep(60)
+
+
+if __name__ == "__main__":
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        t = threading.Thread(target=auto_alert_loop, daemon=True)
+        t.start()
+
+    app.run(host="0.0.0.0", port=PORT)
