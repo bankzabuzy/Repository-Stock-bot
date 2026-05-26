@@ -1,26 +1,29 @@
 import os
 import re
 import hmac
-import hashlib
-import base64
+import json
 import time
+import base64
+import hashlib
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify, Response
 
 app = Flask(__name__)
 
-# =========================
-# ENV CONFIG
-# =========================
+# ============================================================
+# V7 HYBRID MAX FREE CONFIG
+# ============================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 PORT = int(os.getenv("PORT", "3000"))
 
 WATCHLIST = [
@@ -29,25 +32,16 @@ WATCHLIST = [
     if x.strip()
 ]
 
-# If empty = everyone can use the bot.
-ALLOWED_USERS = [
-    x.strip()
-    for x in os.getenv("ALLOWED_USERS", "").split(",")
-    if x.strip()
-]
-
-# For push/auto-alert. Put LINE userId / groupId / roomId here.
-ALERT_USER_IDS = [
-    x.strip()
-    for x in os.getenv("ALERT_USER_IDS", "").split(",")
-    if x.strip()
-]
+ALLOWED_USERS = [x.strip() for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()]
+ALERT_USER_IDS = [x.strip() for x in os.getenv("ALERT_USER_IDS", "").split(",") if x.strip()]
 
 ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "false").lower() == "true"
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
-AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "75"))
+AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
-LAST_ALERTS = {}
+
+DB_PATH = os.getenv("DB_PATH", "signals.db")
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -64,19 +58,90 @@ THAI_SYMBOLS = {
     "TISCO", "LH", "MTC", "SAWAD", "TIDLOR", "OSP", "CBG", "TU", "IVL"
 }
 
-GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "XAUUSD", "XAU/USD", "ทองคํา"}
-US_INDEX_SYMBOLS = {
-    "SPX": "SPY",
-    "NASDAQ": "QQQ",
-    "NDX": "QQQ",
-    "DOW": "DIA",
-    "RUSSELL": "IWM",
-}
+GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAUUSD", "XAU/USD"}
+US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
+
+CACHE = {}
 
 
-# =========================
+# ============================================================
+# DATABASE
+# ============================================================
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            asset_type TEXT,
+            price REAL,
+            score INTEGER,
+            bias TEXT,
+            signal_type TEXT,
+            regime TEXT,
+            probability INTEGER,
+            report TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alert_state (
+            symbol TEXT PRIMARY KEY,
+            last_sent_ts REAL NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_signal(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
+    try:
+        conn = db()
+        conn.execute(
+            """INSERT INTO signals
+               (created_at, symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now_text(), symbol, asset_type, price, score, bias, signal_type, regime, probability, report[:4900]),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("save_signal error:", e)
+
+
+def get_last_alert_ts(symbol):
+    try:
+        conn = db()
+        row = conn.execute("SELECT last_sent_ts FROM alert_state WHERE symbol=?", (symbol,)).fetchone()
+        conn.close()
+        return float(row["last_sent_ts"]) if row else 0.0
+    except Exception:
+        return 0.0
+
+
+def set_last_alert_ts(symbol, ts):
+    try:
+        conn = db()
+        conn.execute(
+            "INSERT INTO alert_state(symbol, last_sent_ts) VALUES(?, ?) ON CONFLICT(symbol) DO UPDATE SET last_sent_ts=excluded.last_sent_ts",
+            (symbol, ts),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("set_last_alert_ts error:", e)
+
+
+# ============================================================
 # UTILS
-# =========================
+# ============================================================
 def now_text():
     return (datetime.utcnow() + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
 
@@ -101,18 +166,29 @@ def fmt_num(value, decimals=2):
         return "N/A"
 
 
+def round_strike(price):
+    if price is None:
+        return None
+    if price >= 500:
+        step = 5
+    elif price >= 100:
+        step = 2.5
+    elif price >= 30:
+        step = 1
+    else:
+        step = 0.5
+    return round(price / step) * step
+
+
 def clean_price_text(value):
     if value is None:
         return None
     text = str(value).strip().replace(",", "")
     match = re.search(r"\d+(?:\.\d+)?", text)
-    if not match:
-        return None
-    return safe_float(match.group(0))
+    return safe_float(match.group(0)) if match else None
 
 
 def extract_price_numbers(text):
-    # Extract values like 70,050.00 / 70050 / 70,050
     nums = []
     for m in re.findall(r"\d{2,3},\d{3}(?:\.\d+)?|\d{5,6}(?:\.\d+)?", text):
         v = safe_float(m)
@@ -121,22 +197,30 @@ def extract_price_numbers(text):
     return nums
 
 
-# =========================
+def cache_get(key):
+    item = CACHE.get(key)
+    if not item:
+        return None
+    ts, value = item
+    if time.time() - ts > CACHE_TTL_SECONDS:
+        CACHE.pop(key, None)
+        return None
+    return value
+
+
+def cache_set(key, value):
+    CACHE[key] = (time.time(), value)
+
+
+# ============================================================
 # ASSET NORMALIZATION
-# =========================
+# ============================================================
 def normalize_asset(user_text):
     raw = user_text.strip()
     key = raw.upper().replace(" ", "")
 
     if raw in GOLD_WORDS or key in GOLD_WORDS:
-        return {
-            "display": "ทองคำ / XAUUSD",
-            "symbol": "XAU/USD",
-            "yf_symbol": "GC=F",
-            "currency": "USD",
-            "asset_type": "GOLD",
-            "news_symbol": "XAU",
-        }
+        return {"display": "ทองคำ / XAUUSD", "symbol": "XAU/USD", "yf_symbol": "GC=F", "currency": "USD", "asset_type": "GOLD", "news_symbol": "XAU"}
 
     if key in US_INDEX_SYMBOLS:
         key = US_INDEX_SYMBOLS[key]
@@ -147,30 +231,19 @@ def normalize_asset(user_text):
         key = key.replace(".SET", "")
 
     if key in THAI_SYMBOLS:
-        return {
-            "display": f"{key}.BK",
-            "symbol": key,
-            "yf_symbol": f"{key}.BK",
-            "currency": "THB",
-            "asset_type": "THAI_STOCK",
-            "news_symbol": key,
-        }
+        return {"display": f"{key}.BK", "symbol": key, "yf_symbol": f"{key}.BK", "currency": "THB", "asset_type": "THAI_STOCK", "news_symbol": key}
 
-    return {
-        "display": key,
-        "symbol": key,
-        "yf_symbol": key,
-        "currency": "USD",
-        "asset_type": "US_STOCK",
-        "news_symbol": key,
-    }
+    return {"display": key, "symbol": key, "yf_symbol": key, "currency": "USD", "asset_type": "US_STOCK", "news_symbol": key}
 
 
-# =========================
+# ============================================================
 # DATA SOURCES
-# =========================
+# ============================================================
 def get_usd_thb_rate():
-    # 1) Twelve Data
+    cached = cache_get("USDTHB")
+    if cached:
+        return cached
+
     try:
         if TWELVEDATA_API_KEY:
             r = requests.get(
@@ -179,41 +252,36 @@ def get_usd_thb_rate():
                 headers=REQUEST_HEADERS,
                 timeout=15,
             )
-            data = r.json()
-            rate = safe_float(data.get("rate"))
+            rate = safe_float(r.json().get("rate"))
             if rate:
+                cache_set("USDTHB", rate)
                 return rate
     except Exception:
         pass
 
-    # 2) Yahoo Finance fallback
     try:
         data = yf.Ticker("USDTHB=X").history(period="5d", interval="1d")
         if not data.empty:
-            return float(data["Close"].dropna().iloc[-1])
+            rate = float(data["Close"].dropna().iloc[-1])
+            cache_set("USDTHB", rate)
+            return rate
     except Exception:
         pass
 
-    # 3) Safe fallback
     return 36.50
 
 
 def gold_thb_per_baht_weight(xauusd_price, usd_thb_rate):
-    # 1 baht gold weight ≈ 15.244 g, 1 troy ounce = 31.1034768 g
     if not xauusd_price or not usd_thb_rate:
         return None
     return xauusd_price * usd_thb_rate * (15.244 / 31.1034768)
 
 
 def get_goldtraders_price():
-    """Try to fetch Thai gold price from Gold Traders Association website.
-    Returns dict:
-      bar_buy, bar_sell, ornament_buy, ornament_sell, source, updated_at
-    or None if parsing failed.
+    cached = cache_get("GOLDTRADERS")
+    if cached:
+        return cached
 
-    Note: if GoldTraders changes HTML/JS rendering, this function may fail.
-    The bot then falls back to calculated XAUUSD × USDTHB estimate.
-    """
     urls = [
         "https://www.goldtraders.or.th/",
         "https://www.goldtraders.or.th/Default.aspx",
@@ -226,36 +294,17 @@ def get_goldtraders_price():
             if r.status_code != 200:
                 continue
 
-            html = r.text
-            soup = BeautifulSoup(html, "html.parser")
+            soup = BeautifulSoup(r.text, "html.parser")
             text = soup.get_text(" ", strip=True)
 
-            # Direct ID parsing for old ASP.NET GoldTraders site.
-            # IDs have changed before, so this is best-effort.
+            parsed = {}
             id_candidates = {
-                "bar_buy": [
-                    "DetailPlace_uc_goldprices1_lblBLSell",
-                    "DetailPlace_uc_goldprices1_lblBLBuy",
-                    "lblBLSell",
-                    "lblBLBuy",
-                ],
-                "bar_sell": [
-                    "DetailPlace_uc_goldprices1_lblBLSell2",
-                    "DetailPlace_uc_goldprices1_lblBLSell",
-                    "lblBLSell2",
-                    "lblBLSell",
-                ],
-                "ornament_buy": [
-                    "DetailPlace_uc_goldprices1_lblOMBuy",
-                    "lblOMBuy",
-                ],
-                "ornament_sell": [
-                    "DetailPlace_uc_goldprices1_lblOMSell",
-                    "lblOMSell",
-                ],
+                "bar_buy": ["DetailPlace_uc_goldprices1_lblBLBuy", "lblBLBuy"],
+                "bar_sell": ["DetailPlace_uc_goldprices1_lblBLSell", "lblBLSell"],
+                "ornament_buy": ["DetailPlace_uc_goldprices1_lblOMBuy", "lblOMBuy"],
+                "ornament_sell": ["DetailPlace_uc_goldprices1_lblOMSell", "lblOMSell"],
             }
 
-            parsed = {}
             for key, ids in id_candidates.items():
                 for id_ in ids:
                     tag = soup.find(id=id_)
@@ -264,17 +313,9 @@ def get_goldtraders_price():
                         parsed[key] = value
                         break
 
-            # Text-pattern parsing fallback around Thai labels.
             if "bar_buy" not in parsed or "bar_sell" not in parsed:
-                # Try to find numbers around common labels.
-                normalized = text.replace("\xa0", " ")
-                numbers = extract_price_numbers(normalized)
-
-                # In many GoldTraders pages, 4 core prices appear close together:
-                # gold bar buy, gold bar sell, ornament buy, ornament sell.
-                # We avoid over-claiming exact fields if order cannot be determined.
+                numbers = extract_price_numbers(text)
                 if len(numbers) >= 2:
-                    # Pick plausible adjacent prices with small spread.
                     candidates = []
                     for i in range(len(numbers) - 1):
                         a, b = numbers[i], numbers[i + 1]
@@ -290,11 +331,10 @@ def get_goldtraders_price():
                             parsed.setdefault("ornament_sell", numbers[idx + 3])
 
             if parsed.get("bar_buy") and parsed.get("bar_sell"):
-                # Basic sanity checks.
                 if parsed["bar_sell"] < parsed["bar_buy"]:
                     parsed["bar_buy"], parsed["bar_sell"] = parsed["bar_sell"], parsed["bar_buy"]
 
-                return {
+                result = {
                     "bar_buy": parsed.get("bar_buy"),
                     "bar_sell": parsed.get("bar_sell"),
                     "ornament_buy": parsed.get("ornament_buy"),
@@ -302,8 +342,10 @@ def get_goldtraders_price():
                     "source": "สมาคมค้าทองคำ / GoldTraders",
                     "updated_at": now_text(),
                     "raw_url": url,
+                    "is_estimate": False,
                 }
-
+                cache_set("GOLDTRADERS", result)
+                return result
         except Exception as e:
             print("GoldTraders fetch error:", url, e)
 
@@ -311,22 +353,16 @@ def get_goldtraders_price():
 
 
 def get_thai_gold_price_or_estimate(xauusd_price, usd_thb_rate):
-    real_price = get_goldtraders_price()
-    if real_price:
-        real_price["is_estimate"] = False
-        return real_price
+    real = get_goldtraders_price()
+    if real:
+        return real
 
-    # Fallback estimate
     bar_sell = gold_thb_per_baht_weight(xauusd_price, usd_thb_rate)
-    bar_buy = bar_sell - 100 if bar_sell else None
-    ornament_sell = bar_sell + 850 if bar_sell else None
-    ornament_buy = bar_buy - 700 if bar_buy else None
-
     return {
-        "bar_buy": bar_buy,
+        "bar_buy": bar_sell - 100 if bar_sell else None,
         "bar_sell": bar_sell,
-        "ornament_buy": ornament_buy,
-        "ornament_sell": ornament_sell,
+        "ornament_buy": bar_sell - 800 if bar_sell else None,
+        "ornament_sell": bar_sell + 850 if bar_sell else None,
         "source": "คำนวณประมาณจาก XAUUSD × USD/THB",
         "updated_at": now_text(),
         "raw_url": None,
@@ -335,10 +371,7 @@ def get_thai_gold_price_or_estimate(xauusd_price, usd_thb_rate):
 
 
 def td_params(asset, interval=None, outputsize=None):
-    params = {
-        "symbol": asset["symbol"],
-        "apikey": TWELVEDATA_API_KEY,
-    }
+    params = {"symbol": asset["symbol"], "apikey": TWELVEDATA_API_KEY}
     if interval:
         params["interval"] = interval
     if outputsize:
@@ -350,17 +383,11 @@ def td_get_quote(asset):
     if not TWELVEDATA_API_KEY:
         raise RuntimeError("ยังไม่ได้ตั้งค่า TWELVEDATA_API_KEY")
 
-    r = requests.get(
-        "https://api.twelvedata.com/quote",
-        params=td_params(asset),
-        headers=REQUEST_HEADERS,
-        timeout=20,
-    )
+    r = requests.get("https://api.twelvedata.com/quote", params=td_params(asset), headers=REQUEST_HEADERS, timeout=20)
     data = r.json()
 
     if data.get("status") == "error" or "close" not in data:
-        msg = data.get("message", "")
-        raise RuntimeError(f"ไม่พบข้อมูลจาก Twelve Data สำหรับ {asset['display']}\nรายละเอียด: {msg}")
+        raise RuntimeError(f"ไม่พบข้อมูลจาก Twelve Data สำหรับ {asset['display']}\nรายละเอียด: {data.get('message', '')}")
 
     return {
         "close": safe_float(data.get("close")),
@@ -378,34 +405,29 @@ def td_get_series(asset, interval="15min", outputsize=160):
         timeout=20,
     )
     data = r.json()
-
     if data.get("status") == "error" or "values" not in data:
         return [], [], [], [], []
 
     values = list(reversed(data["values"]))
     closes, highs, lows, opens, volumes = [], [], [], [], []
-
     for v in values:
         close = safe_float(v.get("close"))
         high = safe_float(v.get("high"))
         low = safe_float(v.get("low"))
         open_ = safe_float(v.get("open"))
         volume = safe_float(v.get("volume"), 0)
-
         if close is not None and high is not None and low is not None and open_ is not None:
             closes.append(close)
             highs.append(high)
             lows.append(low)
             opens.append(open_)
             volumes.append(volume or 0)
-
     return closes, highs, lows, opens, volumes
 
 
-def yf_get_quote_and_series(asset):
+def yf_get_quote_and_series(asset, period="3mo", interval="1d"):
     ticker = yf.Ticker(asset["yf_symbol"])
-    data = ticker.history(period="3mo", interval="1d", auto_adjust=False)
-
+    data = ticker.history(period=period, interval=interval, auto_adjust=False)
     if data.empty:
         raise RuntimeError(f"Yahoo Finance ไม่พบข้อมูลสำหรับ {asset['display']}")
 
@@ -415,46 +437,67 @@ def yf_get_quote_and_series(asset):
     lows = [float(x) for x in data["Low"].tolist()]
     opens = [float(x) for x in data["Open"].tolist()]
     volumes = [float(x) for x in data["Volume"].fillna(0).tolist()]
-
     price = closes[-1] if closes else None
     prev = closes[-2] if len(closes) >= 2 else None
     change = price - prev if price is not None and prev is not None else None
     percent_change = (change / prev * 100) if change is not None and prev else None
-
-    quote = {
-        "close": price,
-        "previous_close": prev,
-        "change": change,
-        "percent_change": percent_change,
-    }
-    return quote, closes, highs, lows, opens, volumes
+    return {"close": price, "previous_close": prev, "change": change, "percent_change": percent_change}, closes, highs, lows, opens, volumes
 
 
 def get_market_data(asset):
-    if asset["asset_type"] == "THAI_STOCK":
-        return yf_get_quote_and_series(asset)
+    key = f"MD:{asset['asset_type']}:{asset['symbol']}"
+    cached = cache_get(key)
+    if cached:
+        return cached
 
-    if asset["asset_type"] == "US_STOCK":
+    if asset["asset_type"] == "THAI_STOCK":
+        result = yf_get_quote_and_series(asset)
+    elif asset["asset_type"] == "US_STOCK":
         quote = td_get_quote(asset)
         closes, highs, lows, opens, volumes = td_get_series(asset)
-        return quote, closes, highs, lows, opens, volumes
-
-    if asset["asset_type"] == "GOLD":
+        result = (quote, closes, highs, lows, opens, volumes)
+    elif asset["asset_type"] == "GOLD":
         try:
             quote = td_get_quote(asset)
             closes, highs, lows, opens, volumes = td_get_series(asset)
-            if closes:
-                return quote, closes, highs, lows, opens, volumes
+            result = (quote, closes, highs, lows, opens, volumes) if closes else yf_get_quote_and_series(asset)
         except Exception as e:
             print("Gold Twelve Data fallback to Yahoo:", e)
-        return yf_get_quote_and_series(asset)
+            result = yf_get_quote_and_series(asset)
+    else:
+        result = yf_get_quote_and_series(asset)
 
-    return yf_get_quote_and_series(asset)
+    cache_set(key, result)
+    return result
 
 
-# =========================
-# INDICATORS
-# =========================
+def get_mtf(asset):
+    """Multi-timeframe summary using best-free available sources."""
+    frames = []
+    if asset["asset_type"] == "US_STOCK":
+        configs = [("15m", "15min"), ("1h", "1h")]
+        for label, interval in configs:
+            try:
+                closes, highs, lows, opens, volumes = td_get_series(asset, interval=interval, outputsize=160)
+                if closes:
+                    frames.append((label, closes, highs, lows, volumes))
+            except Exception:
+                pass
+    else:
+        # Yahoo daily-based fallback for Thai/gold.
+        configs = [("1D", ("3mo", "1d")), ("1W*", ("1y", "1wk"))]
+        for label, (period, interval) in configs:
+            try:
+                _, closes, highs, lows, opens, volumes = yf_get_quote_and_series(asset, period=period, interval=interval)
+                frames.append((label, closes, highs, lows, volumes))
+            except Exception:
+                pass
+    return frames
+
+
+# ============================================================
+# INDICATORS + ENGINE
+# ============================================================
 def ema(values, period):
     if len(values) < period:
         return None
@@ -468,23 +511,15 @@ def ema(values, period):
 def calc_rsi(values, period=14):
     if len(values) < period + 1:
         return None
-
     gains, losses = [], []
     for i in range(-period, 0):
         diff = values[i] - values[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(diff))
-
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
-
     if avg_loss == 0:
         return 100
-
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -492,20 +527,65 @@ def calc_rsi(values, period=14):
 def calc_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
         return None
-
-    true_ranges = []
+    trs = []
     for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
-        )
-        true_ranges.append(tr)
+        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    return sum(trs[-period:]) / period if len(trs) >= period else None
 
-    if len(true_ranges) < period:
+
+def calc_rvol(volumes, period=20):
+    if len(volumes) < period + 1:
         return None
+    avg = sum(volumes[-period-1:-1]) / period
+    return volumes[-1] / avg if avg else None
 
-    return sum(true_ranges[-period:]) / period
+
+def market_regime(price, ema12, ema50, atr, closes):
+    if not price or not ema12 or not ema50 or not atr or len(closes) < 20:
+        return "UNKNOWN"
+    atr_pct = atr / price * 100
+    change_20 = (closes[-1] - closes[-20]) / closes[-20] * 100 if closes[-20] else 0
+    if price > ema12 > ema50 and change_20 > 3 and atr_pct >= 1:
+        return "STRONG UPTREND"
+    if price < ema12 < ema50 and change_20 < -3 and atr_pct >= 1:
+        return "STRONG DOWNTREND"
+    if atr_pct < 1.2:
+        return "RANGE / LOW VOL"
+    if price > ema50:
+        return "UPTREND"
+    if price < ema50:
+        return "DOWNTREND"
+    return "NEUTRAL"
+
+
+def trend_state(closes):
+    e6, e12, e50 = ema(closes, 6), ema(closes, 12), ema(closes, 50)
+    price = closes[-1] if closes else None
+    if price and e6 and e12 and e50:
+        if price > e6 > e12 > e50:
+            return "BULLISH"
+        if price < e6 < e12 < e50:
+            return "BEARISH"
+    return "MIXED"
+
+
+def mtf_alignment(asset):
+    frames = get_mtf(asset)
+    states = []
+    for label, closes, highs, lows, volumes in frames:
+        states.append((label, trend_state(closes)))
+    bulls = sum(1 for _, s in states if s == "BULLISH")
+    bears = sum(1 for _, s in states if s == "BEARISH")
+    total = len(states)
+    if total == 0:
+        return "N/A", []
+    if bulls > bears:
+        summary = f"{bulls}/{total} Bullish"
+    elif bears > bulls:
+        summary = f"{bears}/{total} Bearish"
+    else:
+        summary = f"Mixed {total} TF"
+    return summary, states
 
 
 def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
@@ -519,50 +599,77 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     ema50 = ema(closes, 50)
     rsi = calc_rsi(closes)
     atr = calc_atr(highs, lows, closes)
+    rvol = calc_rvol(volumes)
+    regime = market_regime(price, ema12, ema50, atr, closes)
+    alignment, mtf_states = mtf_alignment(asset)
 
-    score = 50
+    trend_score = 0
+    momentum_score = 0
+    volume_score = 0
+    volatility_score = 0
+
     reasons = []
 
     if price and ema6 and ema12:
         if price > ema6 > ema12:
-            score += 15
+            trend_score += 22
             reasons.append("ราคาอยู่เหนือ EMA6 และ EMA12")
         elif price < ema6 < ema12:
-            score -= 15
+            trend_score -= 22
             reasons.append("ราคาอยู่ใต้ EMA6 และ EMA12")
 
     if ema12 and ema50:
         if ema12 > ema50:
-            score += 10
+            trend_score += 14
             reasons.append("แนวโน้มกลางยังเป็นบวก")
         elif ema12 < ema50:
-            score -= 10
+            trend_score -= 14
             reasons.append("แนวโน้มกลางยังเป็นลบ")
 
     if rsi is not None:
-        if rsi >= 70:
-            score -= 8
+        if 50 <= rsi <= 65:
+            momentum_score += 14
+            reasons.append("RSI อยู่ในโซนโมเมนตัมขาขึ้น")
+        elif rsi >= 72:
+            momentum_score -= 10
             reasons.append("RSI สูง ระวังพักตัว")
         elif rsi <= 30:
-            score += 8
+            momentum_score += 6
             reasons.append("RSI ต่ำ มีโอกาสรีบาวด์")
-        elif 45 <= rsi <= 60:
-            score += 5
-            reasons.append("RSI อยู่ในโซนสมดุล")
+        elif rsi < 45:
+            momentum_score -= 8
+            reasons.append("RSI ต่ำกว่าโซนแข็งแรง")
 
     if percent_change is not None:
         if percent_change > 1:
-            score += 8
+            momentum_score += 9
             reasons.append("โมเมนตัมล่าสุดเป็นบวก")
         elif percent_change < -1:
-            score -= 8
+            momentum_score -= 9
             reasons.append("โมเมนตัมล่าสุดเป็นลบ")
 
-    score = max(0, min(100, score))
+    if rvol is not None:
+        if rvol >= 1.5 and percent_change and percent_change > 0:
+            volume_score += 10
+            reasons.append("Volume หนุนขาขึ้น")
+        elif rvol >= 1.5 and percent_change and percent_change < 0:
+            volume_score -= 10
+            reasons.append("Volume หนุนแรงขาย")
 
-    if score >= 70:
+    if atr and price:
+        atr_pct = atr / price * 100
+        if 0.8 <= atr_pct <= 3.5:
+            volatility_score += 5
+        elif atr_pct > 5:
+            volatility_score -= 8
+            reasons.append("ความผันผวนสูง คุมขนาดไม้")
+
+    raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score
+    score = max(0, min(100, int(raw_score)))
+
+    if score >= 75:
         bias = "BULLISH / ฝั่งซื้อได้เปรียบ"
-    elif score <= 40:
+    elif score <= 35:
         bias = "BEARISH / ฝั่งขายได้เปรียบ"
     else:
         bias = "NEUTRAL / รอดูจังหวะ"
@@ -575,89 +682,142 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     else:
         support = resistance = stop_loss = take_profit = None
 
+    probability = max(40, min(78, 50 + int((score - 50) * 0.55)))
+
     return {
-        "price": price,
-        "previous_close": previous_close,
-        "change": change,
-        "percent_change": percent_change,
-        "ema6": ema6,
-        "ema12": ema12,
-        "ema50": ema50,
-        "rsi": rsi,
-        "atr": atr,
-        "score": score,
-        "bias": bias,
-        "support": support,
-        "resistance": resistance,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
+        "price": price, "previous_close": previous_close, "change": change, "percent_change": percent_change,
+        "ema6": ema6, "ema12": ema12, "ema50": ema50, "rsi": rsi, "atr": atr, "rvol": rvol,
+        "regime": regime, "alignment": alignment, "mtf_states": mtf_states,
+        "score": score, "bias": bias, "probability": probability,
+        "support": support, "resistance": resistance, "stop_loss": stop_loss, "take_profit": take_profit,
         "reasons": reasons,
+        "component_scores": {
+            "trend": trend_score,
+            "momentum": momentum_score,
+            "volume": volume_score,
+            "volatility": volatility_score,
+        },
     }
 
 
-# =========================
-# NEWS
-# =========================
+# ============================================================
+# OPTIONS HYBRID MAX FREE
+# ============================================================
+def options_hybrid_engine(asset, analysis):
+    if asset["asset_type"] != "US_STOCK":
+        return ""
+
+    price = analysis["price"]
+    atr = analysis["atr"] or (price * 0.015 if price else None)
+    if not price or not atr:
+        return ""
+
+    score = analysis["score"]
+    prob = analysis["probability"]
+
+    call_strike = round_strike(price + atr * 0.60)
+    call_sell = round_strike(price + atr * 1.70)
+    put_strike = round_strike(price - atr * 0.60)
+    put_sell = round_strike(price - atr * 1.70)
+
+    entry_low = price - atr * 0.25
+    entry_high = price + atr * 0.15
+    tp1 = price + atr * 0.90
+    tp2 = price + atr * 1.80
+    sl = price - atr * 0.90
+
+    put_entry_low = price - atr * 0.15
+    put_entry_high = price + atr * 0.25
+    put_tp1 = price - atr * 0.90
+    put_tp2 = price - atr * 1.80
+    put_sl = price + atr * 0.90
+
+    if score >= 70:
+        setup = f"""🧠 Options Hybrid Max Free
+Setup: CALL / Bullish
+Strike แนะนำ: {fmt_num(call_strike, 2)}C
+Probability ประมาณ: {prob}%
+
+Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
+TP1: {fmt_num(tp1)}
+TP2: {fmt_num(tp2)}
+SL: {fmt_num(sl)}
+
+Spread Scanner:
+Bull Call Spread
+Buy {fmt_num(call_strike, 2)}C
+Sell {fmt_num(call_sell, 2)}C
+
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+    elif score <= 35:
+        setup = f"""🧠 Options Hybrid Max Free
+Setup: PUT / Bearish
+Strike แนะนำ: {fmt_num(put_strike, 2)}P
+Probability ประมาณ: {prob}%
+
+Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
+TP1: {fmt_num(put_tp1)}
+TP2: {fmt_num(put_tp2)}
+SL: {fmt_num(put_sl)}
+
+Spread Scanner:
+Bear Put Spread
+Buy {fmt_num(put_strike, 2)}P
+Sell {fmt_num(put_sell, 2)}P
+
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+    else:
+        setup = f"""🧠 Options Hybrid Max Free
+Setup: WAIT / Neutral
+Probability ประมาณ: {prob}%
+
+ยังไม่ควรรีบซื้อ CALL/PUT
+รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
+
+Idea เฝ้าดู:
+CALL เหนือ {fmt_num(analysis['resistance'])}
+PUT ใต้ {fmt_num(analysis['support'])}"""
+
+    return setup
+
+
+# ============================================================
+# NEWS + REPORTS
+# ============================================================
 def fetch_news(asset):
     if not FINNHUB_API_KEY:
         return "ยังไม่ได้ตั้งค่า FINNHUB_API_KEY จึงยังไม่ดึงข่าว", 0
-
     if asset["asset_type"] == "THAI_STOCK":
         return "ข่าวหุ้นไทยยังไม่ได้เชื่อม API ข่าวเฉพาะ SET", 0
-
     if asset["asset_type"] == "GOLD":
         return "ทองคำควรดูร่วมกับ USD, Bond Yield, เงินเฟ้อ, FED และดอลลาร์สหรัฐ", 0
 
     try:
         today = datetime.utcnow().date()
         week_ago = today - timedelta(days=7)
-
         r = requests.get(
             "https://finnhub.io/api/v1/company-news",
-            params={
-                "symbol": asset["news_symbol"],
-                "from": week_ago.isoformat(),
-                "to": today.isoformat(),
-                "token": FINNHUB_API_KEY,
-            },
+            params={"symbol": asset["news_symbol"], "from": week_ago.isoformat(), "to": today.isoformat(), "token": FINNHUB_API_KEY},
             headers=REQUEST_HEADERS,
             timeout=20,
         )
-
         items = r.json()
         if not isinstance(items, list) or not items:
             return "ไม่พบข่าวล่าสุดจาก Finnhub", 0
-
-        headlines = []
-        for item in items[:3]:
-            headline = item.get("headline")
-            if headline:
-                headlines.append(f"- {headline}")
-
+        headlines = [f"- {x.get('headline')}" for x in items[:3] if x.get("headline")]
         return "\n".join(headlines) if headlines else "ไม่มีหัวข้อข่าวสำคัญ", len(headlines)
-
     except Exception as e:
         return f"ดึงข่าวไม่สำเร็จ: {e}", 0
 
 
-# =========================
-# REPORT BUILDERS
-# =========================
 def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
     if not price:
         return "ข้อมูลราคาไม่พอสำหรับทำแผน 3 ไม้"
-
     if not atr:
         atr = price * 0.01
 
-    buy1 = price - atr * 0.30
-    buy2 = price - atr * 0.70
-    buy3 = price - atr * 1.10
-
-    sell1 = price + atr * 0.50
-    sell2 = price + atr * 1.00
-    sell3 = price + atr * 1.60
-
+    buy1, buy2, buy3 = price - atr * 0.30, price - atr * 0.70, price - atr * 1.10
+    sell1, sell2, sell3 = price + atr * 0.50, price + atr * 1.00, price + atr * 1.60
     stop = price - atr * 1.50
 
     def fmt_level(value):
@@ -690,44 +850,20 @@ def build_gold_report(asset, analysis, news_text, reasons):
     atr = analysis["atr"] or (price * 0.01 if price else None)
     usd_thb = get_usd_thb_rate()
     gold_thb_oz = price * usd_thb if price else None
-
     thai_gold = get_thai_gold_price_or_estimate(price, usd_thb)
 
     bar_buy = thai_gold.get("bar_buy")
     bar_sell = thai_gold.get("bar_sell")
     ornament_sell = thai_gold.get("ornament_sell")
-    source = thai_gold.get("source")
-    is_estimate = thai_gold.get("is_estimate", False)
-
-    # Convert XAUUSD levels to Thai baht gold price levels using actual Thai bar sell as base.
-    # This keeps levels aligned with GoldTraders real Thai price, not just USDTHB formula.
     thai_factor = bar_sell / price if bar_sell and price else None
 
-    s1 = price - atr * 0.30 if price and atr else None
-    s2 = price - atr * 0.70 if price and atr else None
-    s3 = price - atr * 1.10 if price and atr else None
-    r1 = price + atr * 0.50 if price and atr else None
-    r2 = price + atr * 1.00 if price and atr else None
-    r3 = price + atr * 1.60 if price and atr else None
+    s1, s2, s3 = price - atr * 0.30, price - atr * 0.70, price - atr * 1.10
+    r1, r2, r3 = price + atr * 0.50, price + atr * 1.00, price + atr * 1.60
 
     def gold_level(value):
-        if value is None or thai_factor is None:
-            return "N/A"
-        return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿"
+        return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿" if thai_factor else "N/A"
 
-    trade_plan = build_trade_plan(
-        price,
-        atr,
-        analysis["bias"],
-        asset_type="GOLD",
-        thai_factor=thai_factor,
-    )
-
-    price_note = (
-        "ราคาทองไทย: ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ"
-        if not is_estimate
-        else "ราคาทองไทย: fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
-    )
+    note = "ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
 
     return f"""📊 วิเคราะห์ทองคำ
 
@@ -738,22 +874,17 @@ XAUUSD
 {fmt_num(gold_thb_oz, 0)} บาท/ออนซ์
 
 🏆 ราคาทองไทย
-
-ทองแท่งรับซื้อ
-{fmt_num(bar_buy, 0)} บาท
-
-ทองแท่งขายออก
-{fmt_num(bar_sell, 0)} บาท
-
-ทองรูปพรรณขายออก
-{fmt_num(ornament_sell, 0)} บาท
-
-แหล่งราคาทองไทย:
-{source}
+ทองแท่งรับซื้อ: {fmt_num(bar_buy, 0)} บาท
+ทองแท่งขายออก: {fmt_num(bar_sell, 0)} บาท
+ทองรูปพรรณขายออก: {fmt_num(ornament_sell, 0)} บาท
+แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-AI Score: {analysis['score']}/100
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
+Market Regime: {analysis['regime']}
+Trend Alignment: {analysis['alignment']}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -763,7 +894,6 @@ RSI14: {fmt_num(analysis['rsi'])}
 ATR14: {fmt_num(analysis['atr'])}
 
 🎯 แนวรับ / แนวต้าน
-
 S1: {gold_level(s1)}
 S2: {gold_level(s2)}
 S3: {gold_level(s3)}
@@ -772,7 +902,7 @@ R1: {gold_level(r1)}
 R2: {gold_level(r2)}
 R3: {gold_level(r3)}
 
-{trade_plan}
+{build_trade_plan(price, atr, analysis['bias'], asset_type='GOLD', thai_factor=thai_factor)}
 
 เหตุผลหลัก:
 {chr(10).join("- " + r for r in reasons)}
@@ -780,36 +910,42 @@ R3: {gold_level(r3)}
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน {price_note}"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
 
 
 def build_asset_report(user_text):
     asset = normalize_asset(user_text)
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-    news_text, news_count = fetch_news(asset)
-
-    reasons = analysis["reasons"][:5]
-    if not reasons:
-        reasons = ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
+    news_text, _ = fetch_news(asset)
+    reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
     if asset["asset_type"] == "GOLD":
-        return build_gold_report(asset, analysis, news_text, reasons)
+        report = build_gold_report(asset, analysis, news_text, reasons)
+        save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], "GOLD", analysis["regime"], analysis["probability"], report)
+        return report
 
-    currency = asset["currency"]
-    price_label = "$" if currency == "USD" else "฿"
-    trade_plan = build_trade_plan(analysis["price"], analysis["atr"], analysis["bias"])
+    price_label = "$" if asset["currency"] == "USD" else "฿"
     source_text = "Yahoo Finance" if asset["asset_type"] == "THAI_STOCK" else "Twelve Data"
+    opt_text = options_hybrid_engine(asset, analysis)
 
-    return f"""📊 วิเคราะห์ {asset['display']}
+    mtf_lines = "\n".join([f"- {label}: {state}" for label, state in analysis["mtf_states"]]) or "- N/A"
+
+    report = f"""📊 วิเคราะห์ {asset['display']}
 แหล่งข้อมูล: {source_text}
 เวลาไทย: {now_text()}
 
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
 
-AI Score: {analysis['score']}/100
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
+Market Regime: {analysis['regime']}
+Trend Alignment: {analysis['alignment']}
+
+Multi Timeframe:
+{mtf_lines}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -817,6 +953,7 @@ EMA12: {fmt_num(analysis['ema12'])}
 EMA50: {fmt_num(analysis['ema50'])}
 RSI14: {fmt_num(analysis['rsi'])}
 ATR14: {fmt_num(analysis['atr'])}
+RVOL: {fmt_num(analysis['rvol'])}
 
 🎯 โซนราคา
 แนวรับประมาณ: {price_label}{fmt_num(analysis['support'])}
@@ -824,7 +961,9 @@ ATR14: {fmt_num(analysis['atr'])}
 Stop loss เชิงระบบ: {price_label}{fmt_num(analysis['stop_loss'])}
 Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profit'])}
 
-{trade_plan}
+{build_trade_plan(analysis['price'], analysis['atr'], analysis['bias'])}
+
+{opt_text}
 
 เหตุผลหลัก:
 {chr(10).join("- " + r for r in reasons)}
@@ -832,27 +971,24 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ใช้เพื่อช่วยคัดกรองเท่านั้น"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+
+    sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
+    save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
+    return report
 
 
-# =========================
-# LINE API
-# =========================
+# ============================================================
+# LINE
+# ============================================================
 def line_reply(reply_token, text):
     if not LINE_CHANNEL_ACCESS_TOKEN:
         print("LINE_CHANNEL_ACCESS_TOKEN is missing")
         return
-
     r = requests.post(
         "https://api.line.me/v2/bot/message/reply",
-        headers={
-            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "replyToken": reply_token,
-            "messages": [{"type": "text", "text": text[:4900]}],
-        },
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"},
+        json={"replyToken": reply_token, "messages": [{"type": "text", "text": text[:4900]}]},
         timeout=20,
     )
     if r.status_code >= 300:
@@ -862,17 +998,10 @@ def line_reply(reply_token, text):
 def line_push(user_id, text):
     if not LINE_CHANNEL_ACCESS_TOKEN or not user_id:
         return
-
     r = requests.post(
         "https://api.line.me/v2/bot/message/push",
-        headers={
-            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "to": user_id,
-            "messages": [{"type": "text", "text": text[:4900]}],
-        },
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}", "Content-Type": "application/json"},
+        json={"to": user_id, "messages": [{"type": "text", "text": text[:4900]}]},
         timeout=20,
     )
     if r.status_code >= 300:
@@ -882,56 +1011,32 @@ def line_push(user_id, text):
 def verify_line_signature(body, signature):
     if not LINE_CHANNEL_SECRET:
         return True
-
-    digest = hmac.new(
-        LINE_CHANNEL_SECRET.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).digest()
-
+    digest = hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
     valid_signature = base64.b64encode(digest).decode("utf-8")
     return hmac.compare_digest(valid_signature, signature or "")
 
 
 def help_text():
-    return """พิมพ์ชื่อสินทรัพย์ที่ต้องการวิเคราะห์ เช่น
+    return """V7 Hybrid Max Free
 
-หุ้นสหรัฐ:
-NVDA
-AAPL
-TSLA
-QQQ
-SPY
+พิมพ์ชื่อสินทรัพย์:
+หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
+หุ้นไทย: SCB, AOT, PTT, KBANK, CPALL, ADVANC
+ทองคำ: ทองคำ, GOLD, XAUUSD
 
-หุ้นไทย:
-SCB
-AOT
-PTT
-KBANK
-CPALL
-ADVANC
-
-ทองคำ:
-ทองคำ
-GOLD
-XAUUSD
-
-คำสั่งพิเศษ:
+คำสั่ง:
 watchlist = ดูรายการเฝ้าดู
 help = วิธีใช้งาน"""
 
 
 def handle_message(user_id, text):
     clean = text.strip()
-
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
         return "User นี้ยังไม่ได้รับอนุญาตให้ใช้งานระบบ"
 
     lower = clean.lower()
-
     if lower in {"help", "วิธีใช้", "เมนู"}:
         return help_text()
-
     if lower == "watchlist":
         return "รายการเฝ้าดู:\n" + "\n".join(f"- {x}" for x in WATCHLIST)
 
@@ -939,27 +1044,27 @@ def handle_message(user_id, text):
         return build_asset_report(clean)
     except Exception as e:
         print("Handle message error:", e)
-        return (
-            "ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\n"
-            "ลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\n"
-            f"Error: {e}"
-        )
+        return f"ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\nลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\nError: {e}"
 
 
-# =========================
-# ROUTES
-# =========================
+# ============================================================
+# ROUTES + DASHBOARD
+# ============================================================
+def require_admin():
+    if not ADMIN_TOKEN:
+        return True
+    return request.args.get("token") == ADMIN_TOKEN or request.headers.get("X-Admin-Token") == ADMIN_TOKEN
+
+
 @app.route("/", methods=["GET"])
 def home():
-    return {
+    return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot",
+        "service": "AI Market LINE Bot V7 Hybrid Max Free",
         "time_th": now_text(),
         "watchlist": WATCHLIST,
-        "thai_stock_source": "Yahoo Finance",
-        "us_stock_source": "Twelve Data",
-        "gold_price_source": "GoldTraders first, fallback calculated",
-    }
+        "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
+    })
 
 
 @app.route("/health", methods=["GET"])
@@ -973,61 +1078,74 @@ def gold_test():
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
     usd_thb = get_usd_thb_rate()
-    thai_gold = get_thai_gold_price_or_estimate(analysis["price"], usd_thb)
-    return {
-        "xauusd": analysis["price"],
-        "usd_thb": usd_thb,
-        "thai_gold": thai_gold,
-        "time_th": now_text(),
-    }
+    return jsonify({"xauusd": analysis["price"], "usd_thb": usd_thb, "thai_gold": get_thai_gold_price_or_estimate(analysis["price"], usd_thb), "time_th": now_text()})
+
+
+@app.route("/api/watchlist", methods=["GET"])
+def api_watchlist():
+    return jsonify({"watchlist": WATCHLIST})
+
+
+@app.route("/api/signals", methods=["GET"])
+def api_signals():
+    if not require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    conn = db()
+    rows = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 100").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    if not require_admin():
+        return Response("Unauthorized", status=401)
+    conn = db()
+    rows = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    html_rows = "".join(
+        f"<tr><td>{r['created_at']}</td><td>{r['symbol']}</td><td>{r['asset_type']}</td><td>{fmt_num(r['price'])}</td><td>{r['score']}</td><td>{r['probability']}%</td><td>{r['signal_type']}</td><td>{r['regime']}</td><td>{r['bias']}</td></tr>"
+        for r in rows
+    )
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
+<style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
+</head><body><h1>AI Market LINE Bot V7 Hybrid Max Free</h1><p>Time TH: {now_text()}</p>
+<table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
+</body></html>"""
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_data()
     signature = request.headers.get("X-Line-Signature", "")
-
     if not verify_line_signature(body, signature):
         abort(400)
-
     payload = request.get_json(silent=True) or {}
-
     for event in payload.get("events", []):
-        event_type = event.get("type")
+        if event.get("type") != "message":
+            continue
         reply_token = event.get("replyToken")
         source = event.get("source", {})
         user_id = source.get("userId", "")
-
-        if event_type != "message":
-            continue
-
         message = event.get("message", {})
         if message.get("type") != "text":
             line_reply(reply_token, "ตอนนี้รองรับเฉพาะข้อความเท่านั้นครับ")
             continue
-
-        user_text = message.get("text", "")
-        response_text = handle_message(user_id, user_text)
-        line_reply(reply_token, response_text)
-
+        line_reply(reply_token, handle_message(user_id, message.get("text", "")))
     return "OK", 200
 
 
-# =========================
+# ============================================================
 # AUTO ALERTS
-# =========================
+# ============================================================
 def should_send_alert(symbol, score):
     now_ts = time.time()
-    last_ts = LAST_ALERTS.get(symbol, 0)
-    cooldown_seconds = ALERT_EVERY_MINUTES * 60
-
-    if now_ts - last_ts < cooldown_seconds:
+    last_ts = get_last_alert_ts(symbol)
+    if now_ts - last_ts < ALERT_EVERY_MINUTES * 60:
         return False
-
     if score >= AUTO_ALERT_MIN_SCORE or score <= AUTO_ALERT_MAX_SCORE:
-        LAST_ALERTS[symbol] = now_ts
+        set_last_alert_ts(symbol, now_ts)
         return True
-
     return False
 
 
@@ -1040,32 +1158,23 @@ def auto_alert_loop():
                         asset = normalize_asset(symbol)
                         quote, closes, highs, lows, opens, volumes = get_market_data(asset)
                         analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-
                         if should_send_alert(symbol, analysis["score"]):
                             report = build_asset_report(symbol)
-                            if analysis["score"] >= AUTO_ALERT_MIN_SCORE:
-                                header = f"🚨 BUY/MOMENTUM ALERT: {symbol}\n\n"
-                            else:
-                                header = f"⚠️ SELL/WEAKNESS ALERT: {symbol}\n\n"
-
+                            header = f"🚨 BUY/MOMENTUM ALERT: {symbol}\n\n" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else f"⚠️ SELL/WEAKNESS ALERT: {symbol}\n\n"
                             for user_id in ALERT_USER_IDS:
                                 line_push(user_id, header + report)
-
                         time.sleep(3)
-
                     except Exception as e:
                         print(f"Auto alert error for {symbol}: {e}")
-
             time.sleep(60)
-
         except Exception as e:
             print(f"Auto alert loop error: {e}")
             time.sleep(60)
 
 
+init_db()
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        t = threading.Thread(target=auto_alert_loop, daemon=True)
-        t.start()
-
+        threading.Thread(target=auto_alert_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
