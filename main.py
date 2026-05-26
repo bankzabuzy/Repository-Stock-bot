@@ -1424,28 +1424,30 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 
 
 
+
 # ============================================================
-# THAILAND OIL PRICE V7.3.2 TODAY / TOMORROW
+# THAILAND OIL PRICE V7.3.3 PT STATION DEFAULT
 # ============================================================
 OIL_WORDS = {
     "น้ำมัน", "ราคาน้ำมัน", "ราคาน้ํามัน",
-    "oil", "oli", "oill", "fuel", "ptt", "บางจาก", "น้ำมันไทย"
+    "oil", "oli", "oill", "fuel", "pt", "ptstation", "พีที", "ptt", "บางจาก", "น้ำมันไทย"
 }
 
 def normalize_oil_name(name):
     raw = str(name or "").strip()
     n = raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+
     mapping = [
-        ("gasohol95", "แก๊สโซฮอล์ 95"), ("แก๊สโซฮอล์95", "แก๊สโซฮอล์ 95"),
-        ("gasohol91", "แก๊สโซฮอล์ 91"), ("แก๊สโซฮอล์91", "แก๊สโซฮอล์ 91"),
-        ("gsh95", "แก๊สโซฮอล์ 95"), ("gsh91", "แก๊สโซฮอล์ 91"),
+        ("แก๊สโซฮอล์95", "แก๊สโซฮอล์ 95"), ("gasohol95", "แก๊สโซฮอล์ 95"), ("gsh95", "แก๊สโซฮอล์ 95"),
+        ("แก๊สโซฮอล์91", "แก๊สโซฮอล์ 91"), ("gasohol91", "แก๊สโซฮอล์ 91"), ("gsh91", "แก๊สโซฮอล์ 91"),
         ("e20", "แก๊สโซฮอล์ E20"), ("e85", "แก๊สโซฮอล์ E85"),
-        ("benzine95", "เบนซิน 95"), ("gasoline95", "เบนซิน 95"), ("เบนซิน95", "เบนซิน 95"),
-        ("dieselb7", "ดีเซล B7"), ("ดีเซลb7", "ดีเซล B7"),
-        ("premiumdiesel", "ดีเซลพรีเมียม"), ("superpowerdiesel", "ดีเซลพรีเมียม"),
-        ("ดีเซลพรีเมียม", "ดีเซลพรีเมียม"),
+        ("เบนซิน95", "เบนซิน 95"), ("benzine95", "เบนซิน 95"), ("gasoline95", "เบนซิน 95"),
+        ("ดีเซลb20", "ดีเซล B20"), ("dieselb20", "ดีเซล B20"),
+        ("ดีเซลb7", "ดีเซล B7"), ("dieselb7", "ดีเซล B7"),
+        ("ดีเซลพรีเมียม", "ดีเซลพรีเมียม"), ("premiumdiesel", "ดีเซลพรีเมียม"),
         ("diesel", "ดีเซล"), ("ดีเซล", "ดีเซล"),
     ]
+
     for key, display in mapping:
         if key in n:
             return display
@@ -1463,99 +1465,131 @@ def oil_change_text(today, tomorrow):
 
 
 def split_oil_today_tomorrow(prices):
-    """Normalize oil price object.
-    Accepts either:
-    - {"today": {...}, "tomorrow": {...}}
-    - flat {"แก๊สโซฮอล์ 95": 35.45}
-    """
     if not prices:
         return {}, {}
-
     if isinstance(prices, dict) and ("today" in prices or "tomorrow" in prices):
         return prices.get("today", {}) or {}, prices.get("tomorrow", {}) or {}
-
     return prices, {}
 
 
-def parse_bangchak_numbers_by_order(text):
-    """Parse current/tomorrow prices by known Bangchak widget order when names are absent."""
-    nums = re.findall(r"\b(\d{2}\.\d{1,2})\b", text)
-    values = []
-    for n in nums:
-        v = safe_float(n)
-        if v and 10 <= v <= 90:
-            values.append(v)
+def clean_oil_prices(d):
+    return {normalize_oil_name(k): float(v) for k, v in (d or {}).items() if v is not None and 10 <= float(v) <= 90}
 
-    names = [
-        "แก๊สโซฮอล์ 95",
-        "แก๊สโซฮอล์ 91",
-        "เบนซิน 95",
-        "แก๊สโซฮอล์ E85",
-        "แก๊สโซฮอล์ E20",
-        "ดีเซล B7",
-        "ดีเซลพรีเมียม",
-        "ดีเซล",
+
+def extract_pt_station_prices_from_text(text):
+    """Parse PT Station prices from PTG or PT price pages."""
+    combo = re.sub(r"\s+", " ", text)
+
+    patterns = [
+        ("ดีเซล", [r"ดีเซล(?!\s*B20)(?!\s*B7)(?!\s*พรีเมียม)", r"Diesel(?!\s*B20)(?!\s*B7)(?!\s*Premium)"]),
+        ("ดีเซล B20", [r"ดีเซล\s*B20", r"Diesel\s*B20"]),
+        ("เบนซิน 95", [r"เบนซิน\s*95", r"Benzine\s*95", r"Gasoline\s*95"]),
+        ("แก๊สโซฮอล์ 95", [r"แก๊สโซฮอล์\s*95", r"Gasohol\s*95"]),
+        ("แก๊สโซฮอล์ 91", [r"แก๊สโซฮอล์\s*91", r"Gasohol\s*91"]),
+        ("แก๊สโซฮอล์ E20", [r"แก๊สโซฮอล์\s*E20", r"E20"]),
+        ("แก๊สโซฮอล์ E85", [r"แก๊สโซฮอล์\s*E85", r"E85"]),
     ]
 
-    # If page exposes today and tomorrow in adjacent blocks, total can be >= 12.
-    # Best effort: first 8 = today, next 8 = tomorrow. If fewer, today only.
-    today = {}
-    tomorrow = {}
-
-    if len(values) >= 6:
-        for i in range(min(len(names), len(values))):
-            today[names[i]] = values[i]
-
-    if len(values) >= 12:
-        start = min(len(names), len(values) // 2)
-        # More conservative: use next values after first product group.
-        for i in range(min(len(names), len(values) - start)):
-            tomorrow[names[i]] = values[start + i]
-
-    return today, tomorrow
-
-
-def extract_oil_prices_from_text(combo):
-    """Extract product prices from text. Also attempts tomorrow price if the page has 'tomorrow' nearby."""
-    product_patterns = [
-        ("เบนซิน 95", [r"เบนซิน\s*95", r"Gasoline\s*95"]),
-        ("แก๊สโซฮอล์ 95", [r"แก๊สโซฮอล์\s*95", r"Gasohol\s*95", r"GSH\s*95"]),
-        ("แก๊สโซฮอล์ 91", [r"แก๊สโซฮอล์\s*91", r"Gasohol\s*91", r"GSH\s*91"]),
-        ("แก๊สโซฮอล์ E20", [r"E20"]),
-        ("แก๊สโซฮอล์ E85", [r"E85"]),
-        ("ดีเซล B7", [r"ดีเซล\s*B7", r"Diesel\s*B7"]),
-        ("ดีเซลพรีเมียม", [r"ดีเซล\s*พรีเมียม", r"Premium\s*Diesel", r"Hi\s*Premium", r"Super\s*Power\s*Diesel"]),
-        ("ดีเซล", [r"ดีเซล(?!\s*B7)(?!\s*พรีเมียม)", r"Diesel(?!\s*B7)(?!\s*Premium)"]),
-    ]
-
-    normalized = re.sub(r"\s+", " ", combo)
     today, tomorrow = {}, {}
-
-    for display, pats in product_patterns:
+    for display, pats in patterns:
         for pat in pats:
-            mm = re.search(pat + r".{0,180}?(\d{2}\.\d{1,2})", normalized, re.I)
-            if mm:
-                today[display] = safe_float(mm.group(1))
+            m = re.search(pat + r".{0,120}?(\d{2}\.\d{1,2})", combo, re.I)
+            if m:
+                today[display] = safe_float(m.group(1))
                 break
 
-    # Try explicit tomorrow/next day blocks.
-    tomorrow_keywords = r"(?:พรุ่งนี้|Tomorrow|tomorrow|วันพรุ่งนี้|ราคาใหม่|New Price)"
-    for display, pats in product_patterns:
+    # Try "วันนี้ > พรุ่งนี้" rows e.g. ดีเซล 42.20 > 41.20 or 44.90 ▼ 44.30
+    for display, pats in patterns:
         for pat in pats:
-            mm = re.search(tomorrow_keywords + r".{0,300}?" + pat + r".{0,180}?(\d{2}\.\d{1,2})", normalized, re.I)
-            if not mm:
-                mm = re.search(pat + r".{0,180}?" + tomorrow_keywords + r".{0,180}?(\d{2}\.\d{1,2})", normalized, re.I)
-            if mm:
-                tomorrow[display] = safe_float(mm.group(1))
+            m = re.search(pat + r".{0,100}?(\d{2}\.\d{1,2}).{0,30}?[>▼→]\s*(\d{2}\.\d{1,2})", combo, re.I)
+            if m:
+                today[display] = safe_float(m.group(1))
+                tomorrow[display] = safe_float(m.group(2))
                 break
 
-    return today, tomorrow
+    # PTG homepage often exposes only numeric values in this order:
+    # Diesel, Diesel B20, Gasohol 95, Gasohol 91, Benzine 95, E20
+    if len(today) < 4:
+        nums = re.findall(r"\b(\d{2}\.\d{1,2})\b", combo)
+        values = []
+        for n in nums:
+            v = safe_float(n)
+            if v and 10 <= v <= 90 and v not in values:
+                values.append(v)
+
+        # Protect against older widgets that include "today then tomorrow" or "old then new".
+        # If the set contains the current PT Station group, map by known PT order.
+        pt_order = ["ดีเซล", "ดีเซล B20", "แก๊สโซฮอล์ 95", "แก๊สโซฮอล์ 91", "เบนซิน 95", "แก๊สโซฮอล์ E20"]
+        if len(values) >= 6:
+            # Heuristic: choose a 6-number window that looks like PT current prices.
+            best = None
+            for i in range(0, len(values) - 5):
+                window = values[i:i+6]
+                # Diesel should be 30-50, B20 often 30-40, gasohol 95/91 ~35-55, benzine high.
+                if 30 <= window[0] <= 50 and 30 <= window[1] <= 45 and 35 <= window[2] <= 55 and 35 <= window[3] <= 55 and 45 <= window[4] <= 65 and 30 <= window[5] <= 50:
+                    best = window
+                    break
+            if not best:
+                best = values[:6]
+            for idx, name in enumerate(pt_order):
+                today.setdefault(name, best[idx])
+
+    return clean_oil_prices(today), clean_oil_prices(tomorrow)
+
+
+def get_pt_station_prices():
+    """PT Station first, because user's reference image is PT Station."""
+    cached = cache_get("THAI_OIL_PT_STATION")
+    if cached:
+        return cached
+
+    urls = [
+        "https://www.ptgenergy.co.th/",
+        "https://www.ptgenergy.co.th/th/oil-price",
+        "https://www.ptgenergy.co.th/th/pt-station/oil-price",
+        "https://gasprice.kapook.com/gasprice.php",
+        "https://xn--42cah7d0cxcvbbb9x.com/ราคาน้ำมัน-พีที-pt/",
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
+            if r.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            text = soup.get_text(" ", strip=True)
+            combo = r.text + " " + text
+
+            # If this is a multi-brand page, prefer section around PT.
+            lower_text = combo.lower()
+            if "ราคานํ้ามันพีที" in combo or "ราคาน้ำมันพีที" in combo or "pt)" in lower_text:
+                idx = max(combo.find("ราคานํ้ามันพีที"), combo.find("ราคาน้ำมันพีที"), lower_text.find("pt)"))
+                if idx >= 0:
+                    combo = combo[idx:idx+4000]
+
+            today, tomorrow = extract_pt_station_prices_from_text(combo)
+
+            # Validate at least key products.
+            if today and ("ดีเซล" in today or "แก๊สโซฮอล์ 95" in today):
+                result = {
+                    "source": "PT Station / PTG",
+                    "updated_at": now_text(),
+                    "raw_url": url,
+                    "prices": {"today": today, "tomorrow": tomorrow},
+                    "has_tomorrow": bool(tomorrow),
+                    "is_estimate": False,
+                }
+                cache_set("THAI_OIL_PT_STATION", result)
+                return result
+
+        except Exception as e:
+            print("PT Station oil fetch error:", url, e)
+
+    return None
 
 
 def get_ptt_oil_prices():
-    """Fetch current retail oil prices from PTT OR SOAP Web Service.
-    PTT endpoint usually gives current price. Tomorrow price may not be available.
-    """
     cached = cache_get("THAI_OIL_PTT")
     if cached:
         return cached
@@ -1585,31 +1619,8 @@ def get_ptt_oil_prices():
         if r.status_code != 200:
             return None
 
-        xml_text = r.text
-        m = re.search(r"<CurrentOilPriceResult[^>]*>(.*?)</CurrentOilPriceResult>", xml_text, re.S)
-        if not m:
-            return None
-
-        inner = m.group(1)
-        inner = inner.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-        text = BeautifulSoup(inner, "html.parser").get_text(" ", strip=True)
-        combo = inner + " " + xml_text + " " + text
-
-        today, tomorrow = extract_oil_prices_from_text(combo)
-
-        # JSON/XML key-value fallback.
-        for mm in re.finditer(
-            r'(?:"?(?:product|productName|oilName|name|title)"?\s*[:=]\s*"([^"]+)".{0,180}?"?(?:price|currentPrice|Price)"?\s*[:=]\s*"?(\d{2}\.\d{1,2})"?)',
-            combo,
-            re.I | re.S,
-        ):
-            name = normalize_oil_name(mm.group(1))
-            price = safe_float(mm.group(2))
-            if price:
-                today[name] = price
-
-        today = {normalize_oil_name(k): float(v) for k, v in today.items() if v and 10 <= float(v) <= 90}
-        tomorrow = {normalize_oil_name(k): float(v) for k, v in tomorrow.items() if v and 10 <= float(v) <= 90}
+        text = BeautifulSoup(r.text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"), "html.parser").get_text(" ", strip=True)
+        today, tomorrow = extract_pt_station_prices_from_text(text)
 
         if today:
             result = {
@@ -1635,12 +1646,10 @@ def get_bangchak_oil_prices():
         return cached
 
     urls = [
-        "https://oil-price.bangchak.co.th/ApiOilPrice2/th",
-        "https://oil-price.bangchak.co.th/ApiOilPrice2/en",
-        "https://oil-price.bangchak.co.th/BcpOilPrice2/th",
-        "https://oil-price.bangchak.co.th/BcpOilPrice2/en",
+        "https://www.bangchak.co.th/th/oilprice",
         "https://www.bangchak.co.th/th/oilprice/historical",
-        "https://www.bangchak.co.th/en/oilprice/historical",
+        "https://oil-price.bangchak.co.th/BcpOilPrice2/th",
+        "https://oil-price.bangchak.co.th/ApiOilPrice2/th",
     ]
 
     for url in urls:
@@ -1648,41 +1657,9 @@ def get_bangchak_oil_prices():
             r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
             if r.status_code != 200:
                 continue
-
             text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
             combo = r.text + " " + text
-
-            today, tomorrow = extract_oil_prices_from_text(combo)
-
-            # If names fail, map numeric order.
-            if len(today) < 4:
-                t2, tm2 = parse_bangchak_numbers_by_order(combo)
-                today.update(t2)
-                tomorrow.update(tm2)
-
-            # Try JSON pairs with today/tomorrow fields.
-            for mm in re.finditer(
-                r'(?:"?(?:productName|oilName|name|title)"?\s*[:=]\s*"([^"]+)".{0,220}?"?(?:todayPrice|currentPrice|price|Price)"?\s*[:=]\s*"?(\d{2}\.\d{1,2})"?)',
-                combo,
-                re.I | re.S,
-            ):
-                name = normalize_oil_name(mm.group(1))
-                price = safe_float(mm.group(2))
-                if price:
-                    today[name] = price
-
-            for mm in re.finditer(
-                r'(?:"?(?:productName|oilName|name|title)"?\s*[:=]\s*"([^"]+)".{0,220}?"?(?:tomorrowPrice|nextPrice|priceTomorrow)"?\s*[:=]\s*"?(\d{2}\.\d{1,2})"?)',
-                combo,
-                re.I | re.S,
-            ):
-                name = normalize_oil_name(mm.group(1))
-                price = safe_float(mm.group(2))
-                if price:
-                    tomorrow[name] = price
-
-            today = {normalize_oil_name(k): float(v) for k, v in today.items() if v and 10 <= float(v) <= 90}
-            tomorrow = {normalize_oil_name(k): float(v) for k, v in tomorrow.items() if v and 10 <= float(v) <= 90}
+            today, tomorrow = extract_pt_station_prices_from_text(combo)
 
             if today:
                 result = {
@@ -1695,7 +1672,6 @@ def get_bangchak_oil_prices():
                 }
                 cache_set("THAI_OIL_BANGCHAK", result)
                 return result
-
         except Exception as e:
             print("Bangchak oil fetch error:", url, e)
 
@@ -1703,12 +1679,16 @@ def get_bangchak_oil_prices():
 
 
 def get_thai_oil_prices():
-    # Prefer Bangchak first for today/tomorrow, then PTT current price.
-    result = get_bangchak_oil_prices()
+    # Default: PT Station first, because user wants prices matching PT Station reference.
+    result = get_pt_station_prices()
     if result and result.get("prices", {}).get("today"):
         return result
 
     result = get_ptt_oil_prices()
+    if result and result.get("prices", {}).get("today"):
+        return result
+
+    result = get_bangchak_oil_prices()
     if result and result.get("prices", {}).get("today"):
         return result
 
@@ -1728,13 +1708,14 @@ def build_oil_report():
     today, tomorrow = split_oil_today_tomorrow(data.get("prices", {}))
 
     order = [
+        "ดีเซล",
+        "ดีเซล B20",
+        "ดีเซล B7",
         "เบนซิน 95",
         "แก๊สโซฮอล์ 95",
         "แก๊สโซฮอล์ 91",
         "แก๊สโซฮอล์ E20",
         "แก๊สโซฮอล์ E85",
-        "ดีเซล",
-        "ดีเซล B7",
         "ดีเซลพรีเมียม",
     ]
 
@@ -1755,14 +1736,13 @@ def build_oil_report():
 {data.get('error', 'ไม่พบราคาน้ำมันจากแหล่งข้อมูล')}
 
 แหล่งข้อมูลที่พยายามดึง:
-1) Bangchak Oil Price Widget/API
+1) PT Station / PTG
 2) PTT OR OilPrice Web Service
+3) Bangchak
 
 หมายเหตุ: ระบบไม่คำนวณราคาน้ำมันเอง เพราะราคาขายปลีกไทยต้องอ้างอิงประกาศผู้ค้าน้ำมัน"""
 
-    lines_today = []
-    lines_tomorrow = []
-    lines_change = []
+    lines_today, lines_tomorrow, lines_change = [], [], []
 
     for name in all_names:
         t = today.get(name)
@@ -1794,7 +1774,7 @@ def build_oil_report():
 {chr(10).join(lines_change)}
 {tomorrow_note}
 
-หมายเหตุ: เป็นราคาขายปลีกอ้างอิงประเทศไทย อาจแตกต่างตามพื้นที่/ภาษีท้องถิ่น/สถานีบริการ"""
+หมายเหตุ: ราคาขายปลีกอ้างอิงจากแหล่งที่ระบุ อาจแตกต่างตามพื้นที่/ภาษีท้องถิ่น/สถานีบริการ"""
 
 # ============================================================
 # LINE
@@ -1835,7 +1815,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.3.2 Oil Today/Tomorrow
+    return """V7.3.3 PT Station Oil Default
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1882,7 +1862,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.3.2 Oil Today/Tomorrow",
+        "service": "AI Market LINE Bot V7.3.3 PT Station Oil Default",
         "time_th": now_text(),
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
@@ -1931,7 +1911,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.3.2 Oil Today/Tomorrow</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.3.3 PT Station Oil Default</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
