@@ -7,7 +7,7 @@ import base64
 import hashlib
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
@@ -91,7 +91,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V8 Professional
+# V8.1 Production Ready
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
 STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
@@ -101,7 +101,7 @@ STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() 
 STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
-# V8 Professional
+# V8.1 Production Ready
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -117,7 +117,7 @@ TOP5_COOLDOWN_KEY = "top5_daily"
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
-# V8 Professional
+# V8.1 Production Ready
 ENABLE_MULTI_API_FALLBACK = os.getenv("ENABLE_MULTI_API_FALLBACK", "true").lower() == "true"
 API_FALLBACK_VERBOSE = os.getenv("API_FALLBACK_VERBOSE", "false").lower() == "true"
 
@@ -233,7 +233,7 @@ def set_last_alert_ts(symbol, ts):
 # UTILS
 # ============================================================
 def now_text():
-    return (datetime.utcnow() + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
+    return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
 
 
 def safe_float(value, default=None):
@@ -1559,7 +1559,7 @@ def fetch_news(asset):
         return "ทองคำควรดูร่วมกับ USD, Bond Yield, เงินเฟ้อ, FED และดอลลาร์สหรัฐ", 0
 
     try:
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         week_ago = today - timedelta(days=7)
         r = requests.get(
             "https://finnhub.io/api/v1/company-news",
@@ -2143,7 +2143,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V8 Professional
+    return """V8.1 Production Ready
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -2190,7 +2190,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V8 Professional",
+        "service": "AI Market LINE Bot V8.1 Production Ready",
         "time_th": now_text(),
         "v8_professional": True,
         "v8_watchlist": v8_watchlist_status_dict(),
@@ -2260,7 +2260,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V8 Professional</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V8.1 Production Ready</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2367,7 +2367,7 @@ def strict_check(symbol):
 def build_signal_status_text():
     return f"""📡 Signal Status
 
-App: V8 Professional
+App: V8.1 Production Ready
 เวลาไทย: {now_text()}
 
 Auto Alerts: {ENABLE_AUTO_ALERTS}
@@ -2449,7 +2449,7 @@ def watchlist_status():
 @app.route("/v8-status", methods=["GET"])
 def v8_status():
     return jsonify({
-        "app": "V8 Professional",
+        "app": "V8.1 Production Ready",
         "time_th": now_text(),
         "v8_professional": True,
         "v8_watchlist": v8_watchlist_status_dict(),
@@ -2463,6 +2463,94 @@ def v8_status():
             "alphavantage": bool(ALPHAVANTAGE_API_KEY),
         }
     })
+
+
+
+# ============================================================
+# V8.1 TEST ALERT ENDPOINTS
+# ============================================================
+def require_test_token():
+    token = os.getenv("TEST_ALERT_TOKEN", "")
+    if not token:
+        return True
+    return request.args.get("token", "") == token
+
+
+def send_test_alert(kind="buy", symbol="NVDA"):
+    if not ALERT_USER_IDS:
+        return {"ok": False, "error": "ALERT_USER_IDS is empty"}
+
+    kind = (kind or "buy").lower()
+    symbol = (symbol or "NVDA").upper()
+
+    if kind == "sell":
+        msg = f"""🔴 TEST SELL ALERT
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+ระบบทดสอบการส่ง LINE สำเร็จ
+นี่ไม่ใช่สัญญาณจริง"""
+    elif kind == "top5":
+        msg = build_top5_daily_message()
+    else:
+        msg = f"""🟢 TEST BUY ALERT
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+ระบบทดสอบการส่ง LINE สำเร็จ
+นี่ไม่ใช่สัญญาณจริง"""
+
+    sent = 0
+    for uid in ALERT_USER_IDS:
+        line_push(uid, msg)
+        sent += 1
+    return {"ok": True, "sent": sent, "kind": kind, "symbol": symbol, "time_th": now_text()}
+
+
+@app.route("/test-buy", methods=["GET"])
+def test_buy():
+    if not require_test_token():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return jsonify(send_test_alert("buy", request.args.get("symbol", "NVDA")))
+
+
+@app.route("/test-sell", methods=["GET"])
+def test_sell():
+    if not require_test_token():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return jsonify(send_test_alert("sell", request.args.get("symbol", "GOLD")))
+
+
+@app.route("/test-top5", methods=["GET"])
+def test_top5():
+    if not require_test_token():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return jsonify(send_test_alert("top5", "TOP5"))
+
+
+@app.route("/production-status", methods=["GET"])
+def production_status():
+    return jsonify({
+        "app": "V8.1 Production Ready",
+        "time_th": now_text(),
+        "health": "OK",
+        "line_ready": bool(LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET),
+        "alert_users": len(ALERT_USER_IDS),
+        "auto_alerts": ENABLE_AUTO_ALERTS,
+        "top5_daily": globals().get("ENABLE_TOP5_DAILY", None),
+        "top5_time_th": globals().get("TOP5_DAILY_TIME_TH", None),
+        "multi_api_fallback": globals().get("ENABLE_MULTI_API_FALLBACK", None),
+        "api_keys": {
+            "twelvedata": bool(TWELVEDATA_API_KEY),
+            "finnhub": bool(FINNHUB_API_KEY),
+            "fmp": bool(FMP_API_KEY),
+            "alphavantage": bool(ALPHAVANTAGE_API_KEY),
+        },
+        "datetime_utcnow_fixed": True,
+    })
+
 
 
 @app.route("/webhook", methods=["POST"])
@@ -2581,7 +2669,7 @@ def parse_hhmm(value):
 
 
 def now_th_datetime():
-    return datetime.utcnow() + timedelta(hours=7)
+    return datetime.now(timezone.utc) + timedelta(hours=7)
 
 
 def is_in_time_window(now_dt, start_hhmm, end_hhmm):
@@ -3292,7 +3380,7 @@ def risk_context_warning(asset, analysis, side):
     if "LOW VOL" in regime or rvol < 0.8:
         warnings.append("⚠️ Volume ต่ำ ระบบลดความมั่นใจของสัญญาณ")
     if score <= 3 or score >= 97:
-        warnings.append("⚠️ คะแนนสุดขั้ว ระบบปรับให้อ่านง่ายใน V7.7 แต่ควรดู Timeframe Confirm ประกอบ")
+        warnings.append("⚠️ คะแนนสุดขั้ว ระบบปรับให้อ่านง่ายใน V8.1 แต่ควรดู Timeframe Confirm ประกอบ")
 
     return "\n".join(warnings)
 
@@ -3744,6 +3832,85 @@ def strict_signal_type_from_analysis(asset, analysis):
         return "NONE", reason
 
     return raw_sig, reason
+
+
+# ============================================================
+# V8.1 TOP 5 DAILY SCANNER
+# ============================================================
+_LAST_TOP5_SENT_DATE = None
+
+
+def rank_top5_picks():
+    symbols = globals().get("TOP5_UNIVERSE", WATCHLIST)
+    picks = []
+    for sym in symbols:
+        try:
+            asset = normalize_asset(sym)
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            score = int(analysis.get("score", 50))
+            confidence = calculate_signal_confidence(analysis) if "calculate_signal_confidence" in globals() else abs(score - 50) + 50
+            trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else 5
+            rank_score = score * 0.50 + confidence * 0.30 + trend * 2.0
+            if asset.get("asset_type") == "GOLD":
+                rank_score -= 5
+            picks.append((rank_score, sym, asset, analysis))
+        except Exception as e:
+            print(f"Top5 skip {sym}: {e}")
+    picks.sort(key=lambda x: x[0], reverse=True)
+    return [(sym, asset, analysis) for _, sym, asset, analysis in picks[:5]]
+
+
+def build_top5_daily_message():
+    picks = rank_top5_picks()
+    if not picks:
+        return f"""🏆 Top 5 Daily Picks
+
+ยังจัดอันดับไม่ได้
+เวลาไทย: {now_text()}"""
+
+    lines = []
+    for i, (sym, asset, analysis) in enumerate(picks, 1):
+        lines.append(
+            f"{i}. {sym} {analysis.get('score')}/100 | {analysis.get('bias')} | {analysis.get('regime')}"
+        )
+
+    return f"""🏆 Top 5 Daily Picks
+
+{chr(10).join(lines)}
+
+เวลาไทย: {now_text()}
+หมายเหตุ: คัดจาก TOP5_UNIVERSE ด้วยระบบ V8.1"""
+
+
+def should_send_top5_now():
+    global _LAST_TOP5_SENT_DATE
+    if not globals().get("ENABLE_TOP5_DAILY", True):
+        return False
+
+    try:
+        now = datetime.now(timezone.utc) + timedelta(hours=7)
+        hhmm = now.strftime("%H:%M")
+        today = now.strftime("%Y-%m-%d")
+        target = globals().get("TOP5_DAILY_TIME_TH", "21:15")
+
+        if hhmm == target and _LAST_TOP5_SENT_DATE != today:
+            _LAST_TOP5_SENT_DATE = today
+            return True
+    except Exception as e:
+        print("should_send_top5_now error:", e)
+
+    return False
+
+
+def maybe_send_top5_daily():
+    try:
+        if should_send_top5_now() and ALERT_USER_IDS:
+            msg = build_top5_daily_message()
+            for uid in ALERT_USER_IDS:
+                line_push(uid, msg)
+    except Exception as e:
+        print("maybe_send_top5_daily error:", e)
 
 # ============================================================
 # AUTO ALERTS
