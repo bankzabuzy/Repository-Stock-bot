@@ -79,6 +79,10 @@ ALLOWED_USERS = [x.strip() for x in os.getenv("ALLOWED_USERS", "").split(",") if
 ALERT_USER_IDS = [x.strip() for x in os.getenv("ALERT_USER_IDS", "").split(",") if x.strip()]
 
 ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "false").lower() == "true"
+ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "240"))
+STRICT_REQUIRE_4H_CONFIRM = os.getenv("STRICT_REQUIRE_4H_CONFIRM", "true").lower() == "true"
+MIN_POSITION_RISK_LEVEL = os.getenv("MIN_POSITION_RISK_LEVEL", "MEDIUM").upper()
+
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
 AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
@@ -91,7 +95,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V8.1 Production Ready
+# V8 Final
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
 STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
@@ -101,7 +105,7 @@ STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() 
 STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
-# V8.1 Production Ready
+# V8 Final
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -117,7 +121,7 @@ TOP5_COOLDOWN_KEY = "top5_daily"
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
-# V8.1 Production Ready
+# V8 Final
 ENABLE_MULTI_API_FALLBACK = os.getenv("ENABLE_MULTI_API_FALLBACK", "true").lower() == "true"
 API_FALLBACK_VERBOSE = os.getenv("API_FALLBACK_VERBOSE", "false").lower() == "true"
 
@@ -184,6 +188,12 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS alert_state (
             symbol TEXT PRIMARY KEY,
+            last_sent_ts REAL NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS alert_cooldown (
+            alert_key TEXT PRIMARY KEY,
             last_sent_ts REAL NOT NULL
         )
     """)
@@ -2143,7 +2153,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V8.1 Production Ready
+    return """V8 Final
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -2190,7 +2200,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V8.1 Production Ready",
+        "service": "AI Market LINE Bot V8 Final",
         "time_th": now_text(),
         "v8_professional": True,
         "v8_watchlist": v8_watchlist_status_dict(),
@@ -2260,7 +2270,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V8.1 Production Ready</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V8 Final</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2367,7 +2377,7 @@ def strict_check(symbol):
 def build_signal_status_text():
     return f"""📡 Signal Status
 
-App: V8.1 Production Ready
+App: V8 Final
 เวลาไทย: {now_text()}
 
 Auto Alerts: {ENABLE_AUTO_ALERTS}
@@ -2449,7 +2459,7 @@ def watchlist_status():
 @app.route("/v8-status", methods=["GET"])
 def v8_status():
     return jsonify({
-        "app": "V8.1 Production Ready",
+        "app": "V8 Final",
         "time_th": now_text(),
         "v8_professional": True,
         "v8_watchlist": v8_watchlist_status_dict(),
@@ -2533,7 +2543,7 @@ def test_top5():
 @app.route("/production-status", methods=["GET"])
 def production_status():
     return jsonify({
-        "app": "V8.1 Production Ready",
+        "app": "V8 Final",
         "time_th": now_text(),
         "health": "OK",
         "line_ready": bool(LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET),
@@ -2716,7 +2726,7 @@ def signal_type_from_analysis(asset, analysis):
 def build_auto_signal_message(symbol, asset, analysis):
     msg = professional_alert_message_v77(symbol, asset, analysis)
     if msg:
-        return msg
+        return append_final_blocks_to_message(msg, asset, analysis, signal_type_from_analysis(asset, analysis))
 
     # fallback to V7.6 if needed
     try:
@@ -3138,7 +3148,7 @@ def professional_alert_message(symbol, asset, analysis):
     else:
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
 
-    tf_block = build_timeframe_confirm_v771(asset, analysis, side)
+    tf_block = build_timeframe_confirm_final(asset, analysis, side)
     opt_block = suggested_options_contract(asset, analysis)
 
     reasons = analysis.get("reasons", []) or []
@@ -3704,7 +3714,7 @@ def professional_alert_message_v77(symbol, asset, analysis):
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
         premium_block = ""
 
-    tf_block = build_timeframe_confirm_v771(asset, analysis, side)
+    tf_block = build_timeframe_confirm_final(asset, analysis, side)
     trend_block = trend_strength_text(analysis)
     opt_block = suggested_options_contract(asset, analysis)
     warning_block = risk_context_warning(asset, analysis, side)
@@ -3912,6 +3922,187 @@ def maybe_send_top5_daily():
     except Exception as e:
         print("maybe_send_top5_daily error:", e)
 
+
+# ============================================================
+# V8 FINAL PRODUCTION HARDENING
+# ============================================================
+def get_cooldown_ts(alert_key):
+    try:
+        conn = db()
+        row = conn.execute("SELECT last_sent_ts FROM alert_cooldown WHERE alert_key=?", (alert_key,)).fetchone()
+        conn.close()
+        return float(row["last_sent_ts"]) if row else 0.0
+    except Exception:
+        return 0.0
+
+
+def set_cooldown_ts(alert_key, ts=None):
+    try:
+        if ts is None:
+            ts = time.time()
+        conn = db()
+        conn.execute(
+            "INSERT INTO alert_cooldown(alert_key, last_sent_ts) VALUES(?, ?) "
+            "ON CONFLICT(alert_key) DO UPDATE SET last_sent_ts=excluded.last_sent_ts",
+            (alert_key, ts),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("set_cooldown_ts error:", e)
+
+
+def cooldown_pass(alert_key):
+    last = get_cooldown_ts(alert_key)
+    return (time.time() - last) >= ALERT_COOLDOWN_MINUTES * 60
+
+
+def timeframe_4h_confirm(asset, analysis, side):
+    """Best-effort 4H confirm.
+    Uses Yahoo/TwelveData daily/available data when true 4H is unavailable.
+    Conservative: if insufficient data, returns NEUTRAL.
+    """
+    try:
+        closes = analysis.get("closes_4h") or analysis.get("closes") or []
+        if not closes or len(closes) < 20:
+            # Fall back to current EMA alignment.
+            ema6 = safe_float(analysis.get("ema6"))
+            ema12 = safe_float(analysis.get("ema12"))
+            ema50 = safe_float(analysis.get("ema50"))
+            rsi = safe_float(analysis.get("rsi"), 50)
+            tf = timeframe_side_from_numbers(ema6, ema12, ema50, rsi) if "timeframe_side_from_numbers" in globals() else "NEUTRAL"
+        else:
+            ema_fast = sum(closes[-6:]) / 6
+            ema_mid = sum(closes[-12:]) / 12
+            ema_long = sum(closes[-20:]) / 20
+            if ema_fast > ema_mid > ema_long:
+                tf = "BUY"
+            elif ema_fast < ema_mid < ema_long:
+                tf = "SELL"
+            else:
+                tf = "NEUTRAL"
+
+        target = "BUY" if side in {"BUY", "STRONG_CALL"} else "SELL"
+        return tf, tf == target
+    except Exception:
+        return "NEUTRAL", False
+
+
+def build_timeframe_confirm_final(asset, analysis, side):
+    base = build_timeframe_confirm_v771(asset, analysis, side) if "build_timeframe_confirm_v771" in globals() else build_timeframe_confirm(asset, analysis)
+    tf4h, ok4h = timeframe_4h_confirm(asset, analysis, side)
+    lines = base.splitlines()
+    out = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if line.startswith("1H"):
+            out.append(f"4H : {tf4h}")
+            inserted = True
+    if not inserted:
+        out.append(f"4H : {tf4h}")
+
+    target = "BUY" if side in {"BUY", "STRONG_CALL"} else "SELL"
+    if STRICT_REQUIRE_4H_CONFIRM and not ok4h:
+        out = [("Overall : WAIT FOR 4H CONFIRM" if x.startswith("Overall") else x) for x in out]
+    elif f"Overall : STRONG {target}" not in "\n".join(out):
+        pass
+    return "\n".join(out)
+
+
+def dynamic_position_size(asset, analysis, side):
+    confidence = adjusted_confidence(analysis, side) if "adjusted_confidence" in globals() else calculate_signal_confidence(analysis)
+    trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else 5
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    regime = str(analysis.get("regime", "")).upper()
+
+    risk_points = 0
+    if confidence >= 85:
+        risk_points += 2
+    elif confidence >= 72:
+        risk_points += 1
+
+    if trend >= 8:
+        risk_points += 2
+    elif trend >= 5:
+        risk_points += 1
+
+    if rvol >= 1.3:
+        risk_points += 1
+    elif rvol < 0.85:
+        risk_points -= 1
+
+    if "RANGE" in regime or "LOW VOL" in regime:
+        risk_points -= 1
+
+    tf4h, ok4h = timeframe_4h_confirm(asset, analysis, side)
+    if ok4h:
+        risk_points += 1
+    else:
+        risk_points -= 1
+
+    if risk_points >= 5:
+        level = "LOW"
+        size = "เต็มแผนได้ แต่ยังต้องคุม SL"
+        percent = "75-100% ของขนาดไม้ปกติ"
+    elif risk_points >= 3:
+        level = "MEDIUM"
+        size = "เข้าแบบมาตรฐาน"
+        percent = "40-60% ของขนาดไม้ปกติ"
+    else:
+        level = "HIGH"
+        size = "ลดขนาดไม้ / รอ confirmation"
+        percent = "20-30% ของขนาดไม้ปกติ"
+
+    return f"""⚖️ Dynamic Position Size
+Risk Level: {level}
+Suggested Size: {percent}
+Action: {size}"""
+
+
+def final_gate_extra(asset, analysis, sig):
+    if sig == "NONE":
+        return False, "No signal"
+
+    if STRICT_REQUIRE_4H_CONFIRM:
+        _, ok4h = timeframe_4h_confirm(asset, analysis, sig)
+        if not ok4h:
+            return False, "4H not confirmed"
+
+    return True, "PASS"
+
+
+def should_send_alert_final(symbol, sig, analysis, asset):
+    alert_key = f"{symbol}:{sig}"
+    if not cooldown_pass(alert_key):
+        return False, f"Cooldown active {ALERT_COOLDOWN_MINUTES}m"
+
+    ok, reason = final_gate_extra(asset, analysis, sig)
+    if not ok:
+        return False, reason
+
+    if "should_send_alert" in globals():
+        try:
+            if not should_send_alert(alert_key, analysis.get("score", 50)):
+                return False, "Base should_send_alert rejected"
+        except Exception:
+            pass
+
+    return True, "PASS"
+
+
+def mark_alert_sent_final(symbol, sig):
+    set_cooldown_ts(f"{symbol}:{sig}")
+
+
+def append_final_blocks_to_message(msg, asset, analysis, side):
+    pos = dynamic_position_size(asset, analysis, side)
+    if "⚖️ Dynamic Position Size" not in msg:
+        msg = msg.replace("หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน", pos + "\n\nหมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน")
+    msg = msg.replace("ระบบปรับให้อ่านง่ายใน V7.7", "ระบบปรับให้อ่านง่ายใน V8 Final")
+    msg = msg.replace("ระบบปรับให้อ่านง่ายใน V8.1", "ระบบปรับให้อ่านง่ายใน V8 Final")
+    return msg
+
 # ============================================================
 # AUTO ALERTS
 # ============================================================
@@ -3945,7 +4136,8 @@ def auto_alert_loop():
                         analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
                         sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
 
-                        if sig != "NONE" and should_send_alert(f"{symbol}:{sig}", analysis["score"]):
+                        ok_final, reason_final = should_send_alert_final(symbol, sig, analysis, asset)
+                        if sig != "NONE" and ok_final:
                             message = build_auto_signal_message(symbol, asset, analysis)
                             if message:
                                 for user_id in ALERT_USER_IDS:
