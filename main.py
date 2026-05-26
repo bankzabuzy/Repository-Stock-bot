@@ -1,158 +1,158 @@
-IMPORTOS
-IMPORTHMAC
-IMPORTHASHLIB
-IMPORTBASE64
-IMPORTTIME
-IMPORTTHREADING
-IMPORTSTATISTICS
-FROMDATETIMEIMPORTDATETIME,TIMEDELTA
+import os
+import hmac
+import hashlib
+import base64
+import time
+import threading
+from datetime import datetime, timedelta
 
-IMPORTREQUESTS
-FROMFLASKIMPORTFLASK,REQUEST,ABORT
+import requests
+from flask import Flask, request, abort
 
-APP=FLASK(__NAME__)
+app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN=OS.GETENV("LINE_CHANNEL_ACCESS_TOKEN","")
-LINE_CHANNEL_SECRET=OS.GETENV("LINE_CHANNEL_SECRET","")
-TWELVEDATA_API_KEY=OS.GETENV("TWELVEDATA_API_KEY","")
-FINNHUB_API_KEY=OS.GETENV("FINNHUB_API_KEY","")
-PORT=INT(OS.GETENV("PORT","3000"))
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+PORT = int(os.getenv("PORT", "3000"))
 
-WATCHLIST=[
-X.STRIP().UPPER()
-FORXINOS.GETENV("WATCHLIST","NVDA,AAPL,TSLA,QQQ,SPY,GOLD,AOT,PTT,SCB").SPLIT(",")
-IFX.STRIP()
+WATCHLIST = [
+    x.strip().upper()
+    for x in os.getenv("WATCHLIST", "NVDA,AAPL,TSLA,QQQ,SPY,GOLD,AOT,PTT,SCB").split(",")
+    if x.strip()
 ]
 
-ALLOWED_USERS=[
-X.STRIP()
-FORXINOS.GETENV("ALLOWED_USERS","").SPLIT(",")
-IFX.STRIP()
+ALLOWED_USERS = [
+    x.strip()
+    for x in os.getenv("ALLOWED_USERS", "").split(",")
+    if x.strip()
 ]
 
-ALERT_USER_IDS=[
-X.STRIP()
-FORXINOS.GETENV("ALERT_USER_IDS","").SPLIT(",")
-IFX.STRIP()
+ALERT_USER_IDS = [
+    x.strip()
+    for x in os.getenv("ALERT_USER_IDS", "").split(",")
+    if x.strip()
 ]
 
-ENABLE_AUTO_ALERTS=OS.GETENV("ENABLE_AUTO_ALERTS","TRUE").LOWER()=="TRUE"
-ALERT_EVERY_MINUTES=INT(OS.GETENV("ALERT_EVERY_MINUTES","360"))
-LAST_ALERTS={}
+ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
+ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "360"))
 
-THAI_SYMBOL_MAP={
-"SCB":("SCB","SET","THB"),
-"AOT":("AOT","SET","THB"),
-"PTT":("PTT","SET","THB"),
-"CPALL":("CPALL","SET","THB"),
-"KBANK":("KBANK","SET","THB"),
-"BBL":("BBL","SET","THB"),
-"DELTA":("DELTA","SET","THB"),
-"ADVANC":("ADVANC","SET","THB"),
-"TRUE":("TRUE","SET","THB"),
-"BDMS":("BDMS","SET","THB"),
-"MINT":("MINT","SET","THB"),
-"PTTEP":("PTTEP","SET","THB"),
-"GULF":("GULF","SET","THB"),
-"CPAXT":("CPAXT","SET","THB"),
-"BEM":("BEM","SET","THB"),
-"KTB":("KTB","SET","THB"),
-"KTC":("KTC","SET","THB"),
-"OR":("OR","SET","THB"),
+THAI_SYMBOL_MAP = {
+    "SCB": ("SCB", "SET", "THB"),
+    "AOT": ("AOT", "SET", "THB"),
+    "PTT": ("PTT", "SET", "THB"),
+    "CPALL": ("CPALL", "SET", "THB"),
+    "KBANK": ("KBANK", "SET", "THB"),
+    "BBL": ("BBL", "SET", "THB"),
+    "DELTA": ("DELTA", "SET", "THB"),
+    "ADVANC": ("ADVANC", "SET", "THB"),
+    "TRUE": ("TRUE", "SET", "THB"),
+    "BDMS": ("BDMS", "SET", "THB"),
+    "MINT": ("MINT", "SET", "THB"),
+    "PTTEP": ("PTTEP", "SET", "THB"),
+    "GULF": ("GULF", "SET", "THB"),
+    "CPAXT": ("CPAXT", "SET", "THB"),
+    "BEM": ("BEM", "SET", "THB"),
+    "KTB": ("KTB", "SET", "THB"),
+    "KTC": ("KTC", "SET", "THB"),
+    "OR": ("OR", "SET", "THB"),
 }
 
-GOLD_WORDS={"GOLD","ทอง","ทองคำ","XAUUSD","XAU/USD"}
-US_INDEX_SYMBOLS={
-"SPX":"SPY",
-"NASDAQ":"QQQ",
-"NDX":"QQQ",
-"DOW":"DIA",
-"RUSSELL":"IWM",
-}
-
-
-DEFNOW_TEXT():
-RETURN(DATETIME.UTCNOW()+TIMEDELTA(HOURS=7)).STRFTIME("%D/%M/%Y%H:%M")
-
-
-DEFSAFE_FLOAT(VALUE,DEFAULT=NONE):
-TRY:
-RETURNFLOAT(VALUE)
-EXCEPTEXCEPTION:
-RETURNDEFAULT
-
-
-DEFFMT_NUM(VALUE,DECIMALS=2):
-IFVALUEISNONE:
-RETURN"N/A"
-TRY:
-RETURNF"{FLOAT(VALUE):,.{DECIMALS}F}"
-EXCEPTEXCEPTION:
-RETURN"N/A"
-
-
-DEFNORMALIZE_ASSET(USER_TEXT):
-RAW=USER_TEXT.STRIP()
-KEY=RAW.UPPER().REPLACE("","")
-
-IFRAWINGOLD_WORDSORKEYINGOLD_WORDS:
-RETURN{
-"DISPLAY":"ทองคำ/XAUUSD",
-"SYMBOL":"XAU/USD",
-"EXCHANGE":NONE,
-"CURRENCY":"USD",
-"ASSET_TYPE":"GOLD",
-"NEWS_SYMBOL":"XAU",
-}
-
-IFKEYINUS_INDEX_SYMBOLS:
-KEY=US_INDEX_SYMBOLS[KEY]
-
-IFKEY.ENDSWITH(".BK"):
-KEY=KEY.REPLACE(".BK","")
-
-IFKEY.ENDSWITH(".SET"):
-KEY=KEY.REPLACE(".SET","")
-
-IFKEYINTHAI_SYMBOL_MAP:
-SYMBOL,EXCHANGE,CURRENCY=THAI_SYMBOL_MAP[KEY]
-RETURN{
-"DISPLAY":F"{SYMBOL}.SET",
-"SYMBOL":SYMBOL,
-"EXCHANGE":EXCHANGE,
-"CURRENCY":CURRENCY,
-"ASSET_TYPE":"THAI_STOCK",
-"NEWS_SYMBOL":SYMBOL,
-}
-
-RETURN{
-"DISPLAY":KEY,
-"SYMBOL":KEY,
-"EXCHANGE":NONE,
-"CURRENCY":"USD",
-"ASSET_TYPE":"US_STOCK",
-"NEWS_SYMBOL":KEY,
+GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "XAUUSD", "XAU/USD"}
+US_INDEX_SYMBOLS = {
+    "SPX": "SPY",
+    "NASDAQ": "QQQ",
+    "NDX": "QQQ",
+    "DOW": "DIA",
+    "RUSSELL": "IWM",
 }
 
 
-DEFTD_PARAMS(ASSET,INTERVAL=NONE,OUTPUTSIZE=NONE):
-PARAMS={
-"SYMBOL":ASSET["SYMBOL"],
-"APIKEY":TWELVEDATA_API_KEY,
-}
+def now_text():
+    return (datetime.utcnow() + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
 
-IFINTERVAL:
-PARAMS["INTERVAL"]=INTERVAL
 
-IFOUTPUTSIZE:
-PARAMS["OUTPUTSIZE"]=OUTPUTSIZE
+def safe_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
 
-IFASSET["ASSET_TYPE"]=="THAI_STOCK":
-PARAMS["EXCHANGE"]="SET"
-ELIFASSET.GET("EXCHANGE"):
-PARAMS["EXCHANGE"]=ASSET["EXCHANGE"]
 
-RETURNPARAMS
+def fmt_num(value, decimals=2):
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):,.{decimals}f}"
+    except Exception:
+        return "N/A"
+
+
+def normalize_asset(user_text):
+    raw = user_text.strip()
+    key = raw.upper().replace(" ", "")
+
+    if raw in GOLD_WORDS or key in GOLD_WORDS:
+        return {
+            "display": "ทองคำ / XAUUSD",
+            "symbol": "XAU/USD",
+            "exchange": None,
+            "currency": "USD",
+            "asset_type": "GOLD",
+            "news_symbol": "XAU",
+        }
+
+    if key in US_INDEX_SYMBOLS:
+        key = US_INDEX_SYMBOLS[key]
+
+    if key.endswith(".BK"):
+        key = key.replace(".BK", "")
+
+    if key.endswith(".SET"):
+        key = key.replace(".SET", "")
+
+    if key in THAI_SYMBOL_MAP:
+        symbol, exchange, currency = THAI_SYMBOL_MAP[key]
+        return {
+            "display": f"{symbol}.SET",
+            "symbol": symbol,
+            "exchange": exchange,
+            "currency": currency,
+            "asset_type": "THAI_STOCK",
+            "news_symbol": symbol,
+        }
+
+    return {
+        "display": key,
+        "symbol": key,
+        "exchange": None,
+        "currency": "USD",
+        "asset_type": "US_STOCK",
+        "news_symbol": key,
+    }
+
+
+def td_params(asset, interval=None, outputsize=None):
+    params = {
+        "symbol": asset["symbol"],
+        "apikey": TWELVEDATA_API_KEY,
+    }
+
+    if interval:
+        params["interval"] = interval
+
+    if outputsize:
+        params["outputsize"] = outputsize
+
+    if asset["asset_type"] == "THAI_STOCK":
+        params["exchange"] = "SET"
+    elif asset.get("exchange"):
+        params["exchange"] = asset["exchange"]
+
+    return params
+
+
 def td_get_quote(asset):
     if not TWELVEDATA_API_KEY:
         raise RuntimeError("ยังไม่ได้ตั้งค่า TWELVEDATA_API_KEY")
@@ -202,12 +202,6 @@ def td_get_series(asset, interval="15min", outputsize=160):
             volumes.append(volume or 0)
 
     return closes, highs, lows, opens, volumes
-
-
-def sma(values, period):
-    if len(values) < period:
-        return None
-    return sum(values[-period:]) / period
 
 
 def ema(values, period):
@@ -387,223 +381,4 @@ def fetch_news(asset):
             return "ไม่พบข่าวล่าสุดจาก Finnhub", 0
 
         headlines = []
-        for item in items[:3]:
-            headline = item.get("headline")
-            if headline:
-                headlines.append(f"- {headline}")
-
-        return "\n".join(headlines) if headlines else "ไม่มีหัวข้อข่าวสำคัญ", len(headlines)
-
-    except Exception as e:
-        return f"ดึงข่าวไม่สำเร็จ: {e}", 0
-
-
-def build_asset_report(user_text):
-    asset = normalize_asset(user_text)
-    quote = td_get_quote(asset)
-    closes, highs, lows, opens, volumes = td_get_series(asset)
-    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-    news_text, news_count = fetch_news(asset)
-
-    currency = asset["currency"]
-    price_label = "$" if currency == "USD" else "฿"
-
-    reasons = analysis["reasons"][:5]
-    if not reasons:
-        reasons = ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
-
-    text = f"""📊 วิเคราะห์ {asset['display']}
-เวลาไทย: {now_text()}
-
-ราคา: {price_label}{fmt_num(analysis['price'])}
-เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
-
-AI Score: {analysis['score']}/100
-มุมมอง: {analysis['bias']}
-
-📈 Technical
-EMA6: {fmt_num(analysis['ema6'])}
-EMA12: {fmt_num(analysis['ema12'])}
-EMA50: {fmt_num(analysis['ema50'])}
-RSI14: {fmt_num(analysis['rsi'])}
-ATR14: {fmt_num(analysis['atr'])}
-
-🎯 โซนราคา
-แนวรับประมาณ: {price_label}{fmt_num(analysis['support'])}
-แนวต้านประมาณ: {price_label}{fmt_num(analysis['resistance'])}
-Stop loss เชิงระบบ: {price_label}{fmt_num(analysis['stop_loss'])}
-Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profit'])}
-
-เหตุผลหลัก:
-{chr(10).join("- " + r for r in reasons)}
-
-📰 ข่าว/บริบท:
-{news_text}
-
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ใช้เพื่อช่วยคัดกรองเท่านั้น"""
-    return text
-def line_reply(reply_token, text):
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        print("LINE_CHANNEL_ACCESS_TOKEN is missing")
-        return
-
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text[:4900]}],
-    }
-
-    requests.post(url, headers=headers, json=payload, timeout=20)
-
-
-def line_push(user_id, text):
-    if not LINE_CHANNEL_ACCESS_TOKEN or not user_id:
-        return
-
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "to": user_id,
-        "messages": [{"type": "text", "text": text[:4900]}],
-    }
-
-    requests.post(url, headers=headers, json=payload, timeout=20)
-
-
-def verify_line_signature(body, signature):
-    if not LINE_CHANNEL_SECRET:
-        return True
-
-    digest = hmac.new(
-        LINE_CHANNEL_SECRET.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).digest()
-
-    valid_signature = base64.b64encode(digest).decode("utf-8")
-    return hmac.compare_digest(valid_signature, signature or "")
-
-
-def help_text():
-    return """พิมพ์ชื่อสินทรัพย์ที่ต้องการวิเคราะห์ เช่น
-
-NVDA
-AAPL
-TSLA
-QQQ
-SPY
-SCB
-AOT
-PTT
-ทองคำ
-GOLD
-
-คำสั่งพิเศษ:
-watchlist = ดูรายการเฝ้าดู
-help = วิธีใช้งาน"""
-
-
-def handle_message(user_id, text):
-    clean = text.strip()
-
-    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        return "User นี้ยังไม่ได้รับอนุญาตให้ใช้งานระบบ"
-
-    lower = clean.lower()
-
-    if lower in {"help", "วิธีใช้", "เมนู"}:
-        return help_text()
-
-    if lower == "watchlist":
-        return "รายการเฝ้าดู:\n" + "\n".join(f"- {x}" for x in WATCHLIST)
-
-    try:
-        return build_asset_report(clean)
-    except Exception as e:
-        return (
-            "ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\n"
-            "ลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\n"
-            f"Error: {e}"
-        )
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return {
-        "status": "ok",
-        "service": "AI Market LINE Bot",
-        "time_th": now_text(),
-        "watchlist": WATCHLIST,
-    }
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    body = request.get_data()
-    signature = request.headers.get("X-Line-Signature", "")
-
-    if not verify_line_signature(body, signature):
-        abort(400)
-
-    payload = request.get_json(silent=True) or {}
-
-    for event in payload.get("events", []):
-        event_type = event.get("type")
-        reply_token = event.get("replyToken")
-        source = event.get("source", {})
-        user_id = source.get("userId", "")
-
-        if event_type != "message":
-            continue
-
-        message = event.get("message", {})
-        if message.get("type") != "text":
-            line_reply(reply_token, "ตอนนี้รองรับเฉพาะข้อความเท่านั้นครับ")
-            continue
-
-        user_text = message.get("text", "")
-        response_text = handle_message(user_id, user_text)
-        line_reply(reply_token, response_text)
-
-    return "OK", 200
-
-
-def auto_alert_loop():
-    while True:
-        try:
-            if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-                for symbol in WATCHLIST:
-                    try:
-                        report = build_asset_report(symbol)
-                        header = f"🔔 Auto Alert: {symbol}\n\n"
-                        for user_id in ALERT_USER_IDS:
-                            line_push(user_id, header + report)
-                        time.sleep(3)
-                    except Exception as e:
-                        print(f"Auto alert error for {symbol}: {e}")
-
-            time.sleep(ALERT_EVERY_MINUTES * 60)
-
-        except Exception as e:
-            print(f"Auto alert loop error: {e}")
-            time.sleep(60)
-
-
-if __name__ == "__main__":
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        t = threading.Thread(target=auto_alert_loop, daemon=True)
-        t.start()
-
-    app.run(host="0.0.0.0", port=PORT)
+ 
