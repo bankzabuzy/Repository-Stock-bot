@@ -1,6 +1,4 @@
 flask
 requests
-pillow
 gunicorn
-matplotlib
-pandas
+
