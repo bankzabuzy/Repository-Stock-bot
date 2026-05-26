@@ -23,6 +23,8 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 PORT = int(os.getenv("PORT", "3000"))
 
@@ -48,7 +50,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.7.4 Strict Alert Gate
+# V7.8 Multi-Free API Fallback
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
 STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
@@ -58,7 +60,7 @@ STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() 
 STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
-# V7.7.4 Strict Alert Gate
+# V7.8 Multi-Free API Fallback
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -73,6 +75,10 @@ TOP5_COOLDOWN_KEY = "top5_daily"
 
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
+
+# V7.8 Multi-Free API Fallback
+ENABLE_MULTI_API_FALLBACK = os.getenv("ENABLE_MULTI_API_FALLBACK", "true").lower() == "true"
+API_FALLBACK_VERBOSE = os.getenv("API_FALLBACK_VERBOSE", "false").lower() == "true"
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -393,6 +399,233 @@ def normalize_asset(user_text):
     }
 
 
+
+# ============================================================
+# V7.8 MULTI-FREE API FALLBACK ENGINE
+# ============================================================
+def log_api_fallback(message):
+    if API_FALLBACK_VERBOSE:
+        print("[V7.8 API FALLBACK]", message)
+
+
+def api_quote_template(symbol, price, previous_close=None, currency="USD", source=""):
+    change = None
+    percent_change = None
+    try:
+        if previous_close and price:
+            change = float(price) - float(previous_close)
+            percent_change = change / float(previous_close) * 100
+    except Exception:
+        pass
+
+    return {
+        "symbol": symbol,
+        "close": price,
+        "price": price,
+        "previous_close": previous_close,
+        "change": change,
+        "percent_change": percent_change,
+        "currency": currency,
+        "source": source,
+    }
+
+
+def finnhub_get_quote(asset):
+    if not FINNHUB_API_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า FINNHUB_API_KEY")
+    symbol = asset["symbol"]
+    r = requests.get(
+        "https://finnhub.io/api/v1/quote",
+        params={"symbol": symbol, "token": FINNHUB_API_KEY},
+        headers=REQUEST_HEADERS,
+        timeout=20,
+    )
+    q = r.json()
+    price = safe_float(q.get("c"))
+    prev = safe_float(q.get("pc"))
+    if price is None or price <= 0:
+        raise RuntimeError(f"Finnhub ไม่พบ quote สำหรับ {symbol}")
+    return api_quote_template(symbol, price, prev, asset.get("currency", "USD"), "Finnhub")
+
+
+def fmp_get_quote(asset):
+    if not FMP_API_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า FMP_API_KEY")
+    symbol = asset["symbol"]
+    r = requests.get(
+        f"https://financialmodelingprep.com/api/v3/quote/{symbol}",
+        params={"apikey": FMP_API_KEY},
+        headers=REQUEST_HEADERS,
+        timeout=20,
+    )
+    data = r.json()
+    if not isinstance(data, list) or not data:
+        raise RuntimeError(f"FMP ไม่พบ quote สำหรับ {symbol}")
+    q = data[0]
+    price = safe_float(q.get("price"))
+    prev = safe_float(q.get("previousClose"))
+    if price is None:
+        raise RuntimeError(f"FMP quote ไม่มีราคา {symbol}")
+    return api_quote_template(symbol, price, prev, asset.get("currency", "USD"), "FMP")
+
+
+def fmp_get_series(asset, outputsize=160):
+    if not FMP_API_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า FMP_API_KEY")
+    symbol = asset["symbol"]
+    r = requests.get(
+        f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}",
+        params={"timeseries": outputsize, "apikey": FMP_API_KEY},
+        headers=REQUEST_HEADERS,
+        timeout=25,
+    )
+    data = r.json()
+    hist = data.get("historical", []) if isinstance(data, dict) else []
+    if not hist:
+        raise RuntimeError(f"FMP ไม่พบ historical สำหรับ {symbol}")
+    hist = list(reversed(hist[:outputsize]))
+    closes, highs, lows, opens, volumes = [], [], [], [], []
+    for v in hist:
+        try:
+            closes.append(float(v.get("close")))
+            highs.append(float(v.get("high")))
+            lows.append(float(v.get("low")))
+            opens.append(float(v.get("open")))
+            volumes.append(float(v.get("volume") or 0))
+        except Exception:
+            pass
+    if not closes:
+        raise RuntimeError(f"FMP historical ไม่มีราคา {symbol}")
+    return closes, highs, lows, opens, volumes
+
+
+def alphavantage_get_quote(asset):
+    if not ALPHAVANTAGE_API_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า ALPHAVANTAGE_API_KEY")
+    symbol = asset["symbol"]
+    r = requests.get(
+        "https://www.alphavantage.co/query",
+        params={"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": ALPHAVANTAGE_API_KEY},
+        headers=REQUEST_HEADERS,
+        timeout=20,
+    )
+    data = r.json()
+    q = data.get("Global Quote", {}) if isinstance(data, dict) else {}
+    price = safe_float(q.get("05. price"))
+    prev = safe_float(q.get("08. previous close"))
+    if price is None:
+        raise RuntimeError(f"Alpha Vantage ไม่พบ quote สำหรับ {symbol}")
+    return api_quote_template(symbol, price, prev, asset.get("currency", "USD"), "Alpha Vantage")
+
+
+def alphavantage_get_series(asset):
+    if not ALPHAVANTAGE_API_KEY:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า ALPHAVANTAGE_API_KEY")
+    symbol = asset["symbol"]
+    r = requests.get(
+        "https://www.alphavantage.co/query",
+        params={"function": "TIME_SERIES_DAILY_ADJUSTED", "symbol": symbol, "outputsize": "compact", "apikey": ALPHAVANTAGE_API_KEY},
+        headers=REQUEST_HEADERS,
+        timeout=25,
+    )
+    data = r.json()
+    ts = data.get("Time Series (Daily)", {}) if isinstance(data, dict) else {}
+    if not ts:
+        raise RuntimeError(f"Alpha Vantage ไม่พบ series สำหรับ {symbol}")
+    items = sorted(ts.items())[-160:]
+    closes, highs, lows, opens, volumes = [], [], [], [], []
+    for _, v in items:
+        try:
+            opens.append(float(v.get("1. open")))
+            highs.append(float(v.get("2. high")))
+            lows.append(float(v.get("3. low")))
+            closes.append(float(v.get("4. close")))
+            volumes.append(float(v.get("6. volume") or v.get("5. volume") or 0))
+        except Exception:
+            pass
+    if not closes:
+        raise RuntimeError(f"Alpha Vantage series ไม่มีราคา {symbol}")
+    return closes, highs, lows, opens, volumes
+
+
+def multi_api_get_us_market_data(asset):
+    errors = []
+
+    try:
+        quote = td_get_quote(asset)
+        closes, highs, lows, opens, volumes = td_get_series(asset)
+        if closes:
+            quote["source"] = "TwelveData"
+            return quote, closes, highs, lows, opens, volumes
+    except Exception as e:
+        errors.append(f"TwelveData: {e}")
+        log_api_fallback(errors[-1])
+
+    try:
+        quote = finnhub_get_quote(asset)
+        try:
+            _, closes, highs, lows, opens, volumes = yf_get_quote_and_series(asset)
+        except Exception:
+            closes, highs, lows, opens, volumes = fmp_get_series(asset)
+        return quote, closes, highs, lows, opens, volumes
+    except Exception as e:
+        errors.append(f"Finnhub: {e}")
+        log_api_fallback(errors[-1])
+
+    try:
+        quote = fmp_get_quote(asset)
+        closes, highs, lows, opens, volumes = fmp_get_series(asset)
+        return quote, closes, highs, lows, opens, volumes
+    except Exception as e:
+        errors.append(f"FMP: {e}")
+        log_api_fallback(errors[-1])
+
+    try:
+        quote = alphavantage_get_quote(asset)
+        closes, highs, lows, opens, volumes = alphavantage_get_series(asset)
+        return quote, closes, highs, lows, opens, volumes
+    except Exception as e:
+        errors.append(f"AlphaVantage: {e}")
+        log_api_fallback(errors[-1])
+
+    try:
+        quote, closes, highs, lows, opens, volumes = yf_get_quote_and_series(asset)
+        quote["source"] = "Yahoo Finance"
+        return quote, closes, highs, lows, opens, volumes
+    except Exception as e:
+        errors.append(f"Yahoo: {e}")
+
+    raise RuntimeError("ไม่พบข้อมูลจากทุกแหล่ง: " + " | ".join(errors[-5:]))
+
+
+def fmp_get_valuation(asset):
+    if not FMP_API_KEY:
+        return {}
+    try:
+        symbol = asset["symbol"]
+        r = requests.get(
+            f"https://financialmodelingprep.com/api/v3/profile/{symbol}",
+            params={"apikey": FMP_API_KEY},
+            headers=REQUEST_HEADERS,
+            timeout=20,
+        )
+        data = r.json()
+        if isinstance(data, list) and data:
+            p = data[0]
+            return {
+                "source": "FMP",
+                "price": safe_float(p.get("price")),
+                "beta": safe_float(p.get("beta")),
+                "mktCap": safe_float(p.get("mktCap")),
+                "lastDiv": safe_float(p.get("lastDiv")),
+                "companyName": p.get("companyName"),
+                "sector": p.get("sector"),
+                "industry": p.get("industry"),
+            }
+    except Exception as e:
+        log_api_fallback(f"FMP valuation: {e}")
+    return {}
+
 # ============================================================
 # DATA SOURCES
 # ============================================================
@@ -689,25 +922,12 @@ def get_market_data(asset):
         result = yf_get_quote_and_series(asset)
 
     elif asset["asset_type"] == "US_STOCK":
-        try:
+        if ENABLE_MULTI_API_FALLBACK:
+            result = multi_api_get_us_market_data(asset)
+        else:
             quote = td_get_quote(asset)
             closes, highs, lows, opens, volumes = td_get_series(asset)
             result = (quote, closes, highs, lows, opens, volumes)
-        except Exception as e:
-            # V7.5 fallback: try SYMBOL.BK before failing
-            test_asset = {
-                "display": f"{asset['symbol']}.BK",
-                "symbol": asset["symbol"],
-                "yf_symbol": f"{asset['symbol']}.BK",
-                "currency": "THB",
-                "asset_type": "THAI_STOCK",
-                "news_symbol": asset["symbol"],
-            }
-            try:
-                result = yf_get_quote_and_series(test_asset)
-                asset.update(test_asset)
-            except Exception:
-                raise e
 
     elif asset["asset_type"] == "GOLD":
         try:
@@ -717,11 +937,13 @@ def get_market_data(asset):
         except Exception as e:
             print("Gold Twelve Data fallback to Yahoo:", e)
             result = yf_get_quote_and_series(asset)
+
     else:
         result = yf_get_quote_and_series(asset)
 
     cache_set(key, result)
     return result
+
 
 
 def get_mtf(asset):
@@ -1864,7 +2086,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.7.4 Strict Alert Gate
+    return """V7.8 Multi-Free API Fallback
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1911,8 +2133,15 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.7.4 Strict Alert Gate",
+        "service": "AI Market LINE Bot V7.8 Multi-Free API Fallback",
         "time_th": now_text(),
+        "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
+        "api_keys": {
+            "twelvedata": bool(TWELVEDATA_API_KEY),
+            "finnhub": bool(FINNHUB_API_KEY),
+            "fmp": bool(FMP_API_KEY),
+            "alphavantage": bool(ALPHAVANTAGE_API_KEY),
+        },
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
         "top5_daily_time_th": TOP5_DAILY_TIME_TH,
@@ -1972,7 +2201,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.7.4 Strict Alert Gate</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.8 Multi-Free API Fallback</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -1999,6 +2228,13 @@ def signal_status():
         "auto_alert_min_score": AUTO_ALERT_MIN_SCORE,
         "auto_alert_max_score": AUTO_ALERT_MAX_SCORE,
         "time_th": now_text(),
+        "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
+        "api_keys": {
+            "twelvedata": bool(TWELVEDATA_API_KEY),
+            "finnhub": bool(FINNHUB_API_KEY),
+            "fmp": bool(FMP_API_KEY),
+            "alphavantage": bool(ALPHAVANTAGE_API_KEY),
+        },
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
         "top5_daily_time_th": TOP5_DAILY_TIME_TH,
@@ -2051,8 +2287,92 @@ def strict_check(symbol):
         "rvol": analysis.get("rvol"),
         "regime": analysis.get("regime"),
         "time_th": now_text(),
+        "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
+        "api_keys": {
+            "twelvedata": bool(TWELVEDATA_API_KEY),
+            "finnhub": bool(FINNHUB_API_KEY),
+            "fmp": bool(FMP_API_KEY),
+            "alphavantage": bool(ALPHAVANTAGE_API_KEY),
+        },
     })
 
+
+
+# ============================================================
+# V7.8 LINE COMMAND ROUTER
+# ============================================================
+def build_signal_status_text():
+    return f"""📡 Signal Status
+
+App: V7.8 Multi-Free API Fallback
+เวลาไทย: {now_text()}
+
+Auto Alerts: {ENABLE_AUTO_ALERTS}
+Alert Users: {len(ALERT_USER_IDS)}
+Watchlist: {", ".join(WATCHLIST[:30])}
+
+Multi API Fallback: {ENABLE_MULTI_API_FALLBACK}
+Strict Alert: {STRICT_ALERT_MODE if 'STRICT_ALERT_MODE' in globals() else 'N/A'}
+
+API Keys:
+TwelveData: {'OK' if TWELVEDATA_API_KEY else 'Missing'}
+Finnhub: {'OK' if FINNHUB_API_KEY else 'Missing'}
+FMP: {'OK' if FMP_API_KEY else 'Missing'}
+Alpha Vantage: {'OK' if ALPHAVANTAGE_API_KEY else 'Missing'}"""
+
+
+def handle_line_command(user_text):
+    text = (user_text or "").strip()
+    low = text.lower()
+
+    if low in {"/health", "health"}:
+        return "OK"
+
+    if low in {"/oil", "oil", "oli", "น้ำมัน", "ราคาน้ำมัน"}:
+        return build_oil_report()
+
+    if low in {"/gold", "gold", "ทอง", "ทองคำ", "xauusd"}:
+        try:
+            return build_asset_report("GOLD")
+        except Exception:
+            return handle_message("", "GOLD") if "handle_message" in globals() else "ไม่สามารถดึงข้อมูลทองคำได้"
+
+    if low in {"/signal-status", "signal-status", "status", "/status"}:
+        return build_signal_status_text()
+
+    if low in {"/top5", "top5"}:
+        return build_top5_daily_message()
+
+    if low in {"/premarket", "premarket"}:
+        return build_premarket_reminder()
+
+    if low.startswith("/strict-check"):
+        parts = text.split()
+        sym = parts[1] if len(parts) > 1 else "NVDA"
+        try:
+            asset = normalize_asset(sym)
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            raw_sig = signal_type_from_analysis(asset, analysis)
+            if raw_sig != "NONE" and "strict_alert_gate" in globals():
+                ok, reason = strict_alert_gate(sym.upper(), asset, analysis, raw_sig)
+            else:
+                ok, reason = False, "No raw signal"
+            return f"""🧪 Strict Check {sym.upper()}
+
+Raw Signal: {raw_sig}
+Allowed: {ok}
+Reason: {reason}
+Score: {analysis.get('score')}
+Regime: {analysis.get('regime')}
+เวลาไทย: {now_text()}"""
+        except Exception as e:
+            return f"Strict Check Error: {e}"
+
+    if low.startswith("/"):
+        return "ไม่รู้จักคำสั่งนี้ครับ\nลองใช้ /gold, /oil, /signal-status, /top5, /premarket หรือพิมพ์ชื่อหุ้น เช่น NVDA, AAPL, SCB"
+
+    return None
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
