@@ -1961,7 +1961,7 @@ def dashboard():
 
 
 
-@app.route("/oil-test", "/signal-status", methods=["GET"])
+@app.route("/oil-test", methods=["GET"])
 def oil_test():
     return jsonify(get_thai_oil_prices())
 
