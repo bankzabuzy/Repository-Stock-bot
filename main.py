@@ -1,4 +1,5 @@
 import os
+import re
 import hmac
 import hashlib
 import base64
@@ -8,10 +9,14 @@ from datetime import datetime, timedelta
 
 import requests
 import yfinance as yf
+from bs4 import BeautifulSoup
 from flask import Flask, request, abort
 
 app = Flask(__name__)
 
+# =========================
+# ENV CONFIG
+# =========================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
@@ -24,12 +29,14 @@ WATCHLIST = [
     if x.strip()
 ]
 
+# If empty = everyone can use the bot.
 ALLOWED_USERS = [
     x.strip()
     for x in os.getenv("ALLOWED_USERS", "").split(",")
     if x.strip()
 ]
 
+# For push/auto-alert. Put LINE userId / groupId / roomId here.
 ALERT_USER_IDS = [
     x.strip()
     for x in os.getenv("ALERT_USER_IDS", "").split(",")
@@ -42,13 +49,22 @@ AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "75"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 LAST_ALERTS = {}
 
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
+
 THAI_SYMBOLS = {
     "SCB", "AOT", "PTT", "CPALL", "KBANK", "BBL", "DELTA", "ADVANC", "TRUE",
     "BDMS", "MINT", "PTTEP", "GULF", "CPAXT", "BEM", "KTB", "KTC", "OR",
-    "CRC", "HMPRO", "CENTEL", "GPSC", "EA", "BGRIM", "BH", "TOP", "SCC"
+    "CRC", "HMPRO", "CENTEL", "GPSC", "EA", "BGRIM", "BH", "TOP", "SCC",
+    "TISCO", "LH", "MTC", "SAWAD", "TIDLOR", "OSP", "CBG", "TU", "IVL"
 }
 
-GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "XAUUSD", "XAU/USD"}
+GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "XAUUSD", "XAU/USD", "ทองคํา"}
 US_INDEX_SYMBOLS = {
     "SPX": "SPY",
     "NASDAQ": "QQQ",
@@ -58,6 +74,9 @@ US_INDEX_SYMBOLS = {
 }
 
 
+# =========================
+# UTILS
+# =========================
 def now_text():
     return (datetime.utcnow() + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
 
@@ -66,6 +85,8 @@ def safe_float(value, default=None):
     try:
         if value is None:
             return default
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
         return float(value)
     except Exception:
         return default
@@ -80,38 +101,29 @@ def fmt_num(value, decimals=2):
         return "N/A"
 
 
-def get_usd_thb_rate():
-    try:
-        if TWELVEDATA_API_KEY:
-            r = requests.get(
-                "https://api.twelvedata.com/exchange_rate",
-                params={"symbol": "USD/THB", "apikey": TWELVEDATA_API_KEY},
-                timeout=15,
-            )
-            data = r.json()
-            rate = safe_float(data.get("rate"))
-            if rate:
-                return rate
-    except Exception:
-        pass
-
-    try:
-        data = yf.Ticker("USDTHB=X").history(period="5d", interval="1d")
-        if not data.empty:
-            return float(data["Close"].dropna().iloc[-1])
-    except Exception:
-        pass
-
-    return 36.50
-
-
-def gold_thb_per_baht_weight(xauusd_price, usd_thb_rate):
-    # 1 baht gold weight approx 15.244 grams, 1 troy ounce = 31.1034768 grams.
-    if not xauusd_price or not usd_thb_rate:
+def clean_price_text(value):
+    if value is None:
         return None
-    return xauusd_price * usd_thb_rate * (15.244 / 31.1034768)
+    text = str(value).strip().replace(",", "")
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    return safe_float(match.group(0))
 
 
+def extract_price_numbers(text):
+    # Extract values like 70,050.00 / 70050 / 70,050
+    nums = []
+    for m in re.findall(r"\d{2,3},\d{3}(?:\.\d+)?|\d{5,6}(?:\.\d+)?", text):
+        v = safe_float(m)
+        if v and 10000 <= v <= 200000:
+            nums.append(v)
+    return nums
+
+
+# =========================
+# ASSET NORMALIZATION
+# =========================
 def normalize_asset(user_text):
     raw = user_text.strip()
     key = raw.upper().replace(" ", "")
@@ -154,6 +166,174 @@ def normalize_asset(user_text):
     }
 
 
+# =========================
+# DATA SOURCES
+# =========================
+def get_usd_thb_rate():
+    # 1) Twelve Data
+    try:
+        if TWELVEDATA_API_KEY:
+            r = requests.get(
+                "https://api.twelvedata.com/exchange_rate",
+                params={"symbol": "USD/THB", "apikey": TWELVEDATA_API_KEY},
+                headers=REQUEST_HEADERS,
+                timeout=15,
+            )
+            data = r.json()
+            rate = safe_float(data.get("rate"))
+            if rate:
+                return rate
+    except Exception:
+        pass
+
+    # 2) Yahoo Finance fallback
+    try:
+        data = yf.Ticker("USDTHB=X").history(period="5d", interval="1d")
+        if not data.empty:
+            return float(data["Close"].dropna().iloc[-1])
+    except Exception:
+        pass
+
+    # 3) Safe fallback
+    return 36.50
+
+
+def gold_thb_per_baht_weight(xauusd_price, usd_thb_rate):
+    # 1 baht gold weight ≈ 15.244 g, 1 troy ounce = 31.1034768 g
+    if not xauusd_price or not usd_thb_rate:
+        return None
+    return xauusd_price * usd_thb_rate * (15.244 / 31.1034768)
+
+
+def get_goldtraders_price():
+    """Try to fetch Thai gold price from Gold Traders Association website.
+    Returns dict:
+      bar_buy, bar_sell, ornament_buy, ornament_sell, source, updated_at
+    or None if parsing failed.
+
+    Note: if GoldTraders changes HTML/JS rendering, this function may fail.
+    The bot then falls back to calculated XAUUSD × USDTHB estimate.
+    """
+    urls = [
+        "https://www.goldtraders.or.th/",
+        "https://www.goldtraders.or.th/Default.aspx",
+        "https://newgta.goldtraders.or.th/homepage_pre",
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+
+            html = r.text
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
+
+            # Direct ID parsing for old ASP.NET GoldTraders site.
+            # IDs have changed before, so this is best-effort.
+            id_candidates = {
+                "bar_buy": [
+                    "DetailPlace_uc_goldprices1_lblBLSell",
+                    "DetailPlace_uc_goldprices1_lblBLBuy",
+                    "lblBLSell",
+                    "lblBLBuy",
+                ],
+                "bar_sell": [
+                    "DetailPlace_uc_goldprices1_lblBLSell2",
+                    "DetailPlace_uc_goldprices1_lblBLSell",
+                    "lblBLSell2",
+                    "lblBLSell",
+                ],
+                "ornament_buy": [
+                    "DetailPlace_uc_goldprices1_lblOMBuy",
+                    "lblOMBuy",
+                ],
+                "ornament_sell": [
+                    "DetailPlace_uc_goldprices1_lblOMSell",
+                    "lblOMSell",
+                ],
+            }
+
+            parsed = {}
+            for key, ids in id_candidates.items():
+                for id_ in ids:
+                    tag = soup.find(id=id_)
+                    value = clean_price_text(tag.get_text(" ", strip=True)) if tag else None
+                    if value:
+                        parsed[key] = value
+                        break
+
+            # Text-pattern parsing fallback around Thai labels.
+            if "bar_buy" not in parsed or "bar_sell" not in parsed:
+                # Try to find numbers around common labels.
+                normalized = text.replace("\xa0", " ")
+                numbers = extract_price_numbers(normalized)
+
+                # In many GoldTraders pages, 4 core prices appear close together:
+                # gold bar buy, gold bar sell, ornament buy, ornament sell.
+                # We avoid over-claiming exact fields if order cannot be determined.
+                if len(numbers) >= 2:
+                    # Pick plausible adjacent prices with small spread.
+                    candidates = []
+                    for i in range(len(numbers) - 1):
+                        a, b = numbers[i], numbers[i + 1]
+                        if 0 <= b - a <= 1000:
+                            candidates.append((a, b, i))
+                    if candidates:
+                        bar_buy, bar_sell, idx = candidates[0]
+                        parsed.setdefault("bar_buy", bar_buy)
+                        parsed.setdefault("bar_sell", bar_sell)
+                        if len(numbers) > idx + 2:
+                            parsed.setdefault("ornament_buy", numbers[idx + 2])
+                        if len(numbers) > idx + 3:
+                            parsed.setdefault("ornament_sell", numbers[idx + 3])
+
+            if parsed.get("bar_buy") and parsed.get("bar_sell"):
+                # Basic sanity checks.
+                if parsed["bar_sell"] < parsed["bar_buy"]:
+                    parsed["bar_buy"], parsed["bar_sell"] = parsed["bar_sell"], parsed["bar_buy"]
+
+                return {
+                    "bar_buy": parsed.get("bar_buy"),
+                    "bar_sell": parsed.get("bar_sell"),
+                    "ornament_buy": parsed.get("ornament_buy"),
+                    "ornament_sell": parsed.get("ornament_sell"),
+                    "source": "สมาคมค้าทองคำ / GoldTraders",
+                    "updated_at": now_text(),
+                    "raw_url": url,
+                }
+
+        except Exception as e:
+            print("GoldTraders fetch error:", url, e)
+
+    return None
+
+
+def get_thai_gold_price_or_estimate(xauusd_price, usd_thb_rate):
+    real_price = get_goldtraders_price()
+    if real_price:
+        real_price["is_estimate"] = False
+        return real_price
+
+    # Fallback estimate
+    bar_sell = gold_thb_per_baht_weight(xauusd_price, usd_thb_rate)
+    bar_buy = bar_sell - 100 if bar_sell else None
+    ornament_sell = bar_sell + 850 if bar_sell else None
+    ornament_buy = bar_buy - 700 if bar_buy else None
+
+    return {
+        "bar_buy": bar_buy,
+        "bar_sell": bar_sell,
+        "ornament_buy": ornament_buy,
+        "ornament_sell": ornament_sell,
+        "source": "คำนวณประมาณจาก XAUUSD × USD/THB",
+        "updated_at": now_text(),
+        "raw_url": None,
+        "is_estimate": True,
+    }
+
+
 def td_params(asset, interval=None, outputsize=None):
     params = {
         "symbol": asset["symbol"],
@@ -170,16 +350,17 @@ def td_get_quote(asset):
     if not TWELVEDATA_API_KEY:
         raise RuntimeError("ยังไม่ได้ตั้งค่า TWELVEDATA_API_KEY")
 
-    url = "https://api.twelvedata.com/quote"
-    r = requests.get(url, params=td_params(asset), timeout=20)
+    r = requests.get(
+        "https://api.twelvedata.com/quote",
+        params=td_params(asset),
+        headers=REQUEST_HEADERS,
+        timeout=20,
+    )
     data = r.json()
 
     if data.get("status") == "error" or "close" not in data:
         msg = data.get("message", "")
-        raise RuntimeError(
-            f"ไม่พบข้อมูลจาก Twelve Data สำหรับ {asset['display']}\n"
-            f"รายละเอียด: {msg}"
-        )
+        raise RuntimeError(f"ไม่พบข้อมูลจาก Twelve Data สำหรับ {asset['display']}\nรายละเอียด: {msg}")
 
     return {
         "close": safe_float(data.get("close")),
@@ -190,10 +371,10 @@ def td_get_quote(asset):
 
 
 def td_get_series(asset, interval="15min", outputsize=160):
-    url = "https://api.twelvedata.com/time_series"
     r = requests.get(
-        url,
+        "https://api.twelvedata.com/time_series",
         params=td_params(asset, interval=interval, outputsize=outputsize),
+        headers=REQUEST_HEADERS,
         timeout=20,
     )
     data = r.json()
@@ -223,9 +404,8 @@ def td_get_series(asset, interval="15min", outputsize=160):
 
 def yf_get_quote_and_series(asset):
     ticker = yf.Ticker(asset["yf_symbol"])
-
-    # Yahoo Finance free data. 15m works for many tickers, but Thai stocks can be limited.
     data = ticker.history(period="3mo", interval="1d", auto_adjust=False)
+
     if data.empty:
         raise RuntimeError(f"Yahoo Finance ไม่พบข้อมูลสำหรับ {asset['display']}")
 
@@ -259,20 +439,22 @@ def get_market_data(asset):
         closes, highs, lows, opens, volumes = td_get_series(asset)
         return quote, closes, highs, lows, opens, volumes
 
-    # Gold: try Twelve Data XAU/USD first, fallback to Yahoo GC=F.
     if asset["asset_type"] == "GOLD":
         try:
             quote = td_get_quote(asset)
             closes, highs, lows, opens, volumes = td_get_series(asset)
             if closes:
                 return quote, closes, highs, lows, opens, volumes
-        except Exception:
-            pass
+        except Exception as e:
+            print("Gold Twelve Data fallback to Yahoo:", e)
         return yf_get_quote_and_series(asset)
 
     return yf_get_quote_and_series(asset)
 
 
+# =========================
+# INDICATORS
+# =========================
 def ema(values, period):
     if len(values) < period:
         return None
@@ -287,8 +469,7 @@ def calc_rsi(values, period=14):
     if len(values) < period + 1:
         return None
 
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(-period, 0):
         diff = values[i] - values[i - 1]
         if diff >= 0:
@@ -414,6 +595,9 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     }
 
 
+# =========================
+# NEWS
+# =========================
 def fetch_news(asset):
     if not FINNHUB_API_KEY:
         return "ยังไม่ได้ตั้งค่า FINNHUB_API_KEY จึงยังไม่ดึงข่าว", 0
@@ -428,15 +612,15 @@ def fetch_news(asset):
         today = datetime.utcnow().date()
         week_ago = today - timedelta(days=7)
 
-        url = "https://finnhub.io/api/v1/company-news"
         r = requests.get(
-            url,
+            "https://finnhub.io/api/v1/company-news",
             params={
                 "symbol": asset["news_symbol"],
                 "from": week_ago.isoformat(),
                 "to": today.isoformat(),
                 "token": FINNHUB_API_KEY,
             },
+            headers=REQUEST_HEADERS,
             timeout=20,
         )
 
@@ -456,6 +640,9 @@ def fetch_news(asset):
         return f"ดึงข่าวไม่สำเร็จ: {e}", 0
 
 
+# =========================
+# REPORT BUILDERS
+# =========================
 def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
     if not price:
         return "ข้อมูลราคาไม่พอสำหรับทำแผน 3 ไม้"
@@ -501,15 +688,20 @@ def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
 def build_gold_report(asset, analysis, news_text, reasons):
     price = analysis["price"]
     atr = analysis["atr"] or (price * 0.01 if price else None)
-
     usd_thb = get_usd_thb_rate()
     gold_thb_oz = price * usd_thb if price else None
 
-    gold_bar_sell = gold_thb_per_baht_weight(price, usd_thb)
-    gold_bar_buy = gold_bar_sell - 100 if gold_bar_sell else None
-    gold_jewelry_sell = gold_bar_sell + 850 if gold_bar_sell else None
+    thai_gold = get_thai_gold_price_or_estimate(price, usd_thb)
 
-    thai_factor = gold_bar_sell / price if gold_bar_sell and price else None
+    bar_buy = thai_gold.get("bar_buy")
+    bar_sell = thai_gold.get("bar_sell")
+    ornament_sell = thai_gold.get("ornament_sell")
+    source = thai_gold.get("source")
+    is_estimate = thai_gold.get("is_estimate", False)
+
+    # Convert XAUUSD levels to Thai baht gold price levels using actual Thai bar sell as base.
+    # This keeps levels aligned with GoldTraders real Thai price, not just USDTHB formula.
+    thai_factor = bar_sell / price if bar_sell and price else None
 
     s1 = price - atr * 0.30 if price and atr else None
     s2 = price - atr * 0.70 if price and atr else None
@@ -531,6 +723,12 @@ def build_gold_report(asset, analysis, news_text, reasons):
         thai_factor=thai_factor,
     )
 
+    price_note = (
+        "ราคาทองไทย: ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ"
+        if not is_estimate
+        else "ราคาทองไทย: fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
+    )
+
     return f"""📊 วิเคราะห์ทองคำ
 
 XAUUSD
@@ -542,13 +740,17 @@ XAUUSD
 🏆 ราคาทองไทย
 
 ทองแท่งรับซื้อ
-{fmt_num(gold_bar_buy, 0)} บาท
+{fmt_num(bar_buy, 0)} บาท
 
 ทองแท่งขายออก
-{fmt_num(gold_bar_sell, 0)} บาท
+{fmt_num(bar_sell, 0)} บาท
 
 ทองรูปพรรณขายออก
-{fmt_num(gold_jewelry_sell, 0)} บาท
+{fmt_num(ornament_sell, 0)} บาท
+
+แหล่งราคาทองไทย:
+{source}
+อัปเดต: {thai_gold.get('updated_at')}
 
 AI Score: {analysis['score']}/100
 มุมมอง: {analysis['bias']}
@@ -578,7 +780,7 @@ R3: {gold_level(r3)}
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทยเป็นค่าประมาณจาก XAUUSD และ USD/THB ไม่ใช่ประกาศสมาคมค้าทองคำแบบเรียลไทม์"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน {price_note}"""
 
 
 def build_asset_report(user_text):
@@ -597,7 +799,6 @@ def build_asset_report(user_text):
     currency = asset["currency"]
     price_label = "$" if currency == "USD" else "฿"
     trade_plan = build_trade_plan(analysis["price"], analysis["atr"], analysis["bias"])
-
     source_text = "Yahoo Finance" if asset["asset_type"] == "THAI_STOCK" else "Twelve Data"
 
     return f"""📊 วิเคราะห์ {asset['display']}
@@ -634,39 +835,48 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ใช้เพื่อช่วยคัดกรองเท่านั้น"""
 
 
+# =========================
+# LINE API
+# =========================
 def line_reply(reply_token, text):
     if not LINE_CHANNEL_ACCESS_TOKEN:
         print("LINE_CHANNEL_ACCESS_TOKEN is missing")
         return
 
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text[:4900]}],
-    }
-
-    requests.post(url, headers=headers, json=payload, timeout=20)
+    r = requests.post(
+        "https://api.line.me/v2/bot/message/reply",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "replyToken": reply_token,
+            "messages": [{"type": "text", "text": text[:4900]}],
+        },
+        timeout=20,
+    )
+    if r.status_code >= 300:
+        print("LINE reply failed:", r.status_code, r.text)
 
 
 def line_push(user_id, text):
     if not LINE_CHANNEL_ACCESS_TOKEN or not user_id:
         return
 
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "to": user_id,
-        "messages": [{"type": "text", "text": text[:4900]}],
-    }
-
-    requests.post(url, headers=headers, json=payload, timeout=20)
+    r = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "to": user_id,
+            "messages": [{"type": "text", "text": text[:4900]}],
+        },
+        timeout=20,
+    )
+    if r.status_code >= 300:
+        print("LINE push failed:", r.status_code, r.text)
 
 
 def verify_line_signature(body, signature):
@@ -728,6 +938,7 @@ def handle_message(user_id, text):
     try:
         return build_asset_report(clean)
     except Exception as e:
+        print("Handle message error:", e)
         return (
             "ระบบยังอ่านคำสั่งนี้ไม่ได้ครับ\n"
             "ลองพิมพ์ เช่น NVDA, AAPL, SCB, AOT, ทองคำ, GOLD\n\n"
@@ -735,6 +946,9 @@ def handle_message(user_id, text):
         )
 
 
+# =========================
+# ROUTES
+# =========================
 @app.route("/", methods=["GET"])
 def home():
     return {
@@ -744,12 +958,28 @@ def home():
         "watchlist": WATCHLIST,
         "thai_stock_source": "Yahoo Finance",
         "us_stock_source": "Twelve Data",
+        "gold_price_source": "GoldTraders first, fallback calculated",
     }
 
 
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
+
+
+@app.route("/gold-test", methods=["GET"])
+def gold_test():
+    asset = normalize_asset("ทองคำ")
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    usd_thb = get_usd_thb_rate()
+    thai_gold = get_thai_gold_price_or_estimate(analysis["price"], usd_thb)
+    return {
+        "xauusd": analysis["price"],
+        "usd_thb": usd_thb,
+        "thai_gold": thai_gold,
+        "time_th": now_text(),
+    }
 
 
 @app.route("/webhook", methods=["POST"])
@@ -783,6 +1013,9 @@ def webhook():
     return "OK", 200
 
 
+# =========================
+# AUTO ALERTS
+# =========================
 def should_send_alert(symbol, score):
     now_ts = time.time()
     last_ts = LAST_ALERTS.get(symbol, 0)
