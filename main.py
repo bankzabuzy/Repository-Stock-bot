@@ -48,7 +48,17 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.7.1 Warning Weight Tuning
+# V7.7.4 Strict Alert Gate
+STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
+STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
+STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
+STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "0.85"))
+STRICT_REQUIRE_TF_CONFIRM = os.getenv("STRICT_REQUIRE_TF_CONFIRM", "true").lower() == "true"
+STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() == "true"
+STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
+STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
+
+# V7.7.4 Strict Alert Gate
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -1854,7 +1864,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.7.1 Warning Weight Tuning
+    return """V7.7.4 Strict Alert Gate
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1901,13 +1911,20 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.7.1 Warning Weight Tuning",
+        "service": "AI Market LINE Bot V7.7.4 Strict Alert Gate",
         "time_th": now_text(),
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
         "top5_daily_time_th": TOP5_DAILY_TIME_TH,
         "enable_top5_daily": ENABLE_TOP5_DAILY,
         "top5_universe": TOP5_UNIVERSE,
+        "strict_alert_mode": STRICT_ALERT_MODE,
+        "strict_min_confidence": STRICT_MIN_CONFIDENCE,
+        "strict_min_trend_strength": STRICT_MIN_TREND_STRENGTH,
+        "strict_min_rvol": STRICT_MIN_RVOL,
+        "strict_require_tf_confirm": STRICT_REQUIRE_TF_CONFIRM,
+        "strict_call_score": STRICT_CALL_SCORE,
+        "strict_put_score": STRICT_PUT_SCORE,
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
     })
@@ -1955,7 +1972,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.7.1 Warning Weight Tuning</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.7.4 Strict Alert Gate</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -1987,6 +2004,13 @@ def signal_status():
         "top5_daily_time_th": TOP5_DAILY_TIME_TH,
         "enable_top5_daily": ENABLE_TOP5_DAILY,
         "top5_universe": TOP5_UNIVERSE,
+        "strict_alert_mode": STRICT_ALERT_MODE,
+        "strict_min_confidence": STRICT_MIN_CONFIDENCE,
+        "strict_min_trend_strength": STRICT_MIN_TREND_STRENGTH,
+        "strict_min_rvol": STRICT_MIN_RVOL,
+        "strict_require_tf_confirm": STRICT_REQUIRE_TF_CONFIRM,
+        "strict_call_score": STRICT_CALL_SCORE,
+        "strict_put_score": STRICT_PUT_SCORE,
     })
 
 
@@ -2003,6 +2027,31 @@ def premarket_route():
     if not require_admin():
         return Response("Unauthorized", status=401)
     return Response(build_premarket_reminder(), mimetype="text/plain; charset=utf-8")
+
+
+
+@app.route("/strict-check/<symbol>", methods=["GET"])
+def strict_check(symbol):
+    if not require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    asset = normalize_asset(symbol)
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    raw_sig = signal_type_from_analysis(asset, analysis)
+    ok, reason = strict_alert_gate(symbol.upper(), asset, analysis, raw_sig) if raw_sig != "NONE" else (False, "No raw signal")
+    return jsonify({
+        "symbol": symbol.upper(),
+        "asset_type": asset.get("asset_type"),
+        "raw_signal": raw_sig,
+        "allowed_to_alert": ok,
+        "reason": reason,
+        "score": analysis.get("score"),
+        "confidence": adjusted_confidence(analysis, raw_sig) if raw_sig != "NONE" and "adjusted_confidence" in globals() else calculate_signal_confidence(analysis),
+        "trend_strength": trend_strength_score(analysis) if "trend_strength_score" in globals() else None,
+        "rvol": analysis.get("rvol"),
+        "regime": analysis.get("regime"),
+        "time_th": now_text(),
+    })
 
 
 @app.route("/webhook", methods=["POST"])
@@ -2504,7 +2553,7 @@ def professional_alert_message(symbol, asset, analysis):
         header = "🟠 " + adjusted_word
 
     if asset.get("asset_type") == "GOLD":
-        price_block = get_gold_thai_block(price)
+        price_block = get_gold_thai_block_v772(price)
     else:
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
 
@@ -2529,21 +2578,7 @@ Regime: {analysis.get('regime')}
 
 {tf_block}
 
-🎯 Trading Plan
-Entry Zone:
-{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
-
-SL:
-{price_label}{fmt_num(sl)}
-
-TP1:
-{price_label}{fmt_num(tp1)}
-
-TP2:
-{price_label}{fmt_num(tp2)}
-
-TP3:
-{price_label}{fmt_num(tp3)}
+{build_trade_plan_3_mai(asset, price, atr, side, analysis)}
 
 {opt_block}
 
@@ -2852,6 +2887,188 @@ def build_timeframe_confirm_v771(asset, analysis, side):
     except Exception:
         return build_timeframe_confirm(asset, analysis)
 
+
+# ============================================================
+# V7.7.2 TRADE PLAN 3 MAI + GOLD THAI RESTORE
+# ============================================================
+def thai_gold_factor_from_spot(price_usd):
+    """Return factor to convert XAUUSD level to Thai gold baht-weight price.
+    Prefer GoldTraders bar_sell / spot price so Thai levels align with Thai market.
+    """
+    if not price_usd:
+        return None, None
+    try:
+        usdthb = get_usd_thb_rate()
+    except Exception:
+        usdthb = None
+
+    thai_gold = None
+    try:
+        thai_gold = get_thai_gold_price_or_estimate(price_usd, usdthb)
+    except Exception:
+        thai_gold = None
+
+    if thai_gold and thai_gold.get("bar_sell"):
+        try:
+            return float(thai_gold.get("bar_sell")) / float(price_usd), thai_gold
+        except Exception:
+            pass
+
+    if usdthb:
+        try:
+            return gold_thb_per_baht_weight(price_usd, usdthb) / float(price_usd), thai_gold
+        except Exception:
+            pass
+
+    return None, thai_gold
+
+
+def fmt_level_asset(asset, value, thai_factor=None):
+    if value is None:
+        return "N/A"
+    if asset.get("asset_type") == "GOLD":
+        if thai_factor:
+            return f"${fmt_num(value)} / {fmt_num(value * thai_factor, 0)} บาท"
+        return f"${fmt_num(value)}"
+    price_label = "$" if asset.get("currency") == "USD" else "฿"
+    return f"{price_label}{fmt_num(value)}"
+
+
+
+def strict_entry_multiplier(asset, analysis=None):
+    """Increase entry distance when signal quality is weak."""
+    m = 1.0
+    try:
+        if analysis:
+            regime = str(analysis.get("regime", "")).upper()
+            rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+            trend = trend_strength_score(analysis)
+
+            if "RANGE" in regime:
+                m += 0.25
+            if "LOW VOL" in regime or rvol < 0.8:
+                m += 0.25
+            if trend < 5:
+                m += 0.25
+            if asset.get("asset_type") == "GOLD":
+                m += 0.15
+    except Exception:
+        pass
+    return clamp(m, 1.0, 1.9)
+
+
+def build_trade_plan_3_mai(asset, price, atr, side, analysis=None):
+    """Strict 3-entry plan for US stocks, Thai stocks, and gold."""
+    if not price:
+        return """🎯 แผนซื้อขาย 3 ไม้
+ข้อมูลราคาไม่พอ"""
+
+    if not atr:
+        atr = price * 0.012
+
+    strict_m = strict_entry_multiplier(asset, analysis)
+    thai_factor = None
+    if asset.get("asset_type") == "GOLD":
+        thai_factor, _ = thai_gold_factor_from_spot(price)
+
+    if side in {"SELL", "STRONG_PUT"}:
+        entry1 = price + atr * 0.45 * strict_m
+        entry2 = price + atr * 0.90 * strict_m
+        entry3 = price + atr * 1.45 * strict_m
+
+        tp1 = price - atr * 0.75
+        tp2 = price - atr * 1.35
+        tp3 = price - atr * 2.05
+
+        sl = price + atr * 1.80 * strict_m
+
+        return f"""🎯 แผนขาย/ซื้อคืน 3 ไม้ แบบเข้มงวด
+
+ขายไม้ 1: {fmt_level_asset(asset, entry1, thai_factor)}
+ขายไม้ 2: {fmt_level_asset(asset, entry2, thai_factor)}
+ขายไม้ 3: {fmt_level_asset(asset, entry3, thai_factor)}
+
+ซื้อคืน/TP1: {fmt_level_asset(asset, tp1, thai_factor)}
+ซื้อคืน/TP2: {fmt_level_asset(asset, tp2, thai_factor)}
+ซื้อคืน/TP3: {fmt_level_asset(asset, tp3, thai_factor)}
+
+จุดคุมความเสี่ยง SL:
+{fmt_level_asset(asset, sl, thai_factor)}
+
+กติกาเข้าไม้:
+- ไม่ขายไล่ราคา ให้รอเด้งเข้าโซนขาย
+- ถ้า Volume ต่ำ ให้เริ่มพิจารณาเฉพาะไม้ 2-3
+- ถ้าแท่งกลับตัวไม่ชัด ให้รอแท่งยืนยันก่อน"""
+
+    buy1 = price - atr * 0.55 * strict_m
+    buy2 = price - atr * 1.05 * strict_m
+    buy3 = price - atr * 1.65 * strict_m
+
+    sell1 = price + atr * 0.75 * strict_m
+    sell2 = price + atr * 1.35 * strict_m
+    sell3 = price + atr * 2.05 * strict_m
+
+    sl = price - atr * 1.80 * strict_m
+
+    return f"""🎯 แผนซื้อ/ขาย 3 ไม้ แบบเข้มงวด
+
+ซื้อไม้ 1: {fmt_level_asset(asset, buy1, thai_factor)}
+ซื้อไม้ 2: {fmt_level_asset(asset, buy2, thai_factor)}
+ซื้อไม้ 3: {fmt_level_asset(asset, buy3, thai_factor)}
+
+ขาย/TP1: {fmt_level_asset(asset, sell1, thai_factor)}
+ขาย/TP2: {fmt_level_asset(asset, sell2, thai_factor)}
+ขาย/TP3: {fmt_level_asset(asset, sell3, thai_factor)}
+
+จุดคุมความเสี่ยง SL:
+{fmt_level_asset(asset, sl, thai_factor)}
+
+กติกาเข้าไม้:
+- ไม่ซื้อไล่ราคา ให้รอย่อเข้าโซนซื้อ
+- ถ้า Volume ต่ำ ให้เริ่มพิจารณาเฉพาะไม้ 2-3
+- ถ้าเป็น Buy สวน Downtrend ให้ลดขนาดไม้ลงครึ่งหนึ่ง"""
+
+def get_gold_thai_block_v772(price_usd=None):
+    """Gold block guaranteed to show Thai gold prices if GoldTraders/fallback works."""
+    try:
+        usdthb = get_usd_thb_rate()
+    except Exception:
+        usdthb = None
+
+    thb_oz = None
+    try:
+        if price_usd and usdthb:
+            thb_oz = float(price_usd) * float(usdthb)
+    except Exception:
+        thb_oz = None
+
+    thai_gold = None
+    try:
+        thai_gold = get_thai_gold_price_or_estimate(price_usd, usdthb)
+    except Exception as e:
+        print("get_gold_thai_block_v772 error:", e)
+
+    lines = []
+    if price_usd:
+        lines.append(f"ราคา: ${fmt_num(price_usd)}")
+        if thb_oz:
+            lines.append(f"≈ {fmt_num(thb_oz, 0)} บาท/ออนซ์")
+
+    lines.append("")
+    lines.append("🏆 ราคาทองไทย")
+    if thai_gold:
+        lines.append(f"ทองแท่งขายออก: {fmt_num(thai_gold.get('bar_sell'), 0)} บาท")
+        lines.append(f"ทองแท่งรับซื้อ: {fmt_num(thai_gold.get('bar_buy'), 0)} บาท")
+        lines.append(f"ทองรูปพรรณขายออก: {fmt_num(thai_gold.get('ornament_sell'), 0)} บาท")
+        lines.append(f"แหล่งข้อมูล: {thai_gold.get('source', 'GoldTraders / Estimate')}")
+    else:
+        lines.append("ทองแท่งขายออก: N/A")
+        lines.append("ทองแท่งรับซื้อ: N/A")
+        lines.append("ทองรูปพรรณขายออก: N/A")
+        lines.append("แหล่งข้อมูล: N/A")
+
+    return "\n".join(lines)
+
 def professional_alert_message_v77(symbol, asset, analysis):
     price = analysis.get("price")
     if not price:
@@ -2900,7 +3117,7 @@ def professional_alert_message_v77(symbol, asset, analysis):
             thai_gold = get_thai_gold_price_or_estimate(price, get_usd_thb_rate())
         except Exception:
             thai_gold = None
-        price_block = get_gold_thai_block(price)
+        price_block = get_gold_thai_block_v772(price)
         premium_block = gold_premium_analysis_block(price, thai_gold)
     else:
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
@@ -2933,21 +3150,7 @@ Regime: {analysis.get('regime')}
 
 {premium_block}
 
-🎯 Trading Plan
-Entry Zone:
-{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
-
-SL:
-{price_label}{fmt_num(sl)}
-
-TP1:
-{price_label}{fmt_num(tp1)}
-
-TP2:
-{price_label}{fmt_num(tp2)}
-
-TP3:
-{price_label}{fmt_num(tp3)}
+{build_trade_plan_3_mai(asset, price, atr, side, analysis)}
 
 {opt_block}
 
@@ -2957,6 +3160,97 @@ TP3:
 {warning_block}
 
 หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
+
+
+# ============================================================
+# V7.7.4 STRICT ALERT GATE
+# ============================================================
+def tf_confirm_counts(asset, analysis, side):
+    """Return number of TFs aligned with side from 5m/15m/1H synthetic confirm."""
+    block = build_timeframe_confirm_v771(asset, analysis, side) if "build_timeframe_confirm_v771" in globals() else build_timeframe_confirm(asset, analysis)
+    lines = block.splitlines()
+    target = "BUY" if side in {"BUY", "STRONG_CALL"} else "SELL"
+    count = 0
+    total = 0
+    for line in lines:
+        if line.startswith("5m") or line.startswith("15m") or line.startswith("1H"):
+            total += 1
+            if target in line:
+                count += 1
+    return count, total
+
+
+def strict_alert_gate(symbol, asset, analysis, sig):
+    """Decide if alert is strong enough to send.
+    Returns (allowed: bool, reason: str)
+    """
+    if not STRICT_ALERT_MODE:
+        return True, "STRICT_ALERT_MODE=false"
+
+    score = int(analysis.get("score", 50))
+    side = sig
+    confidence = adjusted_confidence(analysis, side) if "adjusted_confidence" in globals() else calculate_signal_confidence(analysis)
+    trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else 5
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    regime = str(analysis.get("regime", "")).upper()
+
+    # 1) Score must be extreme enough.
+    if sig in {"STRONG_CALL", "BUY"}:
+        if score < STRICT_CALL_SCORE and asset.get("asset_type") == "US_STOCK":
+            return False, f"Score {score} < STRICT_CALL_SCORE {STRICT_CALL_SCORE}"
+        if asset.get("asset_type") != "US_STOCK" and score < AUTO_ALERT_MIN_SCORE:
+            return False, f"Score {score} < AUTO_ALERT_MIN_SCORE {AUTO_ALERT_MIN_SCORE}"
+
+    if sig in {"STRONG_PUT", "SELL"}:
+        if score > STRICT_PUT_SCORE and asset.get("asset_type") == "US_STOCK":
+            return False, f"Score {score} > STRICT_PUT_SCORE {STRICT_PUT_SCORE}"
+        if asset.get("asset_type") != "US_STOCK" and score > AUTO_ALERT_MAX_SCORE:
+            return False, f"Score {score} > AUTO_ALERT_MAX_SCORE {AUTO_ALERT_MAX_SCORE}"
+
+    # 2) Confidence.
+    if confidence < STRICT_MIN_CONFIDENCE:
+        return False, f"Confidence {confidence}% < {STRICT_MIN_CONFIDENCE}%"
+
+    # 3) Trend strength.
+    if trend < STRICT_MIN_TREND_STRENGTH:
+        return False, f"Trend Strength {trend}/10 < {STRICT_MIN_TREND_STRENGTH}/10"
+
+    # 4) Volume.
+    if rvol < STRICT_MIN_RVOL:
+        return False, f"RVOL {rvol:.2f} < {STRICT_MIN_RVOL:.2f}"
+
+    # 5) Range / low vol filters.
+    if "LOW VOL" in regime:
+        return False, "Regime LOW VOL"
+    if "RANGE" in regime and not (asset.get("asset_type") == "GOLD" and STRICT_ALLOW_RANGE_GOLD):
+        return False, "Regime RANGE"
+
+    # 6) Counter-trend block.
+    if sig in {"STRONG_CALL", "BUY"} and "DOWNTREND" in regime:
+        return False, "Buy signal but regime is DOWNTREND"
+    if sig in {"STRONG_PUT", "SELL"} and "UPTREND" in regime:
+        return False, "Sell signal but regime is UPTREND"
+
+    # 7) Timeframe confirmation.
+    if STRICT_REQUIRE_TF_CONFIRM:
+        aligned, total = tf_confirm_counts(asset, analysis, sig)
+        if total >= 3 and aligned < 3:
+            return False, f"TF Confirm {aligned}/{total}, require 3/3"
+
+    return True, "PASS"
+
+
+def strict_signal_type_from_analysis(asset, analysis):
+    """Return NONE unless the signal passes strict alert gate."""
+    raw_sig = signal_type_from_analysis(asset, analysis)
+    if raw_sig == "NONE":
+        return "NONE", "No raw signal"
+
+    ok, reason = strict_alert_gate(asset.get("symbol", ""), asset, analysis, raw_sig)
+    if not ok:
+        return "NONE", reason
+
+    return raw_sig, reason
 
 # ============================================================
 # AUTO ALERTS
@@ -2987,7 +3281,7 @@ def auto_alert_loop():
 
                         quote, closes, highs, lows, opens, volumes = get_market_data(asset)
                         analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-                        sig = signal_type_from_analysis(asset, analysis)
+                        sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
 
                         if sig != "NONE" and should_send_alert(f"{symbol}:{sig}", analysis["score"]):
                             message = build_auto_signal_message(symbol, asset, analysis)
