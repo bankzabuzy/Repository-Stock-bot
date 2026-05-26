@@ -48,7 +48,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.5 Auto Market Intelligence
+# V7.6 Professional Alert Upgrade
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -1854,7 +1854,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.5 Auto Market Intelligence
+    return """V7.6 Professional Alert Upgrade
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1901,7 +1901,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.5 Auto Market Intelligence",
+        "service": "AI Market LINE Bot V7.6 Professional Alert Upgrade",
         "time_th": now_text(),
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
@@ -1955,7 +1955,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.5 Auto Market Intelligence</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.6 Professional Alert Upgrade</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2084,120 +2084,25 @@ def signal_type_from_analysis(asset, analysis):
 
 
 def build_auto_signal_message(symbol, asset, analysis):
+    msg = professional_alert_message(symbol, asset, analysis)
+    if msg:
+        return msg
+
     price = analysis.get("price")
-    atr = analysis.get("atr") or (price * 0.015 if price else None)
-    score = analysis.get("score")
-    prob = analysis.get("probability")
-    regime = analysis.get("regime")
-    alignment = analysis.get("alignment")
     price_label = "$" if asset.get("currency") == "USD" else "฿"
-
-    if not price or not atr:
-        return None
-
-    sig = signal_type_from_analysis(asset, analysis)
-
-    if sig == "STRONG_CALL":
-        entry_low = price - atr * 0.20
-        entry_high = price + atr * 0.10
-        sl = price - atr * 0.90
-        tp1 = price + atr * 0.80
-        tp2 = price + atr * 1.50
-        tp3 = price + atr * 2.20
-        return f"""🟢 STRONG CALL SIGNAL
+    return f"""⚠️ SIGNAL ALERT
 
 Symbol: {symbol}
 เวลาไทย: {now_text()}
 
 ราคา: {price_label}{fmt_num(price)}
-AI Score: {score}/100
-Probability: {prob}%
-Regime: {regime}
-Alignment: {alignment}
+AI Score: {analysis.get('score')}/100
+Signal Confidence: {calculate_signal_confidence(analysis)}%
 
-Entry Zone:
-{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
-
-SL:
-{price_label}{fmt_num(sl)}
-
-TP1:
-{price_label}{fmt_num(tp1)}
-
-TP2:
-{price_label}{fmt_num(tp2)}
-
-TP3:
-{price_label}{fmt_num(tp3)}
-
-เหตุผลหลัก:
-{chr(10).join("- " + r for r in analysis.get("reasons", [])[:4])}
-
-หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
-
-    if sig == "STRONG_PUT":
-        entry_low = price - atr * 0.10
-        entry_high = price + atr * 0.20
-        sl = price + atr * 0.90
-        tp1 = price - atr * 0.80
-        tp2 = price - atr * 1.50
-        tp3 = price - atr * 2.20
-        return f"""🔴 STRONG PUT SIGNAL
-
-Symbol: {symbol}
-เวลาไทย: {now_text()}
-
-ราคา: {price_label}{fmt_num(price)}
-AI Score: {score}/100
-Probability: {prob}%
-Regime: {regime}
-Alignment: {alignment}
-
-Entry Zone:
-{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
-
-SL:
-{price_label}{fmt_num(sl)}
-
-TP1:
-{price_label}{fmt_num(tp1)}
-
-TP2:
-{price_label}{fmt_num(tp2)}
-
-TP3:
-{price_label}{fmt_num(tp3)}
-
-เหตุผลหลัก:
-{chr(10).join("- " + r for r in analysis.get("reasons", [])[:4])}
-
-หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
-
-    if sig in {"BUY", "SELL"}:
-        direction = "🟢 BUY ALERT" if sig == "BUY" else "🔴 SELL ALERT"
-        return f"""{direction}
-
-Symbol: {symbol}
-เวลาไทย: {now_text()}
-
-ราคา: {price_label}{fmt_num(price)}
-AI Score: {score}/100
-มุมมอง: {analysis.get('bias')}
-Regime: {regime}
-
-แนวรับ: {price_label}{fmt_num(analysis.get('support'))}
-แนวต้าน: {price_label}{fmt_num(analysis.get('resistance'))}
-SL: {price_label}{fmt_num(analysis.get('stop_loss'))}
-TP: {price_label}{fmt_num(analysis.get('take_profit'))}
-
-หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
-
-    return None
+หมายเหตุ: ข้อมูลไม่พอสำหรับแผนเต็ม"""
 
 
-# ============================================================
-# V7.5 AUTO MARKET INTELLIGENCE
-# ============================================================
+
 def date_key_th():
     return now_th_datetime().strftime("%Y-%m-%d")
 
@@ -2322,32 +2227,8 @@ def rank_top5_picks():
 
 
 def build_top5_daily_message():
-    picks = rank_top5_picks()
-    if not picks:
-        return f"""🔥 Top 5 Daily Picks
+    return compact_top5_message()
 
-ยังไม่สามารถจัดอันดับได้
-เวลาไทย: {now_text()}"""
-
-    lines = []
-    for i, (s, asset, a) in enumerate(picks, 1):
-        price_label = "$" if asset.get("currency") == "USD" else "฿"
-        sig = signal_type_from_analysis(asset, a)
-        lines.append(
-            f"{i}) {s} | {price_label}{fmt_num(a.get('price'))} | Score {a.get('score')}/100 | Prob {a.get('probability')}% | {sig} | {a.get('regime')}"
-        )
-
-    return f"""🔥 Top 5 Daily Picks
-
-เวลาไทย: {now_text()}
-
-{chr(10).join(lines)}
-
-Universe:
-{",".join(TOP5_UNIVERSE[:30])}
-
-หมายเหตุ:
-Top 5 คัดจาก Watchlist/Universe ด้วย AI Score V7.5 ไม่ใช่คำแนะนำการลงทุน"""
 
 
 def maybe_send_premarket_and_top5():
@@ -2367,6 +2248,300 @@ def maybe_send_premarket_and_top5():
             for user_id in ALERT_USER_IDS:
                 line_push(user_id, msg)
             mark_sent_daily(TOP5_COOLDOWN_KEY)
+
+
+# ============================================================
+# V7.6 PROFESSIONAL ALERT UPGRADE
+# ============================================================
+def calculate_signal_confidence(analysis):
+    try:
+        score = int(analysis.get("score", 50))
+        prob = int(analysis.get("probability", 50))
+        regime = str(analysis.get("regime", "")).upper()
+        alignment = str(analysis.get("alignment", "")).upper()
+        rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+
+        confidence = int((abs(score - 50) * 1.1) + (prob * 0.45))
+        if "TREND" in regime:
+            confidence += 8
+        if "HIGH" in alignment or "BULL" in alignment or "BEAR" in alignment:
+            confidence += 5
+        if rvol >= 1.5:
+            confidence += 5
+        elif rvol < 0.8:
+            confidence -= 7
+        return max(35, min(95, confidence))
+    except Exception:
+        return 50
+
+
+def timeframe_side_from_numbers(ema6, ema12, ema50, rsi):
+    try:
+        if ema6 and ema12 and ema50:
+            if ema6 > ema12 > ema50 and (rsi is None or rsi >= 50):
+                return "BUY"
+            if ema6 < ema12 < ema50 and (rsi is None or rsi <= 50):
+                return "SELL"
+        if rsi is not None:
+            if rsi >= 60:
+                return "BUY"
+            if rsi <= 40:
+                return "SELL"
+    except Exception:
+        pass
+    return "NEUTRAL"
+
+
+def build_timeframe_confirm(asset, analysis):
+    try:
+        main_side = timeframe_side_from_numbers(
+            analysis.get("ema6"),
+            analysis.get("ema12"),
+            analysis.get("ema50"),
+            analysis.get("rsi"),
+        )
+
+        states = {}
+        for label, state in analysis.get("mtf_states", []) or []:
+            s = str(state).upper()
+            if "BULL" in s or "BUY" in s:
+                states[str(label).upper()] = "BUY"
+            elif "BEAR" in s or "SELL" in s:
+                states[str(label).upper()] = "SELL"
+            else:
+                states[str(label).upper()] = "NEUTRAL"
+
+        tf5 = states.get("5M") or main_side
+        tf15 = states.get("15M") or main_side
+        tf1h = states.get("1H") or main_side
+
+        sides = [tf5, tf15, tf1h]
+        buy_count = sides.count("BUY")
+        sell_count = sides.count("SELL")
+
+        if buy_count == 3:
+            overall = "STRONG BUY"
+        elif sell_count == 3:
+            overall = "STRONG SELL"
+        elif buy_count >= 2:
+            overall = "BUY"
+        elif sell_count >= 2:
+            overall = "SELL"
+        else:
+            overall = "MIXED / WAIT"
+
+        return f"""🧭 Timeframe Confirm
+5m : {tf5}
+15m : {tf15}
+1H : {tf1h}
+
+Overall : {overall}"""
+    except Exception:
+        return """🧭 Timeframe Confirm
+5m : N/A
+15m : N/A
+1H : N/A
+
+Overall : N/A"""
+
+
+def get_gold_thai_block(price_usd=None):
+    try:
+        usdthb = get_usd_thb_rate()
+    except Exception:
+        usdthb = None
+
+    thb_oz = None
+    try:
+        if price_usd and usdthb:
+            thb_oz = float(price_usd) * float(usdthb)
+    except Exception:
+        thb_oz = None
+
+    gt = None
+    try:
+        gt = get_thai_gold_price_or_estimate(price_usd, usdthb)
+    except Exception as e:
+        print("get_gold_thai_block error:", e)
+
+    lines = []
+    if price_usd:
+        if thb_oz:
+            lines.append(f"ราคา: ${fmt_num(price_usd)}")
+            lines.append(f"≈ {fmt_num(thb_oz, 0)} บาท/ออนซ์")
+        else:
+            lines.append(f"ราคา: ${fmt_num(price_usd)}")
+
+    if gt:
+        lines.append("")
+        lines.append("🏆 ราคาทองไทย")
+        if gt.get("bar_sell") is not None:
+            lines.append(f"ทองแท่งขายออก: {fmt_num(gt.get('bar_sell'), 0)} บาท")
+        if gt.get("bar_buy") is not None:
+            lines.append(f"ทองแท่งรับซื้อ: {fmt_num(gt.get('bar_buy'), 0)} บาท")
+        if gt.get("ornament_sell") is not None:
+            lines.append(f"ทองรูปพรรณขายออก: {fmt_num(gt.get('ornament_sell'), 0)} บาท")
+        if gt.get("source"):
+            lines.append(f"แหล่งข้อมูล: {gt.get('source')}")
+
+    return "\n".join(lines)
+
+
+def next_friday_text():
+    try:
+        today = now_th_datetime().date()
+        days_ahead = (4 - today.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        d = today + timedelta(days=days_ahead)
+        return d.strftime("%d/%m/%Y")
+    except Exception:
+        return "Friday"
+
+
+def suggested_options_contract(asset, analysis):
+    if asset.get("asset_type") != "US_STOCK":
+        return ""
+
+    price = analysis.get("price")
+    if not price:
+        return ""
+
+    score = int(analysis.get("score", 50))
+    atr = analysis.get("atr") or price * 0.015
+    symbol = asset.get("symbol")
+
+    if score <= STRONG_PUT_SCORE:
+        direction = "PUT"
+    elif score >= STRONG_CALL_SCORE:
+        direction = "CALL"
+    else:
+        direction = "CALL" if score >= 50 else "PUT"
+
+    if direction == "CALL":
+        strike = round_strike(price + atr * 0.8)
+        side_word = "Suggested Call"
+        suffix = "C"
+    else:
+        strike = round_strike(price - atr * 0.8)
+        side_word = "Suggested Put"
+        suffix = "P"
+
+    risk = "Medium"
+    reward = "High" if abs(score - 50) >= 35 else "Medium"
+
+    return f"""🧩 Options Hybrid
+{side_word}
+
+{symbol} {fmt_num(strike, 0)}{suffix}
+Exp: {next_friday_text()}
+
+Risk: {risk}
+Reward: {reward}
+
+หมายเหตุ: เป็น Options Hybrid จากราคา/ATR/AI Score ไม่ใช่ option chain จริง"""
+
+
+def compact_top5_message():
+    picks = rank_top5_picks()
+    if not picks:
+        return f"""🏆 Top 5 Today
+
+ยังจัดอันดับไม่ได้
+เวลาไทย: {now_text()}"""
+
+    lines = []
+    for i, (s, asset, a) in enumerate(picks, 1):
+        lines.append(f"{i}. {s} {a.get('score')}/100")
+
+    return f"""🏆 Top 5 Today
+
+{chr(10).join(lines)}
+
+เวลาไทย: {now_text()}
+หมายเหตุ: คัดจาก TOP5_UNIVERSE / WATCHLIST"""
+
+
+def professional_alert_message(symbol, asset, analysis):
+    price = analysis.get("price")
+    if not price:
+        return None
+
+    atr = analysis.get("atr") or price * 0.015
+    score = int(analysis.get("score", 50))
+    confidence = calculate_signal_confidence(analysis)
+    sig = signal_type_from_analysis(asset, analysis)
+    price_label = "$" if asset.get("currency") == "USD" else "฿"
+
+    if sig in {"STRONG_CALL", "BUY"}:
+        header = "🟢 STRONG CALL SIGNAL" if asset.get("asset_type") == "US_STOCK" else "🟢 BUY ALERT"
+        entry_low = price - atr * 0.20
+        entry_high = price + atr * 0.10
+        sl = price - atr * 0.90
+        tp1 = price + atr * 0.80
+        tp2 = price + atr * 1.50
+        tp3 = price + atr * 2.20
+    elif sig in {"STRONG_PUT", "SELL"}:
+        header = "🔴 STRONG PUT SIGNAL" if asset.get("asset_type") == "US_STOCK" else "🔴 SELL ALERT"
+        if asset.get("asset_type") == "GOLD":
+            header = "🔴 SELL ALERT"
+        entry_low = price - atr * 0.10
+        entry_high = price + atr * 0.20
+        sl = price + atr * 0.90
+        tp1 = price - atr * 0.80
+        tp2 = price - atr * 1.50
+        tp3 = price - atr * 2.20
+    else:
+        return None
+
+    if asset.get("asset_type") == "GOLD":
+        price_block = get_gold_thai_block(price)
+    else:
+        price_block = f"ราคา: {price_label}{fmt_num(price)}"
+
+    tf_block = build_timeframe_confirm(asset, analysis)
+    opt_block = suggested_options_contract(asset, analysis)
+
+    reasons = analysis.get("reasons", []) or []
+    reasons_text = chr(10).join("- " + str(r) for r in reasons[:4]) if reasons else "- N/A"
+
+    return f"""{header}
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+{price_block}
+
+AI Score: {score}/100
+Signal Confidence: {confidence}%
+Probability: {analysis.get('probability')}%
+มุมมอง: {analysis.get('bias')}
+Regime: {analysis.get('regime')}
+
+{tf_block}
+
+🎯 Trading Plan
+Entry Zone:
+{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
+
+SL:
+{price_label}{fmt_num(sl)}
+
+TP1:
+{price_label}{fmt_num(tp1)}
+
+TP2:
+{price_label}{fmt_num(tp2)}
+
+TP3:
+{price_label}{fmt_num(tp3)}
+
+{opt_block}
+
+เหตุผลหลัก:
+{reasons_text}
+
+หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
 
 # ============================================================
 # AUTO ALERTS
