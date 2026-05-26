@@ -34,6 +34,47 @@ WATCHLIST = [
     if x.strip()
 ]
 
+# ============================================================
+# V8 PROFESSIONAL CONFIG
+# ============================================================
+def env_list(name, default=""):
+    return [x.strip().upper() for x in os.getenv(name, default).split(",") if x.strip()]
+
+DEFAULT_US_SYMBOLS = {
+    "NVDA", "AAPL", "TSLA", "AMD", "MSFT", "META", "GOOGL", "GOOG", "AMZN",
+    "NFLX", "QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ", "SOXL", "SOXS",
+    "PLTR", "AVGO", "SMCI", "MU", "MSTR", "COIN", "ARM", "INTC", "NVO",
+    "LULU", "COST", "JPM", "BAC", "XOM", "CVX", "UNH", "LLY", "WMT",
+    "RKLB", "AAOI", "IREN", "ONDS", "PLUG", "EOSE", "QBTS", "HDC",
+    "TJX", "CEG", "VST", "TSM", "DXYZ", "OKLO", "RGTI", "IONQ", "SOUN",
+    "HOOD", "RBLX", "SHOP", "CRWD", "SNOW", "NET", "DDOG", "U", "PATH"
+}
+
+EXTRA_US_SYMBOLS = set(env_list("EXTRA_US_SYMBOLS", ""))
+US_SYMBOLS = DEFAULT_US_SYMBOLS | EXTRA_US_SYMBOLS
+
+US_WATCHLIST = env_list(
+    "US_WATCHLIST",
+    "NVDA,AAPL,TSLA,AMD,QQQ,SPY,META,MSFT,PLTR,RKLB,AAOI,IREN"
+)
+
+TH_WATCHLIST = env_list(
+    "TH_WATCHLIST",
+    "SCB,AOT,PTT,CPALL,KBANK,BBL,KTB,ADVANC,BDMS,PTTEP"
+)
+
+GOLD_WATCHLIST = env_list("GOLD_WATCHLIST", "GOLD")
+
+ENABLE_SEPARATE_WATCHLISTS = os.getenv("ENABLE_SEPARATE_WATCHLISTS", "true").lower() == "true"
+
+# Tier scan: A = high priority, B = medium, C = Thai/slow moving.
+TIER_A_WATCHLIST = env_list("TIER_A_WATCHLIST", "NVDA,TSLA,AMD,QQQ,SPY,GOLD")
+TIER_B_WATCHLIST = env_list("TIER_B_WATCHLIST", "AAPL,MSFT,META,PLTR,RKLB,AAOI,IREN")
+TIER_C_WATCHLIST = env_list("TIER_C_WATCHLIST", "SCB,AOT,PTT,CPALL,KBANK,BBL,KTB,ADVANC")
+
+V8_SKIP_INVALID_SYMBOLS = os.getenv("V8_SKIP_INVALID_SYMBOLS", "true").lower() == "true"
+V8_LOG_SKIPPED_SYMBOLS = os.getenv("V8_LOG_SKIPPED_SYMBOLS", "false").lower() == "true"
+
 ALLOWED_USERS = [x.strip() for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()]
 ALERT_USER_IDS = [x.strip() for x in os.getenv("ALERT_USER_IDS", "").split(",") if x.strip()]
 
@@ -50,7 +91,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.8 Multi-Free API Fallback
+# V8 Professional
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
 STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
@@ -60,7 +101,7 @@ STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() 
 STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
-# V7.8 Multi-Free API Fallback
+# V8 Professional
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -76,7 +117,7 @@ TOP5_COOLDOWN_KEY = "top5_daily"
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
-# V7.8 Multi-Free API Fallback
+# V8 Professional
 ENABLE_MULTI_API_FALLBACK = os.getenv("ENABLE_MULTI_API_FALLBACK", "true").lower() == "true"
 API_FALLBACK_VERBOSE = os.getenv("API_FALLBACK_VERBOSE", "false").lower() == "true"
 
@@ -341,7 +382,7 @@ def yahoo_bk_exists(symbol):
 # ASSET NORMALIZATION
 # ============================================================
 def normalize_asset(user_text):
-    raw = user_text.strip()
+    raw = (user_text or "").strip()
     key = raw.upper().replace(" ", "")
 
     if raw in GOLD_WORDS or key in GOLD_WORDS:
@@ -357,6 +398,7 @@ def normalize_asset(user_text):
     if key in US_INDEX_SYMBOLS:
         key = US_INDEX_SYMBOLS[key]
 
+    # Explicit Thai suffix always wins.
     if key.endswith(".BK"):
         key = key.replace(".BK", "")
         return {
@@ -379,7 +421,20 @@ def normalize_asset(user_text):
             "news_symbol": key,
         }
 
-    if key in THAI_SYMBOLS or yahoo_bk_exists(key):
+    # V8: US watchlist/symbols must be checked before THAI_SYMBOLS/yahoo_bk_exists.
+    # This prevents RKLB.BK / AAOI.BK / CEG.BK / VST.BK false Thai conversion.
+    if key in US_SYMBOLS or key in US_WATCHLIST or key in TIER_A_WATCHLIST or key in TIER_B_WATCHLIST:
+        return {
+            "display": key,
+            "symbol": key,
+            "yf_symbol": key,
+            "currency": "USD",
+            "asset_type": "US_STOCK",
+            "news_symbol": key,
+        }
+
+    # Explicit Thai watchlist and known SET symbols.
+    if key in TH_WATCHLIST or key in TIER_C_WATCHLIST or key in THAI_SYMBOLS:
         return {
             "display": f"{key}.BK",
             "symbol": key,
@@ -389,6 +444,8 @@ def normalize_asset(user_text):
             "news_symbol": key,
         }
 
+    # V8 default: unknown plain ticker is treated as US stock, not Thai.
+    # If a Thai symbol is not recognized, add it to TH_WATCHLIST or type SYMBOL.BK.
     return {
         "display": key,
         "symbol": key,
@@ -2086,7 +2143,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.8 Multi-Free API Fallback
+    return """V8 Professional
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -2133,8 +2190,10 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.8 Multi-Free API Fallback",
+        "service": "AI Market LINE Bot V8 Professional",
         "time_th": now_text(),
+        "v8_professional": True,
+        "v8_watchlist": v8_watchlist_status_dict(),
         "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
         "api_keys": {
             "twelvedata": bool(TWELVEDATA_API_KEY),
@@ -2201,7 +2260,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.8 Multi-Free API Fallback</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V8 Professional</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2228,6 +2287,8 @@ def signal_status():
         "auto_alert_min_score": AUTO_ALERT_MIN_SCORE,
         "auto_alert_max_score": AUTO_ALERT_MAX_SCORE,
         "time_th": now_text(),
+        "v8_professional": True,
+        "v8_watchlist": v8_watchlist_status_dict(),
         "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
         "api_keys": {
             "twelvedata": bool(TWELVEDATA_API_KEY),
@@ -2287,6 +2348,8 @@ def strict_check(symbol):
         "rvol": analysis.get("rvol"),
         "regime": analysis.get("regime"),
         "time_th": now_text(),
+        "v8_professional": True,
+        "v8_watchlist": v8_watchlist_status_dict(),
         "multi_api_fallback": ENABLE_MULTI_API_FALLBACK,
         "api_keys": {
             "twelvedata": bool(TWELVEDATA_API_KEY),
@@ -2304,7 +2367,7 @@ def strict_check(symbol):
 def build_signal_status_text():
     return f"""📡 Signal Status
 
-App: V7.8 Multi-Free API Fallback
+App: V8 Professional
 เวลาไทย: {now_text()}
 
 Auto Alerts: {ENABLE_AUTO_ALERTS}
@@ -2340,6 +2403,9 @@ def handle_line_command(user_text):
     if low in {"/signal-status", "signal-status", "status", "/status"}:
         return build_signal_status_text()
 
+    if low in {"/watchlist-status", "watchlist-status", "/watchlist"}:
+        return json.dumps(v8_watchlist_status_dict(), ensure_ascii=False, indent=2)
+
     if low in {"/top5", "top5"}:
         return build_top5_daily_message()
 
@@ -2374,6 +2440,31 @@ Regime: {analysis.get('regime')}
 
     return None
 
+
+@app.route("/watchlist-status", methods=["GET"])
+def watchlist_status():
+    return jsonify(v8_watchlist_status_dict())
+
+
+@app.route("/v8-status", methods=["GET"])
+def v8_status():
+    return jsonify({
+        "app": "V8 Professional",
+        "time_th": now_text(),
+        "v8_professional": True,
+        "v8_watchlist": v8_watchlist_status_dict(),
+        "multi_api_fallback": ENABLE_MULTI_API_FALLBACK if "ENABLE_MULTI_API_FALLBACK" in globals() else None,
+        "strict_alert_mode": STRICT_ALERT_MODE if "STRICT_ALERT_MODE" in globals() else None,
+        "watchlist": v8_watchlist_status_dict(),
+        "api_keys": {
+            "twelvedata": bool(TWELVEDATA_API_KEY),
+            "finnhub": bool(FINNHUB_API_KEY),
+            "fmp": bool(FMP_API_KEY),
+            "alphavantage": bool(ALPHAVANTAGE_API_KEY),
+        }
+    })
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_data()
@@ -2391,10 +2482,92 @@ def webhook():
         if message.get("type") != "text":
             line_reply(reply_token, "ตอนนี้รองรับเฉพาะข้อความเท่านั้นครับ")
             continue
-        line_reply(reply_token, handle_message(user_id, message.get("text", "")))
+        user_text = message.get("text", "")
+        command_response = handle_line_command(user_text) if "handle_line_command" in globals() else None
+        if command_response is not None:
+            line_reply(reply_token, command_response)
+            continue
+        line_reply(reply_token, handle_message(user_id, user_text))
     return "OK", 200
 
 
+
+
+# ============================================================
+# V8 PROFESSIONAL WATCHLIST ENGINE
+# ============================================================
+def dedupe_keep_order(items):
+    seen = set()
+    out = []
+    for x in items:
+        k = str(x).strip().upper()
+        if k and k not in seen:
+            out.append(k)
+            seen.add(k)
+    return out
+
+
+def classify_watchlist_symbol(symbol):
+    key = str(symbol).strip().upper()
+    if not key:
+        return None
+    if key in GOLD_WORDS or key in GOLD_WATCHLIST:
+        return "GOLD"
+    if key.endswith(".BK") or key.endswith(".SET"):
+        return "THAI_STOCK"
+    if key in US_SYMBOLS or key in US_WATCHLIST or key in TIER_A_WATCHLIST or key in TIER_B_WATCHLIST:
+        return "US_STOCK"
+    if key in TH_WATCHLIST or key in TIER_C_WATCHLIST or key in THAI_SYMBOLS:
+        return "THAI_STOCK"
+    # Default plain unknown ticker = US stock to avoid fake .BK errors.
+    return "US_STOCK"
+
+
+def build_v8_scan_watchlist():
+    if ENABLE_SEPARATE_WATCHLISTS:
+        base = []
+        # Priority order
+        base.extend(TIER_A_WATCHLIST)
+        base.extend(TIER_B_WATCHLIST)
+        base.extend(TIER_C_WATCHLIST)
+        base.extend(GOLD_WATCHLIST)
+        base.extend(US_WATCHLIST)
+        base.extend(TH_WATCHLIST)
+        return dedupe_keep_order(base)
+
+    # Backward compatible mode from old WATCHLIST, but with safer classification.
+    valid = []
+    for s in WATCHLIST:
+        asset_class = classify_watchlist_symbol(s)
+        if asset_class:
+            valid.append(s)
+    return dedupe_keep_order(valid)
+
+
+def v8_skip_symbol(symbol):
+    # Skip empty/slash commands accidentally placed in watchlist.
+    key = str(symbol).strip().upper()
+    if not key:
+        return True
+    if key.startswith("/"):
+        return True
+    if key in {"OIL", "น้ำมัน"}:
+        return True
+    return False
+
+
+def v8_watchlist_status_dict():
+    return {
+        "enable_separate_watchlists": ENABLE_SEPARATE_WATCHLISTS,
+        "scan_watchlist": build_v8_scan_watchlist(),
+        "us_watchlist": US_WATCHLIST,
+        "th_watchlist": TH_WATCHLIST,
+        "gold_watchlist": GOLD_WATCHLIST,
+        "tier_a": TIER_A_WATCHLIST,
+        "tier_b": TIER_B_WATCHLIST,
+        "tier_c": TIER_C_WATCHLIST,
+        "known_us_count": len(US_SYMBOLS),
+    }
 
 # ============================================================
 # AUTO SIGNAL PRO
@@ -3592,8 +3765,10 @@ def auto_alert_loop():
             maybe_send_premarket_and_top5()
 
             if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-                for symbol in WATCHLIST:
+                for symbol in build_v8_scan_watchlist():
                     try:
+                        if v8_skip_symbol(symbol):
+                            continue
                         asset = normalize_asset(symbol)
 
                         if not should_scan_symbol_by_session(asset):
@@ -3624,7 +3799,12 @@ def auto_alert_loop():
                         time.sleep(3)
 
                     except Exception as e:
-                        print(f"Auto Signal Pro error for {symbol}: {e}")
+                        msg = str(e)
+                        if V8_SKIP_INVALID_SYMBOLS and ("possibly delisted" in msg.lower() or "no price data" in msg.lower()):
+                            if V8_LOG_SKIPPED_SYMBOLS:
+                                print(f"V8 skipped invalid/no-data symbol {symbol}: {e}")
+                        else:
+                            print(f"Auto Signal Pro error for {symbol}: {e}")
 
             time.sleep(max(30, SIGNAL_SCAN_SECONDS))
 
