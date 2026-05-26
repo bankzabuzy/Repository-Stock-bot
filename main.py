@@ -48,7 +48,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.6 Professional Alert Upgrade
+# V7.7 Professional Trading Assistant
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -1854,7 +1854,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.6 Professional Alert Upgrade
+    return """V7.7 Professional Trading Assistant
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1901,7 +1901,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.6 Professional Alert Upgrade",
+        "service": "AI Market LINE Bot V7.7 Professional Trading Assistant",
         "time_th": now_text(),
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
@@ -1955,7 +1955,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.6 Professional Alert Upgrade</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.7 Professional Trading Assistant</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2084,20 +2084,23 @@ def signal_type_from_analysis(asset, analysis):
 
 
 def build_auto_signal_message(symbol, asset, analysis):
-    msg = professional_alert_message(symbol, asset, analysis)
+    msg = professional_alert_message_v77(symbol, asset, analysis)
     if msg:
         return msg
 
-    price = analysis.get("price")
-    price_label = "$" if asset.get("currency") == "USD" else "฿"
-    return f"""⚠️ SIGNAL ALERT
+    # fallback to V7.6 if needed
+    try:
+        return professional_alert_message(symbol, asset, analysis)
+    except Exception:
+        price = analysis.get("price")
+        price_label = "$" if asset.get("currency") == "USD" else "฿"
+        return f"""⚠️ SIGNAL ALERT
 
 Symbol: {symbol}
 เวลาไทย: {now_text()}
 
 ราคา: {price_label}{fmt_num(price)}
 AI Score: {analysis.get('score')}/100
-Signal Confidence: {calculate_signal_confidence(analysis)}%
 
 หมายเหตุ: ข้อมูลไม่พอสำหรับแผนเต็ม"""
 
@@ -2540,6 +2543,329 @@ TP3:
 
 เหตุผลหลัก:
 {reasons_text}
+
+หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
+
+
+# ============================================================
+# V7.7 PROFESSIONAL TRADING ASSISTANT
+# ============================================================
+def clamp(value, low, high):
+    try:
+        return max(low, min(high, value))
+    except Exception:
+        return low
+
+
+def normalized_signal_score(raw_score, side):
+    """Avoid impossible-looking 0/100 unless signal is extreme.
+    Keeps scale readable for users.
+    """
+    try:
+        score = int(raw_score)
+    except Exception:
+        score = 50
+
+    if side in {"SELL", "STRONG_PUT"}:
+        if score <= 0:
+            return 8
+        return clamp(score, 5, 45)
+    if side in {"BUY", "STRONG_CALL"}:
+        if score >= 100:
+            return 92
+        return clamp(score, 55, 95)
+    return clamp(score, 20, 80)
+
+
+def professional_probability(analysis, side):
+    """Probability-like quality score aligned with direction.
+    This is not statistical win probability.
+    """
+    try:
+        base = int(analysis.get("probability", 50))
+    except Exception:
+        base = 50
+
+    score = int(analysis.get("score", 50))
+    rsi = safe_float(analysis.get("rsi"), 50) or 50
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    regime = str(analysis.get("regime", "")).upper()
+
+    directional_strength = abs(score - 50)
+    prob = 50 + int(directional_strength * 0.65)
+
+    if side in {"SELL", "STRONG_PUT"} and rsi <= 45:
+        prob += 6
+    if side in {"BUY", "STRONG_CALL"} and rsi >= 55:
+        prob += 6
+
+    if rvol >= 1.3:
+        prob += 5
+    elif rvol < 0.8:
+        prob -= 7
+
+    if "LOW VOL" in regime:
+        prob -= 4
+    if "TREND" in regime:
+        prob += 5
+
+    # Blend with existing probability so it does not jump too wildly.
+    prob = int(prob * 0.65 + base * 0.35)
+    return clamp(prob, 35, 92)
+
+
+def professional_signal_confidence(analysis, side):
+    prob = professional_probability(analysis, side)
+    score = int(analysis.get("score", 50))
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    regime = str(analysis.get("regime", "")).upper()
+    trend = trend_strength_score(analysis)
+
+    conf = int(prob * 0.72 + abs(score - 50) * 0.55 + trend * 1.6)
+
+    if rvol >= 1.5:
+        conf += 5
+    elif rvol < 0.8:
+        conf -= 5
+
+    if "RANGE" in regime:
+        conf -= 3
+    if "LOW VOL" in regime:
+        conf -= 4
+
+    return clamp(conf, 40, 95)
+
+
+def trend_strength_score(analysis):
+    try:
+        price = safe_float(analysis.get("price"))
+        ema6 = safe_float(analysis.get("ema6"))
+        ema12 = safe_float(analysis.get("ema12"))
+        ema50 = safe_float(analysis.get("ema50"))
+        atr = safe_float(analysis.get("atr"))
+        rsi = safe_float(analysis.get("rsi"), 50) or 50
+
+        score = 0
+        if price and ema50:
+            dist = abs(price - ema50) / ema50 * 100
+            if dist >= 2.0:
+                score += 3
+            elif dist >= 1.0:
+                score += 2
+            elif dist >= 0.4:
+                score += 1
+
+        if ema6 and ema12 and ema50:
+            if ema6 > ema12 > ema50 or ema6 < ema12 < ema50:
+                score += 3
+            elif (ema6 > ema12) or (ema6 < ema12):
+                score += 1
+
+        if rsi >= 65 or rsi <= 35:
+            score += 2
+        elif rsi >= 58 or rsi <= 42:
+            score += 1
+
+        if atr and price:
+            atr_pct = atr / price * 100
+            if atr_pct >= 1.2:
+                score += 2
+            elif atr_pct >= 0.6:
+                score += 1
+
+        return clamp(score, 1, 10)
+    except Exception:
+        return 5
+
+
+def trend_strength_text(analysis):
+    s = trend_strength_score(analysis)
+    if s >= 8:
+        label = "Strong"
+    elif s >= 5:
+        label = "Medium"
+    else:
+        label = "Weak"
+    return f"""📐 Trend Strength
+Score: {s}/10
+Status: {label}"""
+
+
+def gold_premium_analysis_block(price_usd=None, thai_gold=None):
+    """Compare spot THB per ounce vs Thai gold per baht-weight.
+    Prevents confusion between ounce and Thai baht-weight prices.
+    """
+    if not price_usd:
+        return ""
+
+    try:
+        usdthb = get_usd_thb_rate()
+    except Exception:
+        usdthb = None
+
+    if not usdthb:
+        return ""
+
+    spot_thb_oz = float(price_usd) * float(usdthb)
+    spot_thb_baht_weight = gold_thb_per_baht_weight(price_usd, usdthb)
+
+    bar_sell = None
+    if thai_gold:
+        bar_sell = thai_gold.get("bar_sell")
+
+    lines = [
+        "🧮 Gold Premium Analysis",
+        f"Spot THB/oz: {fmt_num(spot_thb_oz, 0)} บาท/ออนซ์",
+    ]
+
+    if spot_thb_baht_weight:
+        lines.append(f"Spot เทียบบาททอง: {fmt_num(spot_thb_baht_weight, 0)} บาท/บาททอง")
+
+    if bar_sell:
+        premium = float(bar_sell) - float(spot_thb_baht_weight or 0)
+        premium_pct = premium / float(spot_thb_baht_weight) * 100 if spot_thb_baht_weight else 0
+        lines.append(f"Thai Gold Sell: {fmt_num(bar_sell, 0)} บาท/บาททอง")
+        lines.append(f"Premium: {premium:+,.0f} บาท ({premium_pct:+.2f}%)")
+
+        if abs(premium_pct) >= 8:
+            status = "ข้อมูลต่างมาก ควรตรวจสอบแหล่งราคา/หน่วยราคา"
+        elif premium_pct >= 2:
+            status = "ไทยแพงกว่า Spot เล็กน้อยถึงปานกลาง"
+        elif premium_pct <= -2:
+            status = "ไทยต่ำกว่า Spot ผิดปกติหรือมีส่วนต่างหน่วยราคา"
+        else:
+            status = "สอดคล้องกับ Spot โดยรวม"
+        lines.append(f"Status: {status}")
+    else:
+        lines.append("Thai Gold Sell: N/A")
+        lines.append("Status: ยังเทียบ Premium ไม่ได้")
+
+    return "\n".join(lines)
+
+
+def risk_context_warning(asset, analysis, side):
+    warnings = []
+    regime = str(analysis.get("regime", "")).upper()
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    score = int(analysis.get("score", 50))
+
+    if side in {"BUY", "STRONG_CALL"} and "DOWNTREND" in regime:
+        warnings.append("⚠️ Buy ระยะสั้น แต่โครงสร้างกลางยังเป็น Downtrend ควรลดขนาดไม้หรือรอยืนยันเบรกแนวต้าน")
+    if side in {"SELL", "STRONG_PUT"} and "UPTREND" in regime:
+        warnings.append("⚠️ Sell ระยะสั้น แต่โครงสร้างกลางยังเป็น Uptrend ควรระวังแรงเด้งกลับ")
+    if "RANGE" in regime:
+        warnings.append("⚠️ ตลาดเป็น Range ควรเน้นเข้าใกล้กรอบราคา ไม่ไล่ราคา")
+    if "LOW VOL" in regime or rvol < 0.8:
+        warnings.append("⚠️ Volume ต่ำ สัญญาณอาจหลอกง่าย")
+    if score <= 3 or score >= 97:
+        warnings.append("⚠️ คะแนนสุดขั้ว ระบบปรับให้อ่านง่ายใน V7.7 แต่ควรดู Timeframe Confirm ประกอบ")
+
+    return "\n".join(warnings)
+
+
+def professional_alert_message_v77(symbol, asset, analysis):
+    price = analysis.get("price")
+    if not price:
+        return None
+
+    sig = signal_type_from_analysis(asset, analysis)
+    if sig == "NONE":
+        return None
+
+    side = sig
+    if sig == "BUY":
+        side = "BUY"
+    elif sig == "SELL":
+        side = "SELL"
+
+    atr = analysis.get("atr") or price * 0.015
+    score = normalized_signal_score(analysis.get("score", 50), side)
+    confidence = professional_signal_confidence(analysis, side)
+    probability = professional_probability(analysis, side)
+    price_label = "$" if asset.get("currency") == "USD" else "฿"
+
+    if side in {"STRONG_CALL", "BUY"}:
+        header = "🟢 STRONG CALL SIGNAL" if asset.get("asset_type") == "US_STOCK" else "🟢 BUY ALERT"
+        entry_low = price - atr * 0.20
+        entry_high = price + atr * 0.10
+        sl = price - atr * 0.90
+        tp1 = price + atr * 0.80
+        tp2 = price + atr * 1.50
+        tp3 = price + atr * 2.20
+    elif side in {"STRONG_PUT", "SELL"}:
+        header = "🔴 STRONG PUT SIGNAL" if asset.get("asset_type") == "US_STOCK" else "🔴 SELL ALERT"
+        if asset.get("asset_type") == "GOLD":
+            header = "🔴 SELL ALERT"
+        entry_low = price - atr * 0.10
+        entry_high = price + atr * 0.20
+        sl = price + atr * 0.90
+        tp1 = price - atr * 0.80
+        tp2 = price - atr * 1.50
+        tp3 = price - atr * 2.20
+    else:
+        return None
+
+    thai_gold = None
+    if asset.get("asset_type") == "GOLD":
+        try:
+            thai_gold = get_thai_gold_price_or_estimate(price, get_usd_thb_rate())
+        except Exception:
+            thai_gold = None
+        price_block = get_gold_thai_block(price)
+        premium_block = gold_premium_analysis_block(price, thai_gold)
+    else:
+        price_block = f"ราคา: {price_label}{fmt_num(price)}"
+        premium_block = ""
+
+    tf_block = build_timeframe_confirm(asset, analysis)
+    trend_block = trend_strength_text(analysis)
+    opt_block = suggested_options_contract(asset, analysis)
+    warning_block = risk_context_warning(asset, analysis, side)
+
+    reasons = analysis.get("reasons", []) or []
+    reasons_text = chr(10).join("- " + str(r) for r in reasons[:5]) if reasons else "- N/A"
+
+    return f"""{header}
+
+Symbol: {symbol}
+เวลาไทย: {now_text()}
+
+{price_block}
+
+AI Score: {score}/100
+Signal Confidence: {confidence}%
+Probability: {probability}%
+มุมมอง: {analysis.get('bias')}
+Regime: {analysis.get('regime')}
+
+{trend_block}
+
+{tf_block}
+
+{premium_block}
+
+🎯 Trading Plan
+Entry Zone:
+{price_label}{fmt_num(entry_low)} - {price_label}{fmt_num(entry_high)}
+
+SL:
+{price_label}{fmt_num(sl)}
+
+TP1:
+{price_label}{fmt_num(tp1)}
+
+TP2:
+{price_label}{fmt_num(tp2)}
+
+TP3:
+{price_label}{fmt_num(tp3)}
+
+{opt_block}
+
+เหตุผลหลัก:
+{reasons_text}
+
+{warning_block}
 
 หมายเหตุ: เป็นสัญญาณจากระบบ Hybrid ไม่ใช่คำแนะนำการลงทุน"""
 
