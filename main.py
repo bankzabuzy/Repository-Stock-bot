@@ -89,6 +89,73 @@ def fmt_num(value, decimals=2):
         return "N/A"
 
 
+
+
+def get_usd_thb_rate():
+    """Return USD/THB exchange rate from Twelve Data, fallback to 36.50."""
+    try:
+        if not TWELVEDATA_API_KEY:
+            return 36.50
+
+        r = requests.get(
+            "https://api.twelvedata.com/exchange_rate",
+            params={"symbol": "USD/THB", "apikey": TWELVEDATA_API_KEY},
+            timeout=15,
+        )
+        data = r.json()
+        rate = safe_float(data.get("rate"))
+        return rate if rate else 36.50
+    except Exception:
+        return 36.50
+
+
+def gold_thb_per_baht_weight(xauusd_price, usd_thb_rate):
+    """Estimate Thai gold spot per 1 baht weight from XAU/USD.
+    Formula: XAUUSD * USDTHB * 15.244g / 31.1034768g
+    This is spot estimate, not shop quoted buy/sell price.
+    """
+    if not xauusd_price or not usd_thb_rate:
+        return None
+    return xauusd_price * usd_thb_rate * (15.244 / 31.1034768)
+
+
+def build_trade_plan(price, atr, bias):
+    if not price:
+        return "ข้อมูลราคาไม่พอสำหรับทำแผน 3 ไม้"
+
+    if not atr:
+        atr = price * 0.01
+
+    buy1 = price - atr * 0.30
+    buy2 = price - atr * 0.70
+    buy3 = price - atr * 1.10
+
+    sell1 = price + atr * 0.50
+    sell2 = price + atr * 1.00
+    sell3 = price + atr * 1.60
+
+    stop = price - atr * 1.50
+
+    if "BEARISH" in bias:
+        note = "แนวโน้มยังอ่อน แผนซื้อควรรอไม้ลึก/ลดขนาดไม้ และห้ามไล่ราคา"
+    elif "BULLISH" in bias:
+        note = "แนวโน้มบวก ใช้แผนย่อซื้อและแบ่งขายตามแนวต้าน"
+    else:
+        note = "แนวโน้มกลาง ใช้แผนแบ่งไม้ หลีกเลี่ยงการเข้าเต็มจำนวน"
+
+    return f"""🧩 แผนเข้า/ออก 3 ไม้
+ซื้อไม้ 1: {fmt_num(buy1)}
+ซื้อไม้ 2: {fmt_num(buy2)}
+ซื้อไม้ 3: {fmt_num(buy3)}
+
+ขาย/ทำกำไร 1: {fmt_num(sell1)}
+ขาย/ทำกำไร 2: {fmt_num(sell2)}
+ขาย/ทำกำไร 3: {fmt_num(sell3)}
+
+จุดคุมความเสี่ยง: {fmt_num(stop)}
+หมายเหตุ: {note}"""
+
+
 def normalize_asset(user_text):
     raw = user_text.strip()
     key = raw.upper().replace(" ", "")
@@ -406,11 +473,28 @@ def build_asset_report(user_text):
     if not reasons:
         reasons = ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
+    gold_extra = ""
+    if asset["asset_type"] == "GOLD" and analysis["price"]:
+        usd_thb = get_usd_thb_rate()
+        thai_gold_est = gold_thb_per_baht_weight(analysis["price"], usd_thb)
+        gold_extra = f"""
+🇹🇭 ประมาณราคาไทย
+USD/THB: {fmt_num(usd_thb)}
+ทองคำแท่งอ้างอิง Spot ต่อ 1 บาททอง: ฿{fmt_num(thai_gold_est)}
+หมายเหตุ: เป็นราคาประมาณจาก XAU/USD ยังไม่รวมค่ากำเหน็จ/ส่วนต่างร้านทอง/ประกาศสมาคมฯ"""
+
+    trade_plan = build_trade_plan(
+        analysis["price"],
+        analysis["atr"],
+        analysis["bias"],
+    )
+
     text = f"""📊 วิเคราะห์ {asset['display']}
 เวลาไทย: {now_text()}
 
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
+{gold_extra}
 
 AI Score: {analysis['score']}/100
 มุมมอง: {analysis['bias']}
@@ -427,6 +511,8 @@ ATR14: {fmt_num(analysis['atr'])}
 แนวต้านประมาณ: {price_label}{fmt_num(analysis['resistance'])}
 Stop loss เชิงระบบ: {price_label}{fmt_num(analysis['stop_loss'])}
 Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profit'])}
+
+{trade_plan}
 
 เหตุผลหลัก:
 {chr(10).join("- " + r for r in reasons)}
