@@ -48,7 +48,7 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
-# V7.7 Professional Trading Assistant
+# V7.7.1 Warning Weight Tuning
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
@@ -1854,7 +1854,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.7 Professional Trading Assistant
+    return """V7.7.1 Warning Weight Tuning
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1901,7 +1901,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.7 Professional Trading Assistant",
+        "service": "AI Market LINE Bot V7.7.1 Warning Weight Tuning",
         "time_th": now_text(),
         "premarket_reminder_th": PREMARKET_REMINDER_TH,
         "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
@@ -1955,7 +1955,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.7 Professional Trading Assistant</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.7.1 Warning Weight Tuning</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -2497,12 +2497,18 @@ def professional_alert_message(symbol, asset, analysis):
     else:
         return None
 
+    adjusted_word = adjusted_signal_word(asset, analysis, side)
+    if adjusted_word in {"BUY WATCH / WAIT FOR CONFIRM", "BUY / NEED CONFIRM"}:
+        header = "🟡 " + adjusted_word
+    elif adjusted_word in {"SELL WATCH / WAIT FOR CONFIRM", "SELL / RANGE WEAK"}:
+        header = "🟠 " + adjusted_word
+
     if asset.get("asset_type") == "GOLD":
         price_block = get_gold_thai_block(price)
     else:
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
 
-    tf_block = build_timeframe_confirm(asset, analysis)
+    tf_block = build_timeframe_confirm_v771(asset, analysis, side)
     opt_block = suggested_options_contract(asset, analysis)
 
     reasons = analysis.get("reasons", []) or []
@@ -2754,14 +2760,97 @@ def risk_context_warning(asset, analysis, side):
     if side in {"SELL", "STRONG_PUT"} and "UPTREND" in regime:
         warnings.append("⚠️ Sell ระยะสั้น แต่โครงสร้างกลางยังเป็น Uptrend ควรระวังแรงเด้งกลับ")
     if "RANGE" in regime:
-        warnings.append("⚠️ ตลาดเป็น Range ควรเน้นเข้าใกล้กรอบราคา ไม่ไล่ราคา")
+        warnings.append("⚠️ ตลาดเป็น Range ระบบลดระดับสัญญาณจาก STRONG เป็น WATCH/CONFIRM")
     if "LOW VOL" in regime or rvol < 0.8:
-        warnings.append("⚠️ Volume ต่ำ สัญญาณอาจหลอกง่าย")
+        warnings.append("⚠️ Volume ต่ำ ระบบลดความมั่นใจของสัญญาณ")
     if score <= 3 or score >= 97:
         warnings.append("⚠️ คะแนนสุดขั้ว ระบบปรับให้อ่านง่ายใน V7.7 แต่ควรดู Timeframe Confirm ประกอบ")
 
     return "\n".join(warnings)
 
+
+
+def warning_penalty_score(asset, analysis, side):
+    """Penalty for overconfident wording.
+    Higher = should downgrade STRONG wording/confidence.
+    """
+    penalty = 0
+    regime = str(analysis.get("regime", "")).upper()
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    trend = trend_strength_score(analysis)
+
+    if "RANGE" in regime:
+        penalty += 18
+    if "LOW VOL" in regime:
+        penalty += 15
+    if rvol < 0.8:
+        penalty += 14
+    if trend < 5:
+        penalty += 18
+
+    if side in {"BUY", "STRONG_CALL"} and "DOWNTREND" in regime:
+        penalty += 22
+    if side in {"SELL", "STRONG_PUT"} and "UPTREND" in regime:
+        penalty += 22
+
+    return penalty
+
+
+def adjusted_signal_word(asset, analysis, side):
+    """Downgrade STRONG labels when warning conditions are present."""
+    regime = str(analysis.get("regime", "")).upper()
+    trend = trend_strength_score(analysis)
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    penalty = warning_penalty_score(asset, analysis, side)
+
+    if side in {"BUY", "STRONG_CALL"}:
+        if penalty >= 35:
+            return "BUY WATCH / WAIT FOR CONFIRM"
+        if trend < 5 or "RANGE" in regime or rvol < 0.8:
+            return "BUY / NEED CONFIRM"
+        return "STRONG BUY"
+
+    if side in {"SELL", "STRONG_PUT"}:
+        if penalty >= 35:
+            return "SELL WATCH / WAIT FOR CONFIRM"
+        if trend < 5 or "RANGE" in regime or rvol < 0.8:
+            return "SELL / RANGE WEAK"
+        return "STRONG SELL"
+
+    return "WAIT"
+
+
+def adjusted_confidence(analysis, side):
+    conf = professional_signal_confidence(analysis, side)
+    penalty = warning_penalty_score({}, analysis, side)
+    conf = conf - int(penalty * 0.45)
+    return clamp(conf, 35, 92)
+
+
+def adjusted_probability(analysis, side):
+    prob = professional_probability(analysis, side)
+    penalty = warning_penalty_score({}, analysis, side)
+    prob = prob - int(penalty * 0.35)
+    return clamp(prob, 35, 90)
+
+
+def build_timeframe_confirm_v771(asset, analysis, side):
+    """Same TF lines, but overall label is downgraded by warning weight."""
+    try:
+        base = build_timeframe_confirm(asset, analysis)
+        adjusted = adjusted_signal_word(asset, analysis, side)
+
+        # Replace only the Overall line.
+        lines = base.splitlines()
+        out = []
+        for line in lines:
+            if line.startswith("Overall"):
+                out.append(f"Overall : {adjusted}")
+            else:
+                out.append(line)
+        return "\n".join(out)
+    except Exception:
+        return build_timeframe_confirm(asset, analysis)
 
 def professional_alert_message_v77(symbol, asset, analysis):
     price = analysis.get("price")
@@ -2780,8 +2869,8 @@ def professional_alert_message_v77(symbol, asset, analysis):
 
     atr = analysis.get("atr") or price * 0.015
     score = normalized_signal_score(analysis.get("score", 50), side)
-    confidence = professional_signal_confidence(analysis, side)
-    probability = professional_probability(analysis, side)
+    confidence = adjusted_confidence(analysis, side)
+    probability = adjusted_probability(analysis, side)
     price_label = "$" if asset.get("currency") == "USD" else "฿"
 
     if side in {"STRONG_CALL", "BUY"}:
@@ -2817,7 +2906,7 @@ def professional_alert_message_v77(symbol, asset, analysis):
         price_block = f"ราคา: {price_label}{fmt_num(price)}"
         premium_block = ""
 
-    tf_block = build_timeframe_confirm(asset, analysis)
+    tf_block = build_timeframe_confirm_v771(asset, analysis, side)
     trend_block = trend_strength_text(analysis)
     opt_block = suggested_options_contract(asset, analysis)
     warning_block = risk_context_warning(asset, analysis, side)
