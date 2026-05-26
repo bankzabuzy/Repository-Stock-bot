@@ -55,7 +55,19 @@ THAI_SYMBOLS = {
     "SCB", "AOT", "PTT", "CPALL", "KBANK", "BBL", "DELTA", "ADVANC", "TRUE",
     "BDMS", "MINT", "PTTEP", "GULF", "CPAXT", "BEM", "KTB", "KTC", "OR",
     "CRC", "HMPRO", "CENTEL", "GPSC", "EA", "BGRIM", "BH", "TOP", "SCC",
-    "TISCO", "LH", "MTC", "SAWAD", "TIDLOR", "OSP", "CBG", "TU", "IVL"
+    "TISCO", "LH", "MTC", "SAWAD", "TIDLOR", "OSP", "CBG", "TU", "IVL",
+    "HANA", "DOHOME", "COM7", "JMART", "JMT", "BANPU", "BCP", "IRPC",
+    "SPRC", "RATCH", "EGCO", "WHA", "AMATA", "ROJNA", "CK", "STECON",
+    "ITD", "STPI", "TASCO", "GLOBAL", "MEGA", "CHG", "BCH", "VGI",
+    "PLANB", "BEC", "MAJOR", "RS", "SINGER", "SABUY", "FORTH", "KCE",
+    "SYNEX", "ITEL", "INET", "BE8", "BBIK", "DITTO", "SISB", "AU",
+    "ZEN", "M", "TKN", "ICHI", "SAPPE", "RBF", "WARRIX", "MOSHI",
+    "BJC", "MAKRO", "BTS", "MRT", "SIRI", "AP", "SPALI", "ORI",
+    "ANAN", "NOBLE", "QH", "PSH", "LPN", "SENA", "AWC", "ERW",
+    "BA", "AAV", "NEX", "BYD", "TTA", "PSL", "RCL", "STA", "STGT",
+    "NER", "CPF", "GFPT", "BTG", "TFG", "XO", "PRM", "III", "JAS",
+    "MONO", "THCOM", "INTUCH", "TLI", "BLA", "TIPH", "BAM", "CHAYO",
+    "ASK", "KGI", "MST", "CGH", "TQM", "MENA", "SNNP", "PLUS"
 }
 
 GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAUUSD", "XAU/USD"}
@@ -278,72 +290,150 @@ def gold_thb_per_baht_weight(xauusd_price, usd_thb_rate):
 
 
 def get_goldtraders_price():
+    """Fetch official Thai gold price from Gold Traders Association.
+
+    Priority:
+    1) classic.goldtraders.or.th/UpdatePriceList.aspx
+    2) classic.goldtraders.or.th/DailyPrices.aspx
+    3) classic/homepage/new site loose parser
+    """
     cached = cache_get("GOLDTRADERS")
     if cached:
         return cached
 
-    urls = [
-        "https://www.goldtraders.or.th/",
-        "https://www.goldtraders.or.th/Default.aspx",
-        "https://newgta.goldtraders.or.th/homepage_pre",
+    def parse_update_price_list(html, url):
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        row_pattern = re.compile(
+            r"(\d{2}/\d{2}/\d{4})\s+"
+            r"(\d{1,2}:\d{2})\s+"
+            r"(\d+)\s+"
+            r"(\d{2,3},\d{3}\.\d{2})\s+"
+            r"(\d{2,3},\d{3}\.\d{2})\s+"
+            r"(\d{2,3},\d{3}\.\d{2})\s+"
+            r"(\d{2,3},\d{3}\.\d{2})\s+"
+            r"(\d{1,2},\d{3}\.\d{2})\s+"
+            r"(\d{2}\.\d{2})\s*"
+            r"([+-]?\d+)?"
+        )
+        m = row_pattern.search(text)
+        if not m:
+            return None
+
+        date_th, time_th, round_no = m.group(1), m.group(2), m.group(3)
+        result = {
+            "bar_buy": safe_float(m.group(4)),
+            "bar_sell": safe_float(m.group(5)),
+            "ornament_buy": safe_float(m.group(6)),
+            "ornament_sell": safe_float(m.group(7)),
+            "gold_spot": safe_float(m.group(8)),
+            "usd_thb_ref": safe_float(m.group(9)),
+            "change": safe_float(m.group(10), 0),
+            "source": "สมาคมค้าทองคำ / GoldTraders UpdatePriceList",
+            "updated_at": f"{date_th} {time_th} ครั้งที่ {round_no}",
+            "raw_url": url,
+            "is_estimate": False,
+        }
+        return result if result["bar_buy"] and result["bar_sell"] else None
+
+    def parse_daily_prices(html, url):
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        bar = re.search(
+            r"ทองคำแท่ง\s*96\.5%.*?(\d{2,3},\d{3}\.\d{2})\s+(\d{2,3},\d{3}\.\d{2})",
+            text,
+            re.S,
+        )
+        ornament = re.search(
+            r"ทองรูปพรรณ\s*96\.5%.*?(\d{1,2},\d{3}\.\d{2})\s+(\d{2,3},\d{3}\.\d{2})\s+(\d{2,3},\d{3}\.\d{2})",
+            text,
+            re.S,
+        )
+        if not bar:
+            return None
+
+        result = {
+            "bar_buy": safe_float(bar.group(1)),
+            "bar_sell": safe_float(bar.group(2)),
+            "ornament_buy": safe_float(ornament.group(2)) if ornament else None,
+            "ornament_sell": safe_float(ornament.group(3)) if ornament else None,
+            "gold_spot": None,
+            "usd_thb_ref": None,
+            "change": None,
+            "source": "สมาคมค้าทองคำ / GoldTraders DailyPrices",
+            "updated_at": now_text(),
+            "raw_url": url,
+            "is_estimate": False,
+        }
+        return result if result["bar_buy"] and result["bar_sell"] else None
+
+    def parse_homepage_loose(html, url):
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        bar = re.search(
+            r"ทองคำแท่ง\s*96\.5%.*?รับซื้อ\s*(\d{2,3},\d{3}\.\d{2}).*?ขายออก\s*(\d{2,3},\d{3}\.\d{2})",
+            text,
+            re.S,
+        )
+        ornament = re.search(
+            r"ทองรูปพรรณ\s*96\.5%.*?(?:ฐานภาษี|รับซื้อ)\s*(\d{2,3},\d{3}\.\d{2}).*?ขายออก\s*(\d{2,3},\d{3}\.\d{2})",
+            text,
+            re.S,
+        )
+        if bar:
+            return {
+                "bar_buy": safe_float(bar.group(1)),
+                "bar_sell": safe_float(bar.group(2)),
+                "ornament_buy": safe_float(ornament.group(1)) if ornament else None,
+                "ornament_sell": safe_float(ornament.group(2)) if ornament else None,
+                "gold_spot": None,
+                "usd_thb_ref": None,
+                "change": None,
+                "source": "สมาคมค้าทองคำ / GoldTraders Homepage",
+                "updated_at": now_text(),
+                "raw_url": url,
+                "is_estimate": False,
+            }
+
+        bidask = re.search(
+            r"(?:GTA Gold Price|Gold Price).*?Bid:\s*(\d{2,3},\d{3}\.\d{2}).*?Ask:\s*(\d{2,3},\d{3}\.\d{2})",
+            text,
+            re.S,
+        )
+        if bidask:
+            return {
+                "bar_buy": safe_float(bidask.group(1)),
+                "bar_sell": safe_float(bidask.group(2)),
+                "ornament_buy": None,
+                "ornament_sell": None,
+                "gold_spot": None,
+                "usd_thb_ref": None,
+                "change": None,
+                "source": "สมาคมค้าทองคำ / GoldTraders GTA BidAsk",
+                "updated_at": now_text(),
+                "raw_url": url,
+                "is_estimate": False,
+            }
+        return None
+
+    sources = [
+        ("https://classic.goldtraders.or.th/UpdatePriceList.aspx", parse_update_price_list),
+        ("https://classic.goldtraders.or.th/DailyPrices.aspx", parse_daily_prices),
+        ("https://classic.goldtraders.or.th/", parse_homepage_loose),
+        ("https://www.goldtraders.or.th/", parse_homepage_loose),
+        ("https://newgta.goldtraders.or.th/homepage_pre", parse_homepage_loose),
     ]
 
-    for url in urls:
+    for url, parser in sources:
         try:
             r = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
             if r.status_code != 200:
                 continue
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            text = soup.get_text(" ", strip=True)
-
-            parsed = {}
-            id_candidates = {
-                "bar_buy": ["DetailPlace_uc_goldprices1_lblBLBuy", "lblBLBuy"],
-                "bar_sell": ["DetailPlace_uc_goldprices1_lblBLSell", "lblBLSell"],
-                "ornament_buy": ["DetailPlace_uc_goldprices1_lblOMBuy", "lblOMBuy"],
-                "ornament_sell": ["DetailPlace_uc_goldprices1_lblOMSell", "lblOMSell"],
-            }
-
-            for key, ids in id_candidates.items():
-                for id_ in ids:
-                    tag = soup.find(id=id_)
-                    value = clean_price_text(tag.get_text(" ", strip=True)) if tag else None
-                    if value:
-                        parsed[key] = value
-                        break
-
-            if "bar_buy" not in parsed or "bar_sell" not in parsed:
-                numbers = extract_price_numbers(text)
-                if len(numbers) >= 2:
-                    candidates = []
-                    for i in range(len(numbers) - 1):
-                        a, b = numbers[i], numbers[i + 1]
-                        if 0 <= b - a <= 1000:
-                            candidates.append((a, b, i))
-                    if candidates:
-                        bar_buy, bar_sell, idx = candidates[0]
-                        parsed.setdefault("bar_buy", bar_buy)
-                        parsed.setdefault("bar_sell", bar_sell)
-                        if len(numbers) > idx + 2:
-                            parsed.setdefault("ornament_buy", numbers[idx + 2])
-                        if len(numbers) > idx + 3:
-                            parsed.setdefault("ornament_sell", numbers[idx + 3])
-
-            if parsed.get("bar_buy") and parsed.get("bar_sell"):
-                if parsed["bar_sell"] < parsed["bar_buy"]:
-                    parsed["bar_buy"], parsed["bar_sell"] = parsed["bar_sell"], parsed["bar_buy"]
-
-                result = {
-                    "bar_buy": parsed.get("bar_buy"),
-                    "bar_sell": parsed.get("bar_sell"),
-                    "ornament_buy": parsed.get("ornament_buy"),
-                    "ornament_sell": parsed.get("ornament_sell"),
-                    "source": "สมาคมค้าทองคำ / GoldTraders",
-                    "updated_at": now_text(),
-                    "raw_url": url,
-                    "is_estimate": False,
-                }
+            result = parser(r.text, url)
+            if result and result.get("bar_buy") and result.get("bar_sell"):
                 cache_set("GOLDTRADERS", result)
                 return result
         except Exception as e:
@@ -700,6 +790,240 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     }
 
 
+
+# ============================================================
+# DIVIDEND + VALUATION V7.1
+# ============================================================
+def fmt_date_from_timestamp(ts):
+    try:
+        if not ts:
+            return "N/A"
+        return (datetime.utcfromtimestamp(int(ts)) + timedelta(hours=7)).strftime("%d/%m/%Y")
+    except Exception:
+        return "N/A"
+
+
+def get_fundamental_data(asset):
+    """Fetch free fundamental/dividend/event data mainly from Yahoo Finance.
+    Not all tickers have complete data. Missing fields return N/A.
+    """
+    if asset["asset_type"] == "GOLD":
+        return {}
+
+    cache_key = f"FUND:{asset['yf_symbol']}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    result = {
+        "market_cap": None,
+        "trailing_pe": None,
+        "forward_pe": None,
+        "dividend_yield": None,
+        "dividend_rate": None,
+        "ex_dividend_date": "N/A",
+        "earnings_date": "N/A",
+        "fifty_two_week_low": None,
+        "fifty_two_week_high": None,
+        "source": "Yahoo Finance",
+    }
+
+    try:
+        ticker = yf.Ticker(asset["yf_symbol"])
+        info = {}
+        try:
+            info = ticker.get_info() or {}
+        except Exception:
+            try:
+                info = ticker.info or {}
+            except Exception:
+                info = {}
+
+        result["market_cap"] = safe_float(info.get("marketCap"))
+        result["trailing_pe"] = safe_float(info.get("trailingPE"))
+        result["forward_pe"] = safe_float(info.get("forwardPE"))
+        result["dividend_yield"] = safe_float(info.get("dividendYield"))
+        result["dividend_rate"] = safe_float(info.get("dividendRate"))
+        result["fifty_two_week_low"] = safe_float(info.get("fiftyTwoWeekLow"))
+        result["fifty_two_week_high"] = safe_float(info.get("fiftyTwoWeekHigh"))
+
+        # Yahoo sometimes provides timestamp seconds.
+        result["ex_dividend_date"] = fmt_date_from_timestamp(info.get("exDividendDate"))
+
+        # Earnings date fallback.
+        try:
+            ed = ticker.get_earnings_dates(limit=1)
+            if ed is not None and not ed.empty:
+                result["earnings_date"] = str(ed.index[0].date())
+        except Exception:
+            pass
+
+        # Dividend fallback from historical dividends if dividendRate missing.
+        try:
+            divs = ticker.dividends
+            if divs is not None and not divs.empty:
+                last_div = float(divs.iloc[-1])
+                result["last_dividend"] = last_div
+                result["last_dividend_date"] = str(divs.index[-1].date())
+            else:
+                result["last_dividend"] = None
+                result["last_dividend_date"] = "N/A"
+        except Exception:
+            result["last_dividend"] = None
+            result["last_dividend_date"] = "N/A"
+
+    except Exception as e:
+        print("get_fundamental_data error:", e)
+
+    cache_set(cache_key, result)
+    return result
+
+
+def human_market_cap(value, currency):
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+        suffix = ""
+        scaled = value
+        if abs(value) >= 1_000_000_000_000:
+            scaled = value / 1_000_000_000_000
+            suffix = "T"
+        elif abs(value) >= 1_000_000_000:
+            scaled = value / 1_000_000_000
+            suffix = "B"
+        elif abs(value) >= 1_000_000:
+            scaled = value / 1_000_000
+            suffix = "M"
+        return f"{currency}{scaled:,.2f}{suffix}"
+    except Exception:
+        return "N/A"
+
+
+def dividend_yield_text(value):
+    if value is None:
+        return "N/A"
+    try:
+        # Yahoo often returns 0.0285 for 2.85%.
+        val = float(value)
+        if val <= 1:
+            val *= 100
+        return f"{val:.2f}%"
+    except Exception:
+        return "N/A"
+
+
+def valuation_engine(asset, analysis, fundamentals):
+    """Simple rule-based valuation using free data.
+    This is not intrinsic valuation; it is relative/technical valuation.
+    """
+    if asset["asset_type"] == "GOLD":
+        return "", "N/A"
+
+    price = analysis.get("price")
+    ema50 = analysis.get("ema50")
+    rsi = analysis.get("rsi")
+    pe = fundamentals.get("trailing_pe")
+    fwd_pe = fundamentals.get("forward_pe")
+    div_yield = fundamentals.get("dividend_yield")
+    low52 = fundamentals.get("fifty_two_week_low")
+    high52 = fundamentals.get("fifty_two_week_high")
+
+    score = 0
+    reasons = []
+
+    # 52W position
+    if price and low52 and high52 and high52 > low52:
+        pos = (price - low52) / (high52 - low52)
+        if pos <= 0.25:
+            score -= 2
+            reasons.append("ราคาอยู่โซนล่างของกรอบ 52 สัปดาห์")
+        elif pos >= 0.80:
+            score += 2
+            reasons.append("ราคาอยู่ใกล้โซนบนของกรอบ 52 สัปดาห์")
+        else:
+            reasons.append("ราคาอยู่กลางกรอบ 52 สัปดาห์")
+
+    # EMA50 distance
+    if price and ema50:
+        dist = (price - ema50) / ema50 * 100
+        if dist >= 12:
+            score += 2
+            reasons.append("ราคาอยู่เหนือ EMA50 ค่อนข้างมาก")
+        elif dist <= -12:
+            score -= 2
+            reasons.append("ราคาอยู่ต่ำกว่า EMA50 ค่อนข้างมาก")
+        else:
+            reasons.append("ราคาไม่ห่างจาก EMA50 มากเกินไป")
+
+    # RSI valuation pressure
+    if rsi is not None:
+        if rsi >= 72:
+            score += 1
+            reasons.append("RSI สูง มีความเสี่ยงไล่ราคา")
+        elif rsi <= 35:
+            score -= 1
+            reasons.append("RSI ต่ำ มีโอกาสอยู่ในโซนถูกเชิงเทคนิค")
+
+    # PE rough filter
+    use_pe = pe or fwd_pe
+    if use_pe:
+        if use_pe >= 45:
+            score += 2
+            reasons.append("P/E สูงมาก ต้องระวังราคาสะท้อนความคาดหวังไปมากแล้ว")
+        elif use_pe >= 25:
+            score += 1
+            reasons.append("P/E ค่อนข้างสูง")
+        elif 0 < use_pe <= 12:
+            score -= 1
+            reasons.append("P/E อยู่ในโซนไม่แพงเมื่อเทียบเชิงตัวเลข")
+        else:
+            reasons.append("P/E อยู่ในโซนกลาง")
+
+    # Dividend yield rough filter
+    if div_yield:
+        dy = div_yield * 100 if div_yield <= 1 else div_yield
+        if dy >= 5:
+            score -= 1
+            reasons.append("Dividend Yield สูง น่าสนใจสำหรับสายปันผล")
+        elif dy < 1:
+            score += 1
+            reasons.append("Dividend Yield ต่ำ ไม่ได้ช่วยรองรับ valuation มากนัก")
+
+    if score <= -3:
+        status = "ถูกน่าสนใจ"
+    elif score <= -1:
+        status = "ค่อนข้างถูก"
+    elif score <= 2:
+        status = "กลาง / พอรับได้"
+    elif score <= 4:
+        status = "แพงเล็กน้อย"
+    else:
+        status = "แพง / ระวังไล่ราคา"
+
+    text = f"""💎 Dividend + Valuation
+
+สถานะราคา: {status}
+
+Market Cap: {human_market_cap(fundamentals.get('market_cap'), '฿' if asset['currency'] == 'THB' else '$')}
+P/E: {fmt_num(fundamentals.get('trailing_pe'))}
+Forward P/E: {fmt_num(fundamentals.get('forward_pe'))}
+Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'))}
+Dividend Rate: {fmt_num(fundamentals.get('dividend_rate'))}
+
+XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
+วันประกาศงบ: {fundamentals.get('earnings_date', 'N/A')}
+ปันผลล่าสุด: {fmt_num(fundamentals.get('last_dividend'))}
+วันที่ปันผลล่าสุด: {fundamentals.get('last_dividend_date', 'N/A')}
+
+52W Low: {fmt_num(fundamentals.get('fifty_two_week_low'))}
+52W High: {fmt_num(fundamentals.get('fifty_two_week_high'))}
+
+เหตุผล valuation:
+{chr(10).join("- " + r for r in reasons[:6]) if reasons else "- ข้อมูลพื้นฐานไม่พอสำหรับประเมินถูก/แพง"}"""
+
+    return text, status
+
 # ============================================================
 # OPTIONS HYBRID MAX FREE
 # ============================================================
@@ -929,6 +1253,9 @@ def build_asset_report(user_text):
     source_text = "Yahoo Finance" if asset["asset_type"] == "THAI_STOCK" else "Twelve Data"
     opt_text = options_hybrid_engine(asset, analysis)
 
+    fundamentals = get_fundamental_data(asset)
+    valuation_text, valuation_status = valuation_engine(asset, analysis, fundamentals)
+
     mtf_lines = "\n".join([f"- {label}: {state}" for label, state in analysis["mtf_states"]]) or "- N/A"
 
     report = f"""📊 วิเคราะห์ {asset['display']}
@@ -955,6 +1282,8 @@ RSI14: {fmt_num(analysis['rsi'])}
 ATR14: {fmt_num(analysis['atr'])}
 RVOL: {fmt_num(analysis['rvol'])}
 
+{valuation_text}
+
 🎯 โซนราคา
 แนวรับประมาณ: {price_label}{fmt_num(analysis['support'])}
 แนวต้านประมาณ: {price_label}{fmt_num(analysis['resistance'])}
@@ -977,6 +1306,213 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
     return report
 
+
+
+# ============================================================
+# THAILAND OIL PRICE V7.2
+# ============================================================
+OIL_WORDS = {"น้ำมัน", "ราคาน้ำมัน", "oil", "fuel", "ptt", "บางจาก"}
+
+def normalize_oil_name(name):
+    raw = str(name).strip()
+    n = raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+    mapping = {
+        "gasohol95": "แก๊สโซฮอล์ 95",
+        "แก๊สโซฮอล์95": "แก๊สโซฮอล์ 95",
+        "gasohol91": "แก๊สโซฮอล์ 91",
+        "แก๊สโซฮอล์91": "แก๊สโซฮอล์ 91",
+        "e20": "แก๊สโซฮอล์ E20",
+        "gasohole20": "แก๊สโซฮอล์ E20",
+        "e85": "แก๊สโซฮอล์ E85",
+        "gasohole85": "แก๊สโซฮอล์ E85",
+        "เบนซิน95": "เบนซิน 95",
+        "gasoline95": "เบนซิน 95",
+        "dieselb7": "ดีเซล B7",
+        "ดีเซลb7": "ดีเซล B7",
+        "diesel": "ดีเซล",
+        "ดีเซล": "ดีเซล",
+        "premiumdiesel": "ดีเซลพรีเมียม",
+        "ดีเซลพรีเมียม": "ดีเซลพรีเมียม",
+        "hi-premiumdiesels97": "ดีเซลพรีเมียม",
+    }
+    for k, v in mapping.items():
+        if k in n:
+            return v
+    return raw
+
+
+def parse_oil_price_from_text(text):
+    """Best-effort parser for Thai fuel prices.
+    Looks for product names near prices such as 32.45.
+    """
+    products = [
+        ("เบนซิน 95", [r"เบนซิน\s*95", r"Gasoline\s*95"]),
+        ("แก๊สโซฮอล์ 95", [r"แก๊สโซฮอล์\s*95", r"Gasohol\s*95"]),
+        ("แก๊สโซฮอล์ 91", [r"แก๊สโซฮอล์\s*91", r"Gasohol\s*91"]),
+        ("แก๊สโซฮอล์ E20", [r"E20", r"Gasohol\s*E20"]),
+        ("แก๊สโซฮอล์ E85", [r"E85", r"Gasohol\s*E85"]),
+        ("ดีเซล B7", [r"ดีเซล\s*B7", r"Diesel\s*B7"]),
+        ("ดีเซล", [r"ดีเซล(?!\s*พรีเมียม)(?!\s*B7)", r"Diesel(?!\s*Premium)(?!\s*B7)"]),
+        ("ดีเซลพรีเมียม", [r"ดีเซล\s*พรีเมียม", r"Premium\s*Diesel", r"Hi\s*Premium\s*Diesel"]),
+    ]
+
+    found = {}
+    normalized = re.sub(r"\s+", " ", text)
+
+    for display, patterns in products:
+        for pat in patterns:
+            # Find product then nearest price within next 120 chars.
+            m = re.search(pat + r".{0,120}?(\d{2}\.\d{2})", normalized, re.I)
+            if m:
+                found[display] = safe_float(m.group(1))
+                break
+
+    return found
+
+
+def get_bangchak_oil_prices():
+    """Fetch Thailand retail oil prices from Bangchak pages.
+    This is best-effort free scraping. If Bangchak changes HTML/JS, it may fail.
+    """
+    cached = cache_get("THAI_OIL_BANGCHAK")
+    if cached:
+        return cached
+
+    urls = [
+        "https://oil-price.bangchak.co.th/BcpOilPrice2/th",
+        "https://www.bangchak.co.th/th/oilprice",
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
+            if r.status_code != 200:
+                continue
+
+            html = r.text
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
+
+            prices = {}
+
+            # 1) Try visible text parser.
+            prices.update(parse_oil_price_from_text(text))
+
+            # 2) Try JSON-like patterns in scripts.
+            scripts = " ".join([s.get_text(" ", strip=True) for s in soup.find_all("script")])
+            combo = html + " " + scripts
+
+            # Thai/English product names near values.
+            prices.update(parse_oil_price_from_text(combo))
+
+            # 3) Try loose pairs from JSON-like keys.
+            # Example possible fragments: "productName":"Gasohol 95","price":"35.35"
+            for m in re.finditer(
+                r'(?:"(?:productName|name|oilName|title)"\s*:\s*"([^"]+)".{0,120}?"(?:price|currentPrice|todayPrice)"\s*:\s*"?(\d{2}\.\d{2})"?)',
+                combo,
+                re.I | re.S,
+            ):
+                name = normalize_oil_name(m.group(1))
+                price = safe_float(m.group(2))
+                if price:
+                    prices[name] = price
+
+            # 4) Reverse order JSON pattern.
+            for m in re.finditer(
+                r'(?:"(?:price|currentPrice|todayPrice)"\s*:\s*"?(\d{2}\.\d{2})"?.{0,120}?"(?:productName|name|oilName|title)"\s*:\s*"([^"]+)")',
+                combo,
+                re.I | re.S,
+            ):
+                name = normalize_oil_name(m.group(2))
+                price = safe_float(m.group(1))
+                if price:
+                    prices[name] = price
+
+            # Keep only plausible retail fuel prices.
+            cleaned = {}
+            for k, v in prices.items():
+                if v and 10 <= float(v) <= 80:
+                    cleaned[normalize_oil_name(k)] = float(v)
+
+            if cleaned:
+                result = {
+                    "source": "บางจาก / Bangchak",
+                    "updated_at": now_text(),
+                    "raw_url": url,
+                    "prices": cleaned,
+                    "is_estimate": False,
+                }
+                cache_set("THAI_OIL_BANGCHAK", result)
+                return result
+
+        except Exception as e:
+            print("Bangchak oil fetch error:", url, e)
+
+    return None
+
+
+def get_thai_oil_prices():
+    result = get_bangchak_oil_prices()
+    if result:
+        return result
+
+    # No estimate fallback because oil retail price should not be estimated.
+    return {
+        "source": "N/A",
+        "updated_at": now_text(),
+        "raw_url": None,
+        "prices": {},
+        "is_estimate": False,
+        "error": "ดึงราคาน้ำมันไทยไม่สำเร็จ อาจเกิดจากหน้าเว็บเปลี่ยนโครงสร้างหรือบล็อก request",
+    }
+
+
+def build_oil_report():
+    data = get_thai_oil_prices()
+    prices = data.get("prices", {})
+
+    order = [
+        "เบนซิน 95",
+        "แก๊สโซฮอล์ 95",
+        "แก๊สโซฮอล์ 91",
+        "แก๊สโซฮอล์ E20",
+        "แก๊สโซฮอล์ E85",
+        "ดีเซล",
+        "ดีเซล B7",
+        "ดีเซลพรีเมียม",
+    ]
+
+    lines = []
+    for name in order:
+        if name in prices:
+            lines.append(f"{name}: {fmt_num(prices[name])} บาท/ลิตร")
+
+    # Add any extra products not in order.
+    for name, price in prices.items():
+        if name not in order:
+            lines.append(f"{name}: {fmt_num(price)} บาท/ลิตร")
+
+    if not lines:
+        return f"""⛽ ราคาน้ำมันประเทศไทย
+
+ดึงข้อมูลไม่สำเร็จ
+
+สาเหตุ:
+{data.get('error', 'ไม่พบราคาน้ำมันจากแหล่งข้อมูล')}
+
+แหล่งข้อมูลที่พยายามดึง:
+บางจาก / Bangchak
+
+หมายเหตุ: ระบบไม่คำนวณราคาน้ำมันเอง เพราะราคาขายปลีกไทยต้องอ้างอิงประกาศผู้ค้าน้ำมัน"""
+
+    return f"""⛽ ราคาน้ำมันประเทศไทย
+
+แหล่งข้อมูล: {data.get('source')}
+อัปเดต: {data.get('updated_at')}
+
+{chr(10).join(lines)}
+
+หมายเหตุ: เป็นราคาขายปลีกอ้างอิงประเทศไทย อาจแตกต่างตามพื้นที่/ภาษีท้องถิ่น/สถานีบริการ"""
 
 # ============================================================
 # LINE
@@ -1017,12 +1553,13 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7 Hybrid Max Free
+    return """V7.2 Oil Thailand + Dividend + Valuation
 
-พิมพ์ชื่อสินทรัพย์:
+พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
-หุ้นไทย: SCB, AOT, PTT, KBANK, CPALL, ADVANC
+หุ้นไทย: SCB, AOT, PTT, HANA, DOHOME, KBANK, CPALL, ADVANC
 ทองคำ: ทองคำ, GOLD, XAUUSD
+น้ำมันไทย: น้ำมัน, ราคาน้ำมัน, oil
 
 คำสั่ง:
 watchlist = ดูรายการเฝ้าดู
@@ -1039,6 +1576,9 @@ def handle_message(user_id, text):
         return help_text()
     if lower == "watchlist":
         return "รายการเฝ้าดู:\n" + "\n".join(f"- {x}" for x in WATCHLIST)
+
+    if lower in OIL_WORDS:
+        return build_oil_report()
 
     try:
         return build_asset_report(clean)
@@ -1060,7 +1600,7 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7 Hybrid Max Free",
+        "service": "AI Market LINE Bot V7.2 Oil Thailand + Dividend + Valuation",
         "time_th": now_text(),
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
@@ -1109,9 +1649,15 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7 Hybrid Max Free</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.2 Oil Thailand + Dividend + Valuation</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
+
+
+
+@app.route("/oil-test", methods=["GET"])
+def oil_test():
+    return jsonify(get_thai_oil_prices())
 
 
 @app.route("/webhook", methods=["POST"])
