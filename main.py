@@ -48,6 +48,19 @@ SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUT
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
+# V7.5 Auto Market Intelligence
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
+ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
+TOP5_UNIVERSE = [
+    x.strip().upper()
+    for x in os.getenv("TOP5_UNIVERSE", os.getenv("WATCHLIST", "NVDA,AAPL,TSLA,QQQ,SPY,META,AMD,PLTR,AVGO,MSFT")).split(",")
+    if x.strip()
+]
+PREMARKET_COOLDOWN_KEY = "premarket_reminder"
+TOP5_COOLDOWN_KEY = "top5_daily"
+
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
@@ -271,6 +284,43 @@ def yahoo_bk_exists(symbol):
         cache_set(cache_key, False)
         return False
 
+
+# ============================================================
+# DYNAMIC THAI STOCK DETECTION V7.5
+# ============================================================
+def looks_like_stock_symbol(key):
+    return bool(re.fullmatch(r"[A-Z0-9]{1,12}", key))
+
+
+def yahoo_bk_exists(symbol):
+    """Detect Thai stocks dynamically using Yahoo Finance SYMBOL.BK.
+    This supports BEAUTY, HANA, DOHOME and future Thai tickers without manual THAI_SYMBOLS edits.
+    """
+    if not looks_like_stock_symbol(symbol):
+        return False
+
+    known_us = {
+        "NVDA", "AAPL", "TSLA", "MSFT", "META", "GOOGL", "GOOG", "AMZN",
+        "NFLX", "AMD", "INTC", "QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ",
+        "SOXL", "SOXS", "PLTR", "COIN", "MSTR", "AVGO", "SMCI", "MU"
+    }
+    if symbol in known_us:
+        return False
+
+    cache_key = f"YF_BK_EXISTS:{symbol}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return bool(cached)
+
+    try:
+        data = yf.Ticker(f"{symbol}.BK").history(period="10d", interval="1d", auto_adjust=False)
+        exists = data is not None and not data.empty and "Close" in data.columns
+        cache_set(cache_key, exists)
+        return bool(exists)
+    except Exception:
+        cache_set(cache_key, False)
+        return False
+
 # ============================================================
 # ASSET NORMALIZATION
 # ============================================================
@@ -313,8 +363,7 @@ def normalize_asset(user_text):
             "news_symbol": key,
         }
 
-    # 1) Known Thai symbols.
-    if key in THAI_SYMBOLS:
+    if key in THAI_SYMBOLS or yahoo_bk_exists(key):
         return {
             "display": f"{key}.BK",
             "symbol": key,
@@ -324,20 +373,6 @@ def normalize_asset(user_text):
             "news_symbol": key,
         }
 
-    # 2) Dynamic Thai detection:
-    # If Yahoo Finance has KEY.BK data, treat it as Thai stock.
-    # This fixes BEAUTY, HANA, DOHOME and future Thai tickers without manually editing THAI_SYMBOLS.
-    if yahoo_bk_exists(key):
-        return {
-            "display": f"{key}.BK",
-            "symbol": key,
-            "yf_symbol": f"{key}.BK",
-            "currency": "THB",
-            "asset_type": "THAI_STOCK",
-            "news_symbol": key,
-        }
-
-    # 3) Otherwise treat as US stock / ETF and use Twelve Data.
     return {
         "display": key,
         "symbol": key,
@@ -649,9 +684,7 @@ def get_market_data(asset):
             closes, highs, lows, opens, volumes = td_get_series(asset)
             result = (quote, closes, highs, lows, opens, volumes)
         except Exception as e:
-            # V7.3 safety fallback:
-            # If user typed a Thai ticker not in THAI_SYMBOLS and Yahoo dynamic check failed due timeout,
-            # try SYMBOL.BK one last time before returning Twelve Data error.
+            # V7.5 fallback: try SYMBOL.BK before failing
             test_asset = {
                 "display": f"{asset['symbol']}.BK",
                 "symbol": asset["symbol"],
@@ -662,7 +695,6 @@ def get_market_data(asset):
             }
             try:
                 result = yf_get_quote_and_series(test_asset)
-                # Mutate current asset so downstream report labels correctly.
                 asset.update(test_asset)
             except Exception:
                 raise e
@@ -675,7 +707,6 @@ def get_market_data(asset):
         except Exception as e:
             print("Gold Twelve Data fallback to Yahoo:", e)
             result = yf_get_quote_and_series(asset)
-
     else:
         result = yf_get_quote_and_series(asset)
 
@@ -1823,7 +1854,7 @@ def verify_line_signature(body, signature):
 
 
 def help_text():
-    return """V7.4 Auto Signal Pro
+    return """V7.5 Auto Market Intelligence
 
 พิมพ์ชื่อสินทรัพย์ หรือคำสั่งน้ำมัน:
 หุ้นสหรัฐ: NVDA, AAPL, TSLA, QQQ, SPY
@@ -1870,8 +1901,13 @@ def require_admin():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "AI Market LINE Bot V7.4 Auto Signal Pro",
+        "service": "AI Market LINE Bot V7.5 Auto Market Intelligence",
         "time_th": now_text(),
+        "premarket_reminder_th": PREMARKET_REMINDER_TH,
+        "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
+        "top5_daily_time_th": TOP5_DAILY_TIME_TH,
+        "enable_top5_daily": ENABLE_TOP5_DAILY,
+        "top5_universe": TOP5_UNIVERSE,
         "watchlist": WATCHLIST,
         "routes": ["/health", "/gold-test", "/dashboard", "/api/signals", "/api/watchlist"],
     })
@@ -1919,7 +1955,7 @@ def dashboard():
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V7.4 Auto Signal Pro</h1><p>Time TH: {now_text()}</p>
+</head><body><h1>AI Market LINE Bot V7.5 Auto Market Intelligence</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
 </body></html>"""
 
@@ -1946,7 +1982,27 @@ def signal_status():
         "auto_alert_min_score": AUTO_ALERT_MIN_SCORE,
         "auto_alert_max_score": AUTO_ALERT_MAX_SCORE,
         "time_th": now_text(),
+        "premarket_reminder_th": PREMARKET_REMINDER_TH,
+        "enable_premarket_reminder": ENABLE_PREMARKET_REMINDER,
+        "top5_daily_time_th": TOP5_DAILY_TIME_TH,
+        "enable_top5_daily": ENABLE_TOP5_DAILY,
+        "top5_universe": TOP5_UNIVERSE,
     })
+
+
+
+@app.route("/top5", methods=["GET"])
+def top5_route():
+    if not require_admin():
+        return Response("Unauthorized", status=401)
+    return Response(build_top5_daily_message(), mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/premarket", methods=["GET"])
+def premarket_route():
+    if not require_admin():
+        return Response("Unauthorized", status=401)
+    return Response(build_premarket_reminder(), mimetype="text/plain; charset=utf-8")
 
 
 @app.route("/webhook", methods=["POST"])
@@ -2138,6 +2194,180 @@ TP: {price_label}{fmt_num(analysis.get('take_profit'))}
 
     return None
 
+
+# ============================================================
+# V7.5 AUTO MARKET INTELLIGENCE
+# ============================================================
+def date_key_th():
+    return now_th_datetime().strftime("%Y-%m-%d")
+
+
+def alert_key_for_today(name):
+    return f"{name}:{date_key_th()}"
+
+
+def already_sent_daily(name):
+    return get_last_alert_ts(alert_key_for_today(name)) > 0
+
+
+def mark_sent_daily(name):
+    set_last_alert_ts(alert_key_for_today(name), time.time())
+
+
+def is_hhmm_now(target_hhmm, window_minutes=5):
+    now_dt = now_th_datetime()
+    th, tm = parse_hhmm(target_hhmm)
+    target = now_dt.replace(hour=th, minute=tm, second=0, microsecond=0)
+    diff = abs((now_dt - target).total_seconds()) / 60
+    return diff <= window_minutes
+
+
+def get_earnings_text(symbols):
+    lines = []
+    for s in symbols[:20]:
+        try:
+            asset = normalize_asset(s)
+            if asset.get("asset_type") != "US_STOCK":
+                continue
+            ticker = yf.Ticker(asset["symbol"])
+            ed = ticker.get_earnings_dates(limit=2)
+            if ed is not None and not ed.empty:
+                d = str(ed.index[0].date())
+                lines.append(f"- {asset['symbol']}: {d}")
+        except Exception:
+            continue
+    return "\n".join(lines) if lines else "- N/A"
+
+
+def get_premarket_change(asset):
+    """Best effort premarket/gap using Yahoo fast_info/info. Missing fields return N/A."""
+    if asset.get("asset_type") != "US_STOCK":
+        return None
+    try:
+        ticker = yf.Ticker(asset["symbol"])
+        info = {}
+        try:
+            info = ticker.get_info() or {}
+        except Exception:
+            info = ticker.info or {}
+
+        pre = safe_float(info.get("preMarketPrice"))
+        prev = safe_float(info.get("previousClose"))
+        regular = safe_float(info.get("regularMarketPrice"))
+
+        ref = pre or regular
+        if ref and prev:
+            pct = (ref - prev) / prev * 100
+            return pct
+    except Exception:
+        return None
+    return None
+
+
+def build_premarket_reminder():
+    rows = []
+    movers = []
+    for s in TOP5_UNIVERSE[:30]:
+        try:
+            asset = normalize_asset(s)
+            if asset.get("asset_type") != "US_STOCK":
+                continue
+            pct = get_premarket_change(asset)
+            if pct is not None:
+                movers.append((s, pct))
+        except Exception:
+            pass
+
+    movers_sorted = sorted(movers, key=lambda x: abs(x[1]), reverse=True)[:5]
+    if movers_sorted:
+        rows = [f"- {s}: {pct:+.2f}%" for s, pct in movers_sorted]
+    else:
+        rows = ["- ยังดึง Premarket movers ไม่ได้ หรือไม่มีข้อมูลจาก Yahoo"]
+
+    earnings = get_earnings_text(TOP5_UNIVERSE)
+
+    return f"""⏰ US Open Reminder 21:15
+
+ตลาด US ใกล้เปิดแล้ว
+เวลาไทย: {now_text()}
+
+🔥 Premarket Movers
+{chr(10).join(rows)}
+
+📅 Earnings Watch
+{earnings}
+
+คำแนะนำระบบ:
+- รอแท่งแรก 5-15 นาที
+- หลีกเลี่ยงไล่ราคาในช่วงเปิดแรง
+- ใช้สัญญาณ STRONG CALL/PUT จากระบบเป็นตัวกรอง
+
+หมายเหตุ: ข้อมูล premarket ฟรีอาจไม่ครบทุกตัว"""
+
+
+def rank_top5_picks():
+    picks = []
+    for s in TOP5_UNIVERSE:
+        try:
+            asset = normalize_asset(s)
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            picks.append((s, asset, analysis))
+            time.sleep(0.5)
+        except Exception as e:
+            print("top5 scan error:", s, e)
+
+    picks = sorted(picks, key=lambda x: x[2].get("score", 0), reverse=True)
+    return picks[:5]
+
+
+def build_top5_daily_message():
+    picks = rank_top5_picks()
+    if not picks:
+        return f"""🔥 Top 5 Daily Picks
+
+ยังไม่สามารถจัดอันดับได้
+เวลาไทย: {now_text()}"""
+
+    lines = []
+    for i, (s, asset, a) in enumerate(picks, 1):
+        price_label = "$" if asset.get("currency") == "USD" else "฿"
+        sig = signal_type_from_analysis(asset, a)
+        lines.append(
+            f"{i}) {s} | {price_label}{fmt_num(a.get('price'))} | Score {a.get('score')}/100 | Prob {a.get('probability')}% | {sig} | {a.get('regime')}"
+        )
+
+    return f"""🔥 Top 5 Daily Picks
+
+เวลาไทย: {now_text()}
+
+{chr(10).join(lines)}
+
+Universe:
+{",".join(TOP5_UNIVERSE[:30])}
+
+หมายเหตุ:
+Top 5 คัดจาก Watchlist/Universe ด้วย AI Score V7.5 ไม่ใช่คำแนะนำการลงทุน"""
+
+
+def maybe_send_premarket_and_top5():
+    if not (ENABLE_AUTO_ALERTS and ALERT_USER_IDS):
+        return
+
+    if ENABLE_PREMARKET_REMINDER and is_hhmm_now(PREMARKET_REMINDER_TH, window_minutes=5):
+        if not already_sent_daily(PREMARKET_COOLDOWN_KEY):
+            msg = build_premarket_reminder()
+            for user_id in ALERT_USER_IDS:
+                line_push(user_id, msg)
+            mark_sent_daily(PREMARKET_COOLDOWN_KEY)
+
+    if ENABLE_TOP5_DAILY and is_hhmm_now(TOP5_DAILY_TIME_TH, window_minutes=5):
+        if not already_sent_daily(TOP5_COOLDOWN_KEY):
+            msg = build_top5_daily_message()
+            for user_id in ALERT_USER_IDS:
+                line_push(user_id, msg)
+            mark_sent_daily(TOP5_COOLDOWN_KEY)
+
 # ============================================================
 # AUTO ALERTS
 # ============================================================
@@ -2155,6 +2385,8 @@ def should_send_alert(symbol, score):
 def auto_alert_loop():
     while True:
         try:
+            maybe_send_premarket_and_top5()
+
             if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
                 for symbol in WATCHLIST:
                     try:
