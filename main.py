@@ -10970,11 +10970,9 @@ def v215_auto_journal_route():
 def v215_snapshot_route():
     return jsonify(v215_snapshot())
 
-
-if __name__ == "__main__":
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        threading.Thread(target=auto_alert_loop, daemon=True).start()
-import math
+import os
+import sqlite3
+from datetime import datetime
 
 V216_ENABLE_AUTO_JOURNAL = os.getenv("V216_ENABLE_AUTO_JOURNAL", "true").lower() == "true"
 V216_DEFAULT_QTY = float(os.getenv("V216_DEFAULT_QTY", "1"))
@@ -11010,6 +11008,15 @@ def v216_round(x, nd=4):
         return round(float(x), nd)
     except Exception:
         return 0.0
+
+
+def v216_add_column_if_missing(cur, table, column, coltype):
+    try:
+        cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+        if cols and column not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    except Exception:
+        pass
 
 
 def v216_init_db():
@@ -11094,6 +11101,31 @@ def v216_init_db():
         )
     """)
 
+    # Migration guard for older tables / older V21-V21.5 tables.
+    # This prevents: sqlite3.OperationalError: no such column: exit_price
+    for table in ["trade_journal", "journal_trades"]:
+        for col, typ in [
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+            ("symbol", "TEXT"),
+            ("side", "TEXT"),
+            ("strategy", "TEXT"),
+            ("entry_price", "REAL"),
+            ("stop_price", "REAL"),
+            ("target_price", "REAL"),
+            ("exit_price", "REAL"),
+            ("qty", "REAL DEFAULT 1"),
+            ("status", "TEXT"),
+            ("result", "TEXT"),
+            ("r_multiple", "REAL"),
+            ("pnl", "REAL"),
+            ("source", "TEXT"),
+            ("signal_score", "REAL"),
+            ("probability", "REAL"),
+            ("notes", "TEXT"),
+        ]:
+            v216_add_column_if_missing(cur, table, col, typ)
+
     conn.commit()
     conn.close()
 
@@ -11105,17 +11137,11 @@ def v216_calc_r(side, entry, stop, exit_price):
     stop = v216_safe_float(stop)
 
     if side in ("CALL", "BUY", "LONG"):
-        if stop is not None and entry != stop:
-            risk = abs(entry - stop)
-        else:
-            risk = max(abs(entry) * 0.01, 0.01)
+        risk = abs(entry - stop) if stop is not None and entry != stop else max(abs(entry) * 0.01, 0.01)
         return (exit_price - entry) / risk
 
     if side in ("PUT", "SELL", "SHORT"):
-        if stop is not None and entry != stop:
-            risk = abs(stop - entry)
-        else:
-            risk = max(abs(entry) * 0.01, 0.01)
+        risk = abs(stop - entry) if stop is not None and entry != stop else max(abs(entry) * 0.01, 0.01)
         return (entry - exit_price) / risk
 
     return 0.0
@@ -11133,6 +11159,7 @@ def v216_open_trade(symbol, side, entry_price, stop_price=None, target_price=Non
                     strategy="UNKNOWN", qty=1, source="manual",
                     signal_score=None, probability=None, notes=None):
     v216_init_db()
+
     symbol = str(symbol or "").upper().strip()
     side = str(side or "").upper().strip()
     strategy = str(strategy or "UNKNOWN").upper().strip()
@@ -11141,8 +11168,10 @@ def v216_open_trade(symbol, side, entry_price, stop_price=None, target_price=Non
     target_price = v216_safe_float(target_price)
     qty = v216_safe_float(qty, V216_DEFAULT_QTY)
 
-    if not symbol or side not in ("CALL", "PUT", "BUY", "SELL", "LONG", "SHORT"):
-        raise ValueError("symbol and side are required. side must be CALL/PUT/BUY/SELL/LONG/SHORT")
+    if not symbol:
+        raise ValueError("symbol is required")
+    if side not in ("CALL", "PUT", "BUY", "SELL", "LONG", "SHORT"):
+        raise ValueError("side must be CALL/PUT/BUY/SELL/LONG/SHORT")
     if entry_price is None or entry_price <= 0:
         raise ValueError("entry_price must be positive")
 
@@ -11154,8 +11183,9 @@ def v216_open_trade(symbol, side, entry_price, stop_price=None, target_price=Non
          target_price, qty, status, source, signal_score, probability, notes)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)
     """, (
-        v216_now_text(), v216_now_text(), symbol, side, strategy, entry_price,
-        stop_price, target_price, qty, source, signal_score, probability, notes
+        v216_now_text(), v216_now_text(), symbol, side, strategy,
+        entry_price, stop_price, target_price, qty, source,
+        signal_score, probability, notes
     ))
     trade_id = cur.lastrowid
     conn.commit()
@@ -11165,6 +11195,7 @@ def v216_open_trade(symbol, side, entry_price, stop_price=None, target_price=Non
 
 def v216_close_trade(trade_id, exit_price, notes=None):
     v216_init_db()
+
     trade_id = v216_safe_int(trade_id, 0)
     exit_price = v216_safe_float(exit_price)
 
@@ -11175,10 +11206,7 @@ def v216_close_trade(trade_id, exit_price, notes=None):
 
     conn = db()
     conn.row_factory = sqlite3.Row
-    trade = conn.execute(
-        "SELECT * FROM trade_journal WHERE id=?",
-        (trade_id,)
-    ).fetchone()
+    trade = conn.execute("SELECT * FROM trade_journal WHERE id=?", (trade_id,)).fetchone()
 
     if not trade:
         conn.close()
@@ -11247,6 +11275,9 @@ def v216_backfill_closed_outcomes():
     v216_init_db()
     conn = db()
     conn.row_factory = sqlite3.Row
+
+    # Only backfill from trade_journal, because this patch owns that schema.
+    # Older journal_trades may have incompatible column names.
     rows = conn.execute("""
         SELECT *
         FROM trade_journal
@@ -11262,8 +11293,8 @@ def v216_backfill_closed_outcomes():
         try:
             v216_close_trade(row["id"], row["exit_price"], row["notes"])
             count += 1
-        except Exception:
-            pass
+        except Exception as e:
+            print("v21.6 backfill row error:", e)
 
     v216_rebuild_strategy_performance()
     v216_rebuild_equity_curve()
@@ -11299,10 +11330,7 @@ def v216_performance_from_rows(rows):
         "total_r": v216_round(total_r, 4),
         "max_win_r": v216_round(max(wins) if wins else 0, 4),
         "max_loss_r": v216_round(min(losses) if losses else 0, 4),
-        "sample_warning": (
-            "Need 50-100 closed trades before trusting statistics."
-            if trades < V216_MIN_SAMPLE_WARNING else ""
-        )
+        "sample_warning": "Need 50-100 closed trades before trusting statistics." if trades < V216_MIN_SAMPLE_WARNING else ""
     }
 
 
@@ -11310,17 +11338,13 @@ def v216_rebuild_strategy_performance():
     v216_init_db()
     conn = db()
     conn.row_factory = sqlite3.Row
-    strategies = conn.execute("""
-        SELECT DISTINCT strategy FROM closed_outcomes ORDER BY strategy
-    """).fetchall()
 
+    strategies = conn.execute("SELECT DISTINCT strategy FROM closed_outcomes ORDER BY strategy").fetchall()
     conn.execute("DELETE FROM strategy_performance")
 
     for s in strategies:
         strategy = s["strategy"] or "UNKNOWN"
-        rows = conn.execute("""
-            SELECT * FROM closed_outcomes WHERE strategy=? ORDER BY id ASC
-        """, (strategy,)).fetchall()
+        rows = conn.execute("SELECT * FROM closed_outcomes WHERE strategy=? ORDER BY id ASC", (strategy,)).fetchall()
         p = v216_performance_from_rows(rows)
         conn.execute("""
             INSERT OR REPLACE INTO strategy_performance
@@ -11341,10 +11365,8 @@ def v216_rebuild_equity_curve():
     v216_init_db()
     conn = db()
     conn.row_factory = sqlite3.Row
-    rows = conn.execute("""
-        SELECT * FROM closed_outcomes ORDER BY id ASC
-    """).fetchall()
 
+    rows = conn.execute("SELECT * FROM closed_outcomes ORDER BY id ASC").fetchall()
     conn.execute("DELETE FROM equity_curve")
 
     equity = 0.0
@@ -11358,10 +11380,7 @@ def v216_rebuild_equity_curve():
             INSERT OR REPLACE INTO equity_curve
             (created_at, trade_id, symbol, strategy, r_multiple, equity_r, drawdown_r)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            r["closed_at"], r["trade_id"], r["symbol"], r["strategy"],
-            rr, equity, dd
-        ))
+        """, (r["closed_at"], r["trade_id"], r["symbol"], r["strategy"], rr, equity, dd))
 
     conn.commit()
     conn.close()
@@ -11370,9 +11389,9 @@ def v216_rebuild_equity_curve():
 def v216_snapshot():
     v216_init_db()
     v216_backfill_closed_outcomes()
+
     conn = db()
     conn.row_factory = sqlite3.Row
-
     open_trades = conn.execute("SELECT COUNT(*) AS c FROM trade_journal WHERE status='OPEN'").fetchone()["c"]
     closed_trades = conn.execute("SELECT COUNT(*) AS c FROM closed_outcomes").fetchone()["c"]
     outcomes = conn.execute("SELECT * FROM closed_outcomes ORDER BY id DESC LIMIT 20").fetchall()
@@ -11381,14 +11400,12 @@ def v216_snapshot():
     all_rows = conn.execute("SELECT * FROM closed_outcomes ORDER BY id ASC").fetchall()
     conn.close()
 
-    performance = v216_performance_from_rows(all_rows)
-
     return {
-        "version": "V21.6 Database Writer Fix",
+        "version": "V21.6 Database Writer Fix SAFE",
         "db_path": os.getenv("DB_PATH", "signals.db"),
         "open_trades": open_trades,
         "closed_outcomes": closed_trades,
-        "performance": performance,
+        "performance": v216_performance_from_rows(all_rows),
         "strategy_performance_db": [dict(x) for x in strategies],
         "recent_outcomes": [dict(x) for x in outcomes],
         "equity_curve": [dict(x) for x in equity[-50:]]
@@ -11411,7 +11428,7 @@ def v216_html_page(title, body, active="dashboard"):
     return f"""
     <html><head><title>{title}</title>
     <style>
-    body{{margin:0;background:#111827;color:#e5e7eb;font-family:Arial, sans-serif}}
+    body{{margin:0;background:#111827;color:#e5e7eb;font-family:Arial,sans-serif}}
     .wrap{{max-width:1180px;margin:0 auto;padding:28px}}
     .top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}}
     .badge{{background:#2563eb;border-radius:12px;padding:8px 10px;font-weight:700}}
@@ -11425,12 +11442,12 @@ def v216_html_page(title, body, active="dashboard"):
     table{{width:100%;border-collapse:collapse;margin-top:10px}}
     th,td{{border-bottom:1px solid #374151;padding:9px;text-align:left;font-size:14px}}
     th{{color:#93c5fd;text-transform:uppercase;font-size:12px}}
-    code,pre{{white-space:pre-wrap;background:#0b1220;border-radius:12px;padding:12px;display:block;color:#d1fae5}}
+    pre{{white-space:pre-wrap;background:#0b1220;border-radius:12px;padding:12px;color:#d1fae5}}
     .ok{{color:#86efac;font-weight:700}}
     .warn{{color:#fde68a;font-weight:700}}
     </style></head><body><div class="wrap">
     <div class="top"><div><span class="badge">V21.6</span>
-    <h1>{title}</h1><p>Database Writer Fix · Journal + Outcomes + Strategy DB + Equity Curve</p></div>
+    <h1>{title}</h1><p>Safe Database Writer Fix · Journal + Outcomes + Strategy DB + Equity Curve</p></div>
     <div>{links}</div></div>
     {body}
     <p style="text-align:center;color:#94a3b8;margin-top:30px">Research cockpit only. Not investment advice.</p>
@@ -11443,19 +11460,19 @@ def v216_status():
     v216_init_db()
     return jsonify({
         "ok": True,
-        "version": "V21.6 Database Writer Fix",
+        "version": "V21.6 Database Writer Fix SAFE",
         "db_path": os.getenv("DB_PATH", "signals.db"),
         "routes": [
             "/v21-6",
             "/v21-6/status",
             "/v21-6/journal",
-            "/v21-6/journal/open",
-            "/v21-6/journal/close/<id>",
+            "/v21-6/journal/open?symbol=NVDA&side=CALL&entry=212&stop=205&target=225&strategy=MOMENTUM&qty=1",
+            "/v21-6/journal/close/<id>?exit=220",
             "/v21-6/backfill",
             "/v21-6/outcomes",
             "/v21-6/strategy-db",
             "/v21-6/equity",
-            "/v21-6/api/snapshot"
+            "/v21-6/api/snapshot",
         ]
     })
 
@@ -11474,7 +11491,7 @@ def v216_route_open_trade():
             source=request.args.get("source", "manual"),
             signal_score=request.args.get("score"),
             probability=request.args.get("prob"),
-            notes=request.args.get("notes")
+            notes=request.args.get("notes"),
         )
         return jsonify({
             "ok": True,
@@ -11488,32 +11505,33 @@ def v216_route_open_trade():
 @app.route("/v21-6/journal/close/<int:trade_id>")
 def v216_route_close_trade(trade_id):
     try:
-        result = v216_close_trade(
-            trade_id,
-            request.args.get("exit"),
-            request.args.get("notes")
-        )
-        return jsonify(result)
+        return jsonify(v216_close_trade(trade_id, request.args.get("exit"), request.args.get("notes")))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/v21-6/backfill")
 def v216_route_backfill():
-    count = v216_backfill_closed_outcomes()
-    snap = v216_snapshot()
-    return jsonify({
-        "ok": True,
-        "backfilled": count,
-        "closed_outcomes": snap["closed_outcomes"],
-        "strategy_stats": snap["strategy_performance_db"],
-        "performance": snap["performance"]
-    })
+    try:
+        count = v216_backfill_closed_outcomes()
+        snap = v216_snapshot()
+        return jsonify({
+            "ok": True,
+            "backfilled": count,
+            "closed_outcomes": snap["closed_outcomes"],
+            "performance": snap["performance"],
+            "strategy_stats": snap["strategy_performance_db"]
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/v21-6/api/snapshot")
 def v216_route_snapshot():
-    return jsonify(v216_snapshot())
+    try:
+        return jsonify(v216_snapshot())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/v21-6")
@@ -11524,15 +11542,16 @@ def v216_dashboard():
     best = snap["strategy_performance_db"][0]["strategy"] if snap["strategy_performance_db"] else "N/A"
     body = f"""
     <div class="grid">
+      <div class="metric"><div class="label">Open Trades</div><div class="value">{snap["open_trades"]}</div></div>
       <div class="metric"><div class="label">Closed Trades</div><div class="value">{snap["closed_outcomes"]}</div></div>
-      <div class="metric"><div class="label">Win Rate</div><div class="value">{p["win_rate"]}%</div></div>
       <div class="metric"><div class="label">Profit Factor</div><div class="value">{p["profit_factor"]}</div></div>
       <div class="metric"><div class="label">Expectancy</div><div class="value">{p["expectancy_r"]}R</div></div>
     </div>
     <div class="card"><h2>Best Strategy</h2><p class="ok">{best}</p><p class="warn">{p["sample_warning"]}</p></div>
     <div class="card"><h2>Quick Test</h2>
     <pre>/v21-6/journal/open?symbol=NVDA&side=CALL&entry=212&stop=205&target=225&strategy=MOMENTUM&qty=1
-/v21-6/journal/close/1?exit=220</pre></div>
+/v21-6/journal/close/1?exit=220
+/v21-6/backfill</pre></div>
     """
     return v216_html_page("V21.6 Database Writer Dashboard", body, "dashboard")
 
@@ -11548,15 +11567,11 @@ def v216_journal_page():
     trs = "".join(
         f"<tr><td>{r['id']}</td><td>{r['symbol']}</td><td>{r['side']}</td><td>{r['strategy']}</td>"
         f"<td>{r['entry_price']}</td><td>{r['stop_price']}</td><td>{r['target_price']}</td>"
-        f"<td>{r['exit_price']}</td><td>{r['status']}</td><td>{v216_round(r['r_multiple'], 4)}</td><td>{r['created_at']}</td></tr>"
+        f"<td>{r['exit_price']}</td><td>{r['status']}</td><td>{v216_round(r['r_multiple'],4)}</td><td>{r['created_at']}</td></tr>"
         for r in rows
     ) or "<tr><td colspan='11'>No journal entries yet.</td></tr>"
 
-    body = f"""
-    <div class="card"><h2>Real Trade Journal</h2>
-    <table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Stop</th><th>Target</th><th>Exit</th><th>Status</th><th>R</th><th>Entry Time</th></tr>{trs}</table>
-    </div>
-    """
+    body = f"<div class='card'><h2>Real Trade Journal</h2><table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Stop</th><th>Target</th><th>Exit</th><th>Status</th><th>R</th><th>Entry Time</th></tr>{trs}</table></div>"
     return v216_html_page("V21.6 Real Trade Journal", body, "journal")
 
 
@@ -11569,11 +11584,7 @@ def v216_outcomes_page():
         for r in snap["recent_outcomes"]
     ) or "<tr><td colspan='9'>No outcomes yet.</td></tr>"
 
-    body = f"""
-    <div class="card"><h2>Closed Outcome Database</h2>
-    <table><tr><th>Trade ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>Result</th><th>R</th><th>Minutes</th></tr>{trs}</table>
-    </div>
-    """
+    body = f"<div class='card'><h2>Closed Outcome Database</h2><table><tr><th>Trade ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>Result</th><th>R</th><th>Minutes</th></tr>{trs}</table></div>"
     return v216_html_page("V21.6 Closed Outcome Database", body, "outcomes")
 
 
@@ -11586,11 +11597,7 @@ def v216_strategy_db_page():
         for r in snap["strategy_performance_db"]
     ) or "<tr><td colspan='10'>No strategy stats yet.</td></tr>"
 
-    body = f"""
-    <div class="card"><h2>Persistent Strategy Performance Database</h2>
-    <table><tr><th>Strategy</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win%</th><th>Avg Win</th><th>Avg Loss</th><th>PF</th><th>Expectancy</th><th>Total R</th></tr>{trs}</table>
-    </div>
-    """
+    body = f"<div class='card'><h2>Persistent Strategy Performance Database</h2><table><tr><th>Strategy</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win%</th><th>Avg Win</th><th>Avg Loss</th><th>PF</th><th>Expectancy</th><th>Total R</th></tr>{trs}</table></div>"
     return v216_html_page("V21.6 Strategy Performance Database", body, "stats")
 
 
@@ -11598,12 +11605,12 @@ def v216_strategy_db_page():
 def v216_equity_page():
     snap = v216_snapshot()
     rows = snap["equity_curve"]
+
     trs = "".join(
         f"<tr><td>{r['id']}</td><td>{r['created_at']}</td><td>{r['symbol']}</td><td>{r['strategy']}</td><td>{v216_round(r['r_multiple'],4)}R</td><td>{v216_round(r['equity_r'],4)}R</td><td>{v216_round(r['drawdown_r'],4)}R</td></tr>"
         for r in rows
     ) or "<tr><td colspan='7'>No equity curve yet.</td></tr>"
 
-    # simple vertical bars
     bars = ""
     if rows:
         values = [float(x["equity_r"]) for x in rows]
@@ -11614,16 +11621,14 @@ def v216_equity_page():
             bars += f"<div title='{v:.2f}R' style='display:inline-block;width:10px;height:{h}px;background:#38bdf8;margin-right:4px;border-radius:4px'></div>"
 
     body = f"""
-    <div class="card"><h2>Equity Curve In R</h2><div style="height:170px;display:flex;align-items:end">{bars}</div></div>
-    <div class="card"><h2>Equity Points</h2>
-    <table><tr><th>ID</th><th>Time</th><th>Symbol</th><th>Strategy</th><th>R</th><th>Equity</th><th>DD</th></tr>{trs}</table>
-    </div>
+    <div class='card'><h2>Equity Curve In R</h2><div style='height:170px;display:flex;align-items:end'>{bars}</div></div>
+    <div class='card'><h2>Equity Points</h2><table><tr><th>ID</th><th>Time</th><th>Symbol</th><th>Strategy</th><th>R</th><th>Equity</th><th>DD</th></tr>{trs}</table></div>
     """
     return v216_html_page("V21.6 Equity Curve From Closed Trades", body, "equity")
 
 
-# Optional: Auto Journal from every saved signal.
-# It creates one OPEN trade per high-confidence directional signal.
+# Optional: Auto Journal from save_signal()
+# This wraps your existing save_signal if it exists.
 try:
     _v216_original_save_signal = save_signal
 
@@ -11655,7 +11660,6 @@ try:
             else:
                 return
 
-            # Avoid duplicate OPEN trade for same symbol/side/strategy.
             conn = db()
             existing = conn.execute("""
                 SELECT id FROM trade_journal
@@ -11663,6 +11667,7 @@ try:
                 ORDER BY id DESC LIMIT 1
             """, (symbol, side, st)).fetchone()
             conn.close()
+
             if existing:
                 return
 
@@ -11677,7 +11682,7 @@ try:
                 source="auto_signal",
                 signal_score=sc,
                 probability=prob,
-                notes=str(report or "")[:1000]
+                notes=str(report or "")[:1000],
             )
         except Exception as e:
             print("v21.6 auto journal error:", e)
@@ -11686,9 +11691,13 @@ except NameError:
     pass
 
 
-# Initialize tables at startup.
 try:
     v216_init_db()
 except Exception as e:
     print("v21.6 init error:", e)
+
+if __name__ == "__main__":
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        threading.Thread(target=auto_alert_loop, daemon=True).start()
+
 app.run(host="0.0.0.0", port=PORT)
