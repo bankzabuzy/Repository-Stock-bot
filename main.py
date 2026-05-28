@@ -6339,6 +6339,12 @@ def save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regim
         )
         conn.commit()
         conn.close()
+        # V14: mirror emitted signals into a true trade journal for outcome tracking.
+        try:
+            if "v14_auto_log_trade" in globals():
+                v14_auto_log_trade(symbol, asset_type, price, score, bias, signal_type, regime, probability, report, source="signal_audit")
+        except Exception as v14_error:
+            print("V14 auto trade journal error:", v14_error)
     except Exception as e:
         print("V13.1 save_signal_audit error:", e)
 
@@ -6830,8 +6836,484 @@ def v131_analyze_route(symbol):
     return jsonify(v131_analyze_symbol(symbol))
 
 
+
+# ============================================================
+# V14 TRADE JOURNAL + OUTCOME TRACKING + EXPECTANCY + ADAPTIVE SCORING
+# Purpose: turn V13.1 analytics into a measurable trade-research journal.
+# Free 100%: SQLite + yfinance + existing signal engine. No paid API required.
+# ============================================================
+V14_ENABLED = os.getenv("V14_ENABLED", "true").lower() == "true"
+V14_HORIZONS = [int(x) for x in os.getenv("V14_HORIZONS", "1,3,5,10,20").split(",") if str(x).strip().isdigit()]
+V14_MIN_SAMPLE = int(os.getenv("V14_MIN_SAMPLE", "10"))
+V14_AUTO_LOG_SIGNALS = os.getenv("V14_AUTO_LOG_SIGNALS", "true").lower() == "true"
+V14_DEDUP_MINUTES = int(os.getenv("V14_DEDUP_MINUTES", "30"))
+
+
+def v14_init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            created_ts REAL NOT NULL,
+            source TEXT,
+            symbol TEXT NOT NULL,
+            asset_type TEXT,
+            side TEXT,
+            strategy TEXT,
+            entry_price REAL,
+            stop_loss REAL,
+            take_profit REAL,
+            size REAL,
+            score INTEGER,
+            adaptive_score INTEGER,
+            quality_score INTEGER,
+            regime TEXT,
+            status TEXT DEFAULT 'OPEN',
+            notes TEXT,
+            result_1d TEXT,
+            return_1d REAL,
+            price_1d REAL,
+            result_3d TEXT,
+            return_3d REAL,
+            price_3d REAL,
+            result_5d TEXT,
+            return_5d REAL,
+            price_5d REAL,
+            result_10d TEXT,
+            return_10d REAL,
+            price_10d REAL,
+            result_20d TEXT,
+            return_20d REAL,
+            price_20d REAL,
+            updated_at TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_symbol ON trade_journal(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_created ON trade_journal(created_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_strategy ON trade_journal(strategy)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_status ON trade_journal(status)")
+    conn.commit()
+    conn.close()
+
+
+def v14_side_from_text(side=None, signal_type=None, bias=None, score=None):
+    txt = f"{side or ''} {signal_type or ''} {bias or ''}".upper()
+    if "CALL" in txt or "BUY" in txt or "BULL" in txt or "ซื้อ" in txt:
+        return "CALL"
+    if "PUT" in txt or "SELL" in txt or "BEAR" in txt or "ขาย" in txt:
+        return "PUT"
+    try:
+        sc = int(score or 50)
+        if sc >= 75:
+            return "CALL"
+        if sc <= 35:
+            return "PUT"
+    except Exception:
+        pass
+    return "WAIT"
+
+
+def v14_infer_strategy(score=None, bias=None, signal_type=None, regime=None, report=None):
+    try:
+        if "v131_infer_strategy" in globals():
+            return v131_infer_strategy(score, bias, signal_type, regime, report)
+    except Exception:
+        pass
+    txt = f"{bias or ''} {signal_type or ''} {regime or ''} {report or ''}".upper()
+    try:
+        sc = int(score or 50)
+    except Exception:
+        sc = 50
+    if "VWAP" in txt:
+        return "VWAP_RECLAIM"
+    if "PULLBACK" in txt or "ย่อ" in txt:
+        return "PULLBACK"
+    if "BREAKOUT" in txt or "ทะลุ" in txt:
+        return "BREAKOUT"
+    if "MOMENTUM" in txt or sc >= 85 or sc <= 20:
+        return "MOMENTUM"
+    if "RANGE" in txt:
+        return "RANGE_REVERSAL"
+    return "CORE_TREND"
+
+
+def v14_current_price(symbol):
+    try:
+        return v131_current_price(symbol)
+    except Exception:
+        pass
+    try:
+        asset = normalize_asset(symbol)
+        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+        return safe_float(quote.get("close"))
+    except Exception:
+        return None
+
+
+def v14_result_for_return(side, ret):
+    if ret is None:
+        return None
+    side = str(side or "CALL").upper()
+    if side == "PUT":
+        return "WIN" if ret < 0 else "LOSS"
+    if side == "CALL":
+        return "WIN" if ret > 0 else "LOSS"
+    return "FLAT" if abs(ret) < 0.05 else "UNTRACKED"
+
+
+def v14_dedupe_exists(symbol, side, strategy, created_ts=None):
+    created_ts = created_ts or time.time()
+    window = max(1, V14_DEDUP_MINUTES) * 60
+    try:
+        conn = db()
+        row = conn.execute(
+            """SELECT id FROM trade_journal
+               WHERE symbol=? AND side=? AND strategy=? AND ABS(created_ts - ?) <= ?
+               ORDER BY id DESC LIMIT 1""",
+            (str(symbol).upper(), side, strategy, float(created_ts), window),
+        ).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def v14_log_trade(symbol, side=None, entry_price=None, strategy=None, source="manual", asset_type=None,
+                  score=None, adaptive_score=None, quality_score=None, regime=None, stop_loss=None,
+                  take_profit=None, size=None, notes=None, created_ts=None):
+    if not V14_ENABLED:
+        return {"logged": False, "reason": "V14_DISABLED"}
+    sym = resolve_delisted_symbol(symbol).upper().replace(".SET", ".BK")
+    side = v14_side_from_text(side=side, score=score)
+    strategy = (strategy or v14_infer_strategy(score, side, side, regime, notes)).upper()
+    created_ts = float(created_ts or time.time())
+    if entry_price is None:
+        entry_price = v14_current_price(sym)
+    entry = safe_float(entry_price)
+    if entry is None or entry <= 0:
+        return {"logged": False, "reason": "NO_ENTRY_PRICE", "symbol": sym}
+    if v14_dedupe_exists(sym.replace(".BK", ""), side, strategy, created_ts):
+        return {"logged": False, "reason": "DUPLICATE_WITHIN_WINDOW", "symbol": sym, "side": side, "strategy": strategy}
+    try:
+        conn = db()
+        conn.execute(
+            """INSERT INTO trade_journal
+               (created_at, created_ts, source, symbol, asset_type, side, strategy, entry_price,
+                stop_loss, take_profit, size, score, adaptive_score, quality_score, regime, status, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
+            (
+                now_text(), created_ts, source, sym.replace(".BK", ""), asset_type, side, strategy, entry,
+                safe_float(stop_loss), safe_float(take_profit), safe_float(size), int(score or 0) if score is not None else None,
+                int(adaptive_score or 0) if adaptive_score is not None else None,
+                int(quality_score or 0) if quality_score is not None else None,
+                regime, str(notes or "")[:2000], v131_now_iso() if "v131_now_iso" in globals() else datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        journal_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.commit(); conn.close()
+        return {"logged": True, "id": journal_id, "symbol": sym.replace(".BK", ""), "side": side, "strategy": strategy, "entry_price": entry}
+    except Exception as e:
+        return {"logged": False, "error": str(e)[:240]}
+
+
+def v14_auto_log_trade(symbol, asset_type, price, score, bias, signal_type, regime, probability, report, source="signal"):
+    if not (V14_ENABLED and V14_AUTO_LOG_SIGNALS):
+        return {"logged": False, "reason": "AUTO_LOG_DISABLED"}
+    side = v14_side_from_text(signal_type=signal_type, bias=bias, score=score)
+    if side == "WAIT":
+        return {"logged": False, "reason": "WAIT_SIGNAL"}
+    strategy = v14_infer_strategy(score, bias, signal_type, regime, report)
+    adaptive_score = None
+    quality_score = None
+    try:
+        if "v131_analyze_symbol" in globals():
+            snap = v131_analyze_symbol(str(symbol).upper().replace(".BK", ""))
+            adaptive_score = snap.get("score")
+            quality_score = snap.get("quality_score") or snap.get("score")
+    except Exception:
+        pass
+    return v14_log_trade(
+        symbol=symbol, side=side, entry_price=price, strategy=strategy, source=source,
+        asset_type=asset_type, score=score, adaptive_score=adaptive_score, quality_score=quality_score,
+        regime=regime, notes=str(report or "")[:1000]
+    )
+
+
+def v14_backfill_from_signal_audit(limit=500):
+    """Copy old V13.1 signal_audit rows into trade_journal once, so V14 is not empty."""
+    copied = 0
+    skipped = 0
+    try:
+        conn = db()
+        rows = conn.execute("SELECT * FROM signal_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        conn.close()
+        for r in rows:
+            side = v14_side_from_text(signal_type=r["signal_type"], bias=r["bias"], score=r["score"])
+            if side == "WAIT":
+                skipped += 1
+                continue
+            res = v14_log_trade(
+                symbol=r["symbol"], side=side, entry_price=r["entry_price"], strategy=r["strategy"],
+                source="backfill_signal_audit", asset_type=r["asset_type"], score=r["score"],
+                adaptive_score=r["score"], quality_score=r["score"], regime=r["regime"],
+                notes=(r["report"] or "")[:1000], created_ts=safe_float(r["created_ts"], time.time())
+            )
+            copied += 1 if res.get("logged") else 0
+            skipped += 0 if res.get("logged") else 1
+        return {"copied": copied, "skipped": skipped, "checked": len(rows)}
+    except Exception as e:
+        return {"copied": copied, "skipped": skipped, "error": str(e)[:240]}
+
+
+def v14_update_outcomes(limit=500):
+    if not V14_ENABLED:
+        return {"updated": 0, "enabled": False}
+    now_ts = time.time()
+    updated = 0
+    checked = 0
+    conn = db()
+    rows = conn.execute("SELECT * FROM trade_journal WHERE status!='CLOSED' ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    for r in rows:
+        checked += 1
+        try:
+            age_days = (now_ts - float(r["created_ts"] or now_ts)) / 86400.0
+            px = v14_current_price(r["symbol"])
+            entry = safe_float(r["entry_price"])
+            if not px or not entry:
+                continue
+            ret = (px - entry) / entry * 100.0
+            fields = {}
+            max_done = 0
+            for h in V14_HORIZONS:
+                if age_days >= (h - 0.05) and r[f"return_{h}d"] is None:
+                    fields[f"price_{h}d"] = px
+                    fields[f"return_{h}d"] = ret
+                    fields[f"result_{h}d"] = v14_result_for_return(r["side"], ret)
+                if r[f"return_{h}d"] is not None or f"return_{h}d" in fields:
+                    max_done = max(max_done, h)
+            if max_done >= max(V14_HORIZONS):
+                fields["status"] = "CLOSED"
+            if fields:
+                fields["updated_at"] = v131_now_iso() if "v131_now_iso" in globals() else datetime.now(timezone.utc).isoformat()
+                sets = ", ".join([f"{k}=?" for k in fields.keys()])
+                conn.execute(f"UPDATE trade_journal SET {sets} WHERE id=?", list(fields.values()) + [r["id"]])
+                updated += 1
+        except Exception as e:
+            print("V14 outcome update row error:", e)
+    conn.commit(); conn.close()
+    return {"updated": updated, "checked": checked, "horizons": V14_HORIZONS, "enabled": True}
+
+
+def v14_get_journal_rows(symbol=None, strategy=None, status=None, limit=500):
+    conn = db()
+    q = "SELECT * FROM trade_journal WHERE 1=1"
+    params = []
+    if symbol:
+        q += " AND symbol=?"; params.append(resolve_delisted_symbol(symbol).upper().replace(".BK", ""))
+    if strategy:
+        q += " AND strategy=?"; params.append(str(strategy).upper())
+    if status:
+        q += " AND status=?"; params.append(str(status).upper())
+    q += " ORDER BY id DESC LIMIT ?"; params.append(int(limit))
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return rows
+
+
+def v14_metrics_from_rows(rows, horizon="5d"):
+    ret_key = f"return_{horizon}"
+    result_key = f"result_{horizon}"
+    eval_rows = [r for r in rows if r[ret_key] is not None]
+    vals = [safe_float(r[ret_key], 0) for r in eval_rows]
+    wins = [v for r, v in zip(eval_rows, vals) if str(r[result_key]).upper() == "WIN"]
+    losses = [v for r, v in zip(eval_rows, vals) if str(r[result_key]).upper() == "LOSS"]
+    n = len(vals)
+    win_rate = len(wins) / n * 100 if n else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    gross_win = sum(abs(v) for v in wins)
+    gross_loss = sum(abs(v) for v in losses)
+    profit_factor = gross_win / gross_loss if gross_loss else (999 if gross_win > 0 else 0)
+    p_win = win_rate / 100.0
+    expectancy = (p_win * avg_win) - ((1 - p_win) * abs(avg_loss))
+    return {
+        "signals_total": len(rows),
+        "signals_evaluated": n,
+        "open_signals": sum(1 for r in rows if str(r["status"]).upper() == "OPEN"),
+        "win_rate_pct": round(win_rate, 2),
+        "avg_win_pct": round(avg_win, 3),
+        "avg_loss_pct": round(avg_loss, 3),
+        "profit_factor": round(profit_factor, 3) if profit_factor != 999 else 999,
+        "expectancy_pct": round(expectancy, 3),
+        "sample_quality": "LOW" if n < V14_MIN_SAMPLE else "OK",
+        "sample_warning": f"Need at least {V14_MIN_SAMPLE} evaluated trades for confidence" if n < V14_MIN_SAMPLE else ""
+    }
+
+
+def v14_expectancy(symbol=None, strategy=None, horizon="5d"):
+    v14_update_outcomes()
+    rows = v14_get_journal_rows(symbol=symbol, strategy=strategy, limit=2000)
+    overall = v14_metrics_from_rows(rows, horizon)
+    by_strategy = {}
+    for st in sorted(set([r["strategy"] for r in rows if r["strategy"]])):
+        sr = [r for r in rows if r["strategy"] == st]
+        by_strategy[st] = v14_metrics_from_rows(sr, horizon)
+    by_symbol = {}
+    for sym in sorted(set([r["symbol"] for r in rows if r["symbol"]])):
+        sr = [r for r in rows if r["symbol"] == sym]
+        by_symbol[sym] = v14_metrics_from_rows(sr, horizon)
+    by_side = {}
+    for sd in sorted(set([r["side"] for r in rows if r["side"]])):
+        sr = [r for r in rows if r["side"] == sd]
+        by_side[sd] = v14_metrics_from_rows(sr, horizon)
+    return {"version": "V14 Expectancy Engine", "scope": {"symbol": symbol, "strategy": strategy, "horizon": horizon}, "overall": overall, "by_strategy": by_strategy, "by_symbol": by_symbol, "by_side": by_side}
+
+
+def v14_strategy_modifier(strategy=None, horizon="5d"):
+    if not strategy:
+        return {"modifier": 0, "reason": "No strategy"}
+    exp = v14_expectancy(strategy=strategy, horizon=horizon)["overall"]
+    n = int(exp.get("signals_evaluated") or 0)
+    expectancy = float(exp.get("expectancy_pct") or 0)
+    pf = float(exp.get("profit_factor") or 0)
+    wr = float(exp.get("win_rate_pct") or 0)
+    if n < V14_MIN_SAMPLE:
+        return {"modifier": 0, "reason": "Insufficient sample", "metrics": exp}
+    modifier = 0
+    reasons = []
+    if expectancy >= 2.0 and pf >= 1.5:
+        modifier += 10; reasons.append("Strong positive expectancy")
+    elif expectancy >= 0.75:
+        modifier += 5; reasons.append("Positive expectancy")
+    elif expectancy <= -1.0 or pf < 0.8:
+        modifier -= 10; reasons.append("Negative expectancy / weak profit factor")
+    elif expectancy < 0:
+        modifier -= 5; reasons.append("Slightly negative expectancy")
+    if wr >= 65:
+        modifier += 3; reasons.append("High win rate")
+    elif wr <= 40:
+        modifier -= 3; reasons.append("Low win rate")
+    return {"modifier": int(max(-15, min(15, modifier))), "reason": "; ".join(reasons) or "Neutral historical edge", "metrics": exp}
+
+
+def v14_adaptive_score(symbol):
+    base = v131_analyze_symbol(symbol) if "v131_analyze_symbol" in globals() else {}
+    strategy = base.get("strategy") or "CORE_TREND"
+    score = safe_float(base.get("score"), 50)
+    mod = v14_strategy_modifier(strategy)
+    adaptive = int(max(0, min(100, score + mod.get("modifier", 0))))
+    decision = "CALL_WATCH" if adaptive >= 75 else "PUT_WATCH" if adaptive <= 30 else "WAIT"
+    return {
+        "version": "V14 Adaptive Scoring",
+        "symbol": symbol.upper(),
+        "base_score": score,
+        "strategy": strategy,
+        "historical_modifier": mod,
+        "adaptive_score": adaptive,
+        "decision": decision,
+        "note": "Adaptive score = current setup score + historical expectancy modifier. It becomes stronger after enough journal outcomes."
+    }
+
+
+def v14_leaderboard(horizon="5d"):
+    exp = v14_expectancy(horizon=horizon)
+    rows = []
+    for strategy, metrics in exp.get("by_strategy", {}).items():
+        rows.append({"strategy": strategy, **metrics})
+    rows.sort(key=lambda x: (x.get("expectancy_pct", 0), x.get("profit_factor", 0), x.get("signals_evaluated", 0)), reverse=True)
+    return {"version": "V14 Strategy Leaderboard", "horizon": horizon, "leaderboard": rows}
+
+
+def v14_dashboard():
+    exp = v14_expectancy(horizon=request.args.get("horizon", "5d"))
+    journal = v14_get_journal_rows(limit=50)
+    leaderboard = v14_leaderboard(request.args.get("horizon", "5d"))
+    return {
+        "version": "V14 Trade Journal + Outcome Tracking + Expectancy + Adaptive Scoring Free 100%",
+        "time": now_text(),
+        "summary": exp.get("overall"),
+        "best_strategy": (leaderboard.get("leaderboard") or [{}])[0],
+        "worst_strategy": (leaderboard.get("leaderboard") or [{}])[-1] if leaderboard.get("leaderboard") else {},
+        "strategy_leaderboard": leaderboard.get("leaderboard"),
+        "latest_trades": [dict(r) for r in journal[:20]],
+        "routes": ["/v14/status", "/v14/journal", "/v14/journal/log/<symbol>", "/v14/update-outcomes", "/v14/expectancy", "/v14/leaderboard", "/v14/adaptive/<symbol>", "/v14/backfill", "/v14/dashboard"]
+    }
+
+
+@app.route("/v14/status", methods=["GET"])
+def v14_status_route():
+    return jsonify({
+        "version": "V14 Trade Journal + Outcome Tracking + Expectancy + Adaptive Scoring Free 100%",
+        "enabled": V14_ENABLED,
+        "auto_log_signals": V14_AUTO_LOG_SIGNALS,
+        "horizons_days": V14_HORIZONS,
+        "modules": ["Trade Journal", "Outcome Tracking", "Expectancy", "Adaptive Scoring"],
+        "routes": ["/v14/dashboard", "/v14/journal", "/v14/journal/log/<symbol>", "/v14/update-outcomes", "/v14/expectancy", "/v14/leaderboard", "/v14/adaptive/<symbol>", "/v14/backfill"]
+    })
+
+
+@app.route("/v14/dashboard", methods=["GET"])
+def v14_dashboard_route():
+    return jsonify(v14_dashboard())
+
+
+@app.route("/v14/journal", methods=["GET", "POST"])
+def v14_journal_route():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        res = v14_log_trade(
+            symbol=payload.get("symbol"), side=payload.get("side"), entry_price=payload.get("entry_price"),
+            strategy=payload.get("strategy"), source="manual_post", score=payload.get("score"),
+            stop_loss=payload.get("stop_loss"), take_profit=payload.get("take_profit"),
+            size=payload.get("size"), notes=payload.get("notes")
+        )
+        return jsonify(res)
+    rows = v14_get_journal_rows(request.args.get("symbol"), request.args.get("strategy"), request.args.get("status"), request.args.get("limit", 200))
+    return jsonify({"count": len(rows), "rows": [dict(r) for r in rows]})
+
+
+@app.route("/v14/journal/log/<symbol>", methods=["GET", "POST"])
+def v14_journal_log_symbol_route(symbol):
+    payload = request.get_json(silent=True) or {}
+    side = payload.get("side") or request.args.get("side")
+    entry = payload.get("entry_price") or request.args.get("entry") or request.args.get("entry_price")
+    strategy = payload.get("strategy") or request.args.get("strategy")
+    notes = payload.get("notes") or request.args.get("notes")
+    score = payload.get("score") or request.args.get("score")
+    res = v14_log_trade(symbol=symbol, side=side, entry_price=entry, strategy=strategy, source="manual_route", score=score, notes=notes)
+    return jsonify(res)
+
+
+@app.route("/v14/update-outcomes", methods=["GET", "POST"])
+def v14_update_outcomes_route():
+    return jsonify(v14_update_outcomes(request.args.get("limit", 500)))
+
+
+@app.route("/v14/expectancy", methods=["GET"])
+def v14_expectancy_route():
+    return jsonify(v14_expectancy(request.args.get("symbol"), request.args.get("strategy"), request.args.get("horizon", "5d")))
+
+
+@app.route("/v14/leaderboard", methods=["GET"])
+def v14_leaderboard_route():
+    return jsonify(v14_leaderboard(request.args.get("horizon", "5d")))
+
+
+@app.route("/v14/adaptive/<symbol>", methods=["GET"])
+def v14_adaptive_route(symbol):
+    return jsonify(v14_adaptive_score(symbol))
+
+
+@app.route("/v14/backfill", methods=["GET", "POST"])
+def v14_backfill_route():
+    return jsonify(v14_backfill_from_signal_audit(request.args.get("limit", 500)))
+
+
 init_db()
 v131_init_db()
+v14_init_db()
 v10_init_db()
 v11_init_db()
 
