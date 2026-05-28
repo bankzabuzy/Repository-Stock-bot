@@ -11691,4 +11691,4 @@ try:
     v216_init_db()
 except Exception as e:
     print("v21.6 init error:", e)
-    app.run(host="0.0.0.0", port=PORT)
+app.run(host="0.0.0.0", port=PORT)
