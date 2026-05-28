@@ -7,7 +7,7 @@ import base64
 import hashlib
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, timezone, timezone
 
 import requests
 import yfinance as yf
@@ -86,7 +86,7 @@ TH_MARKET_MORNING_END = os.getenv("TH_MARKET_MORNING_END", "12:30")
 TH_MARKET_AFTERNOON_START = os.getenv("TH_MARKET_AFTERNOON_START", "14:30")
 TH_MARKET_AFTERNOON_END = os.getenv("TH_MARKET_AFTERNOON_END", "16:45")
 US_PREMARKET_START_TH = os.getenv("US_PREMARKET_START_TH", "15:00")
-US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "false").lower() == "true"
+US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "true").lower() == "true"
 US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
 US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:30")
 SYMBOL_COOLDOWN_MINUTES = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "240"))
@@ -101,9 +101,8 @@ AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
-# V13 bugfix: keep US regular session aligned with current DST Thai time. Do not override 20:30 with 21:30.
-US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
-US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "03:00")
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
@@ -119,9 +118,9 @@ STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
-PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
-TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
     x.strip().upper()
@@ -241,12 +240,6 @@ def save_signal(symbol, asset_type, price, score, bias, signal_type, regime, pro
         )
         conn.commit()
         conn.close()
-        # V13 Signal Quality Layer: audit every emitted signal for future win-rate evaluation.
-        try:
-            if "save_signal_audit" in globals():
-                save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
-        except Exception as audit_error:
-            print("save_signal_audit error:", audit_error)
     except Exception as e:
         print("save_signal error:", e)
 
@@ -6241,531 +6234,606 @@ def v121_ranking_route():
 
 
 # ============================================================
-# V13 SIGNAL QUALITY LAYER - FREE 100%
-# Purpose: convert the bot from a scanner into a measurable research engine.
-# Adds: signal audit, historical win-rate, false signal detector, adaptive scoring,
-# multi-timeframe consensus, relative strength ranking, strategy leaderboard, dashboard.
+# V13.1 SIGNAL QUALITY + INSTITUTIONAL ANALYTICS LAYER
 # ============================================================
-V13_ENABLED = os.getenv("V13_ENABLED", "true").lower() == "true"
-V13_SIGNAL_HORIZONS = [int(x) for x in os.getenv("V13_SIGNAL_HORIZONS", "1,3,5,10").split(",") if str(x).strip().isdigit()]
-V13_DEFAULT_UNIVERSE = env_list("V13_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,GOOGL,AMZN,QQQ,SPY,PLTR,AVGO,SMCI,MU,ARM,COIN,MSTR,RKLB,AAOI,IREN,CRWD,SNOW,NET,DDOG,HOOD")
-V13_RS_BENCHMARK = os.getenv("V13_RS_BENCHMARK", "QQQ")
-V13_MIN_CLOSED_FOR_STATS = int(os.getenv("V13_MIN_CLOSED_FOR_STATS", "20"))
+V131_ENABLED = os.getenv("V131_ENABLED", "true").lower() == "true"
+V131_ACCOUNT_SIZE = float(os.getenv("V131_ACCOUNT_SIZE", "10000"))
+V131_RISK_PER_TRADE_PCT = float(os.getenv("V131_RISK_PER_TRADE_PCT", "1.0"))
+V131_RANKING_UNIVERSE = [
+    x.strip().upper()
+    for x in os.getenv(
+        "V131_RANKING_UNIVERSE",
+        os.getenv("TOP5_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,QQQ,SPY,PLTR,AVGO,AMZN,GOOGL,SMCI,MSTR,COIN,ARM,MU,CRWD,NET,HOOD,RKLB,IREN")
+    ).split(",")
+    if x.strip()
+]
 
+def v131_now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-def v13_init_db():
+def v131_parse_created_at(value):
+    if not value:
+        return None
+    for fmt in ("%d/%m/%Y %H:%M", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except Exception:
+            pass
+    return None
+
+def v131_init_db():
     conn = db()
     cur = conn.cursor()
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS v13_signal_audit (
+        CREATE TABLE IF NOT EXISTS signal_audit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at_utc TEXT NOT NULL,
-            created_at_th TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_ts REAL NOT NULL,
             symbol TEXT NOT NULL,
             asset_type TEXT,
-            side TEXT,
-            strategy TEXT,
             entry_price REAL,
             score INTEGER,
-            adaptive_score INTEGER,
-            probability INTEGER,
             bias TEXT,
+            signal_type TEXT,
+            strategy TEXT,
             regime TEXT,
-            breadth_regime TEXT,
-            mtf_consensus TEXT,
-            rs_score REAL,
-            quality_score INTEGER,
-            false_risk_score INTEGER,
-            explanation_json TEXT,
-            result_json TEXT,
-            status TEXT DEFAULT 'OPEN',
-            evaluated_at_utc TEXT
+            probability INTEGER,
+            report TEXT,
+            price_1d REAL,
+            price_3d REAL,
+            price_5d REAL,
+            return_1d REAL,
+            return_3d REAL,
+            return_5d REAL,
+            result_1d TEXT,
+            result_3d TEXT,
+            result_5d TEXT,
+            updated_at TEXT
         )
     """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_symbol ON v13_signal_audit(symbol)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_created ON v13_signal_audit(created_at_utc)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_side ON v13_signal_audit(side)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v131_performance_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            scope TEXT,
+            payload TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
-
-def v13_side_from_signal(signal_type, score=None, bias=None):
-    text = f"{signal_type or ''} {bias or ''}".upper()
-    if "CALL" in text or "BUY" in text or "BULL" in text:
-        return "CALL"
-    if "PUT" in text or "SELL" in text or "BEAR" in text:
-        return "PUT"
+def v131_infer_strategy(score, bias, signal_type, regime, report):
+    text = f"{bias or ''} {signal_type or ''} {regime or ''} {report or ''}".upper()
     try:
-        sc = int(score)
-        if sc >= 75:
-            return "CALL"
-        if sc <= 35:
-            return "PUT"
+        score = int(score or 50)
     except Exception:
-        pass
-    return "WAIT"
-
-
-def v13_detect_strategy(report, side, score=None):
-    text = str(report or "").upper()
+        score = 50
     if "VWAP" in text:
-        return "VWAP_RECLAIM" if side == "CALL" else "VWAP_REJECT"
+        return "VWAP_RECLAIM"
     if "PULLBACK" in text or "ย่อ" in text:
         return "PULLBACK"
-    if "BREAKOUT" in text or "เบรก" in text:
+    if "BREAKOUT" in text or "ทะลุ" in text:
         return "BREAKOUT"
-    if "OPTIONS" in text or "OPTION" in text:
-        return "OPTIONS_HYBRID"
-    if score is not None and score >= 88:
-        return "HIGH_MOMENTUM"
-    if score is not None and score <= 15:
-        return "HIGH_BEARISH_MOMENTUM"
-    return "CORE_SIGNAL"
+    if "MOMENTUM" in text or score >= 85 or score <= 20:
+        return "MOMENTUM"
+    if "RANGE" in text:
+        return "RANGE_REVERSAL"
+    return "CORE_TREND"
 
-
-def v13_safe_breadth_summary():
+def save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
+    if not V131_ENABLED:
+        return
     try:
-        if "v10_true_market_breadth" in globals():
-            b = v10_true_market_breadth()
-            return b.get("breadth_regime") or b.get("regime") or "UNKNOWN"
-    except Exception:
-        pass
-    try:
-        if "v121_market_internals" in globals():
-            i = v121_market_internals()
-            return i.get("internals_regime") or "UNKNOWN"
-    except Exception:
-        pass
-    return "UNKNOWN"
+        if price is None:
+            return
+        strategy = v131_infer_strategy(score, bias, signal_type, regime, report)
+        conn = db()
+        conn.execute(
+            """INSERT INTO signal_audit
+               (created_at, created_ts, symbol, asset_type, entry_price, score, bias, signal_type, strategy, regime, probability, report, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                now_text(), time.time(), str(symbol).upper(), asset_type, safe_float(price), int(score or 0),
+                bias, signal_type, strategy, regime, int(probability or 0), str(report or "")[:3000], v131_now_iso()
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("V13.1 save_signal_audit error:", e)
 
-
-def v13_relative_strength_score(symbol, benchmark=None, period="6mo"):
-    benchmark = benchmark or V13_RS_BENCHMARK
-    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
-    try:
-        s1 = v12_yf_symbol(sym) if "v12_yf_symbol" in globals() else normalize_asset(sym)["yf_symbol"]
-        s2 = v12_yf_symbol(benchmark) if "v12_yf_symbol" in globals() else benchmark
-        data = yf.download([s1, s2], period=period, interval="1d", progress=False, auto_adjust=True, threads=False)
-        if data is None or data.empty:
-            return None
-        close = data["Close"] if "Close" in data else data
-        c1 = close[s1].dropna() if s1 in close else close.iloc[:, 0].dropna()
-        c2 = close[s2].dropna() if s2 in close else close.iloc[:, -1].dropna()
-        if len(c1) < 30 or len(c2) < 30:
-            return None
-        r1_20 = c1.iloc[-1] / c1.iloc[-20] - 1
-        r2_20 = c2.iloc[-1] / c2.iloc[-20] - 1
-        r1_60 = c1.iloc[-1] / c1.iloc[-60] - 1 if len(c1) >= 60 else r1_20
-        r2_60 = c2.iloc[-1] / c2.iloc[-60] - 1 if len(c2) >= 60 else r2_20
-        raw = ((r1_20 - r2_20) * 0.6 + (r1_60 - r2_60) * 0.4) * 100
-        return round(max(0, min(100, 50 + raw * 5)), 2)
-    except Exception:
-        return None
-
-
-def v13_mtf_consensus(symbol):
+def v131_current_price(symbol, asset_type=None):
     try:
         asset = normalize_asset(symbol)
         quote, closes, highs, lows, opens, volumes = get_market_data(asset)
-        analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-        alignment = analysis.get("alignment") or "N/A"
-        states = analysis.get("mtf_states") or []
-        bulls = sum(1 for _, s in states if str(s).upper() == "BULLISH")
-        bears = sum(1 for _, s in states if str(s).upper() == "BEARISH")
-        total = len(states)
-        pct = round(max(bulls, bears) / total * 100, 2) if total else 0
-        direction = "BULLISH" if bulls > bears else "BEARISH" if bears > bulls else "MIXED"
-        return {"alignment": alignment, "states": states, "direction": direction, "consensus_pct": pct}
-    except Exception as e:
-        return {"alignment": "N/A", "states": [], "direction": "UNKNOWN", "consensus_pct": 0, "error": str(e)[:120]}
-
-
-def v13_adaptive_score(symbol, base_score, side, regime=None, breadth=None, rs_score=None, mtf=None):
-    try:
-        score = int(base_score or 50)
+        return safe_float(quote.get("close"))
     except Exception:
-        score = 50
-    notes = []
-    reg = str(regime or "").upper()
-    br = str(breadth or "").upper()
-    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
-    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
+        try:
+            data = yf.Ticker(symbol).history(period="5d", interval="1d", auto_adjust=False)
+            if data is not None and not data.empty:
+                return float(data["Close"].dropna().iloc[-1])
+        except Exception:
+            pass
+    return None
 
-    if side == "CALL":
-        if "RISK_ON" in reg or "UPTREND" in reg:
-            score += 5; notes.append("Regime supports CALL")
-        if "RISK_OFF" in reg or "DOWNTREND" in reg:
-            score -= 8; notes.append("Regime fights CALL")
-        if "BEAR" in br:
-            score -= 6; notes.append("Breadth weak for CALL")
-        if direction == "BULLISH" and consensus >= 60:
-            score += 5; notes.append("MTF confirms CALL")
-        if direction == "BEARISH" and consensus >= 60:
-            score -= 7; notes.append("MTF rejects CALL")
-        if rs_score is not None:
-            if rs_score >= 65: score += 5; notes.append("Relative strength positive")
-            elif rs_score <= 40: score -= 5; notes.append("Relative strength weak")
-    elif side == "PUT":
-        if "RISK_OFF" in reg or "DOWNTREND" in reg:
-            score = 100 - max(0, 100 - score - 5); notes.append("Regime supports PUT")
-        if "RISK_ON" in reg or "UPTREND" in reg:
-            score += 6; notes.append("Risk-on market reduces PUT quality")
-        if direction == "BEARISH" and consensus >= 60:
-            score -= 5; notes.append("MTF confirms PUT")
-        if direction == "BULLISH" and consensus >= 60:
-            score += 7; notes.append("MTF rejects PUT")
-        if rs_score is not None and rs_score >= 65:
-            score += 5; notes.append("Strong RS makes PUT riskier")
-    return {"adaptive_score": int(max(0, min(100, score))), "notes": notes}
+def v131_result_for_return(signal_type, bias, ret):
+    if ret is None:
+        return None
+    direction = "CALL"
+    txt = f"{signal_type or ''} {bias or ''}".upper()
+    if "PUT" in txt or "BEAR" in txt or "ขาย" in txt:
+        direction = "PUT"
+    win = ret > 0 if direction == "CALL" else ret < 0
+    return "WIN" if win else "LOSS"
 
-
-def v13_false_signal_risk(side, regime=None, breadth=None, mtf=None, rs_score=None):
-    risk = 20
-    notes = []
-    reg = str(regime or "").upper()
-    br = str(breadth or "").upper()
-    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
-    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
-    if side == "CALL":
-        if "BEAR" in br or "RISK_OFF" in reg:
-            risk += 25; notes.append("CALL against weak breadth/regime")
-        if direction == "BEARISH" and consensus >= 60:
-            risk += 25; notes.append("CALL against MTF bearish consensus")
-        if rs_score is not None and rs_score < 40:
-            risk += 15; notes.append("CALL with weak relative strength")
-    elif side == "PUT":
-        if "BULL" in br or "RISK_ON" in reg:
-            risk += 20; notes.append("PUT against risk-on/bullish breadth")
-        if direction == "BULLISH" and consensus >= 60:
-            risk += 25; notes.append("PUT against MTF bullish consensus")
-        if rs_score is not None and rs_score > 65:
-            risk += 15; notes.append("PUT against strong relative strength")
-    else:
-        risk += 15; notes.append("WAIT/unclear side")
-    return {"false_risk_score": int(max(0, min(100, risk))), "notes": notes}
-
-
-def v13_signal_quality_score(adaptive_score, false_risk, side):
-    if side == "CALL":
-        base = adaptive_score
-    elif side == "PUT":
-        base = 100 - adaptive_score
-    else:
-        base = 40
-    return int(max(0, min(100, base * 0.75 + (100 - false_risk) * 0.25)))
-
-
-def save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
-    if not V13_ENABLED:
-        return False
-    side = v13_side_from_signal(signal_type, score, bias)
-    if side == "WAIT":
-        return False
-    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
-    mtf = v13_mtf_consensus(sym)
-    rs = v13_relative_strength_score(sym) if asset_type == "US_STOCK" else None
-    breadth = v13_safe_breadth_summary() if asset_type == "US_STOCK" else "N/A"
-    adaptive = v13_adaptive_score(sym, score, side, regime, breadth, rs, mtf)
-    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
-    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
-    strategy = v13_detect_strategy(report, side, score)
-    explanation = {
-        "signal_type": signal_type,
-        "adaptive_notes": adaptive["notes"],
-        "false_risk_notes": false_risk["notes"],
-        "report_excerpt": str(report or "")[:1000]
-    }
-    conn = db()
-    conn.execute("""
-        INSERT INTO v13_signal_audit(
-            created_at_utc, created_at_th, symbol, asset_type, side, strategy, entry_price,
-            score, adaptive_score, probability, bias, regime, breadth_regime, mtf_consensus,
-            rs_score, quality_score, false_risk_score, explanation_json, result_json, status
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        datetime.now(timezone.utc).isoformat(), now_text(), sym, asset_type, side, strategy,
-        safe_float(price), int(score or 50), adaptive["adaptive_score"], int(probability or 0), bias,
-        regime, breadth, json.dumps(mtf, ensure_ascii=False), rs, quality, false_risk["false_risk_score"],
-        json.dumps(explanation, ensure_ascii=False), json.dumps({}, ensure_ascii=False), "OPEN"
-    ))
-    conn.commit(); conn.close()
-    return True
-
-
-def v13_price_at_or_after(symbol, target_dt):
-    try:
-        yf_symbol = v12_yf_symbol(symbol) if "v12_yf_symbol" in globals() else normalize_asset(symbol)["yf_symbol"]
-        start = (target_dt - timedelta(days=5)).date().isoformat()
-        end = (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
-        data = yf.Ticker(yf_symbol).history(start=start, end=end, interval="1d", auto_adjust=False)
-        if data is None or data.empty:
-            return None, None
-        data = data.dropna()
-        for idx, row in data.iterrows():
-            idx_dt = idx.to_pydatetime()
-            if idx_dt.tzinfo is None:
-                idx_dt = idx_dt.replace(tzinfo=timezone.utc)
-            else:
-                idx_dt = idx_dt.astimezone(timezone.utc)
-            if idx_dt >= target_dt:
-                return float(row["Close"]), idx_dt.isoformat()
-        row = data.iloc[-1]
-        return float(row["Close"]), data.index[-1].to_pydatetime().isoformat()
-    except Exception:
-        return None, None
-
-
-def v13_update_audit_results(limit=200):
-    conn = db(); cur = conn.cursor()
-    rows = cur.execute("SELECT * FROM v13_signal_audit WHERE status!='CLOSED' ORDER BY id ASC LIMIT ?", (int(limit),)).fetchall()
+def v131_update_audit_results(limit=300):
+    if not V131_ENABLED:
+        return {"updated": 0, "enabled": False}
+    now_ts = time.time()
     updated = 0
-    now_utc = datetime.now(timezone.utc)
-    for r in rows:
+    conn = db()
+    rows = conn.execute(
+        """SELECT * FROM signal_audit
+           WHERE (return_1d IS NULL OR return_3d IS NULL OR return_5d IS NULL)
+           ORDER BY id DESC LIMIT ?""",
+        (int(limit),),
+    ).fetchall()
+    for row in rows:
         try:
-            created = datetime.fromisoformat(str(r["created_at_utc"]).replace("Z", "+00:00"))
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            entry = safe_float(r["entry_price"])
-            if not entry:
+            age_days = (now_ts - float(row["created_ts"])) / 86400.0
+            if age_days < 0.95:
                 continue
-            results = json.loads(r["result_json"] or "{}")
-            closed_all = True
-            for h in V13_SIGNAL_HORIZONS:
-                key = f"{h}d"
-                if key in results:
-                    continue
-                if now_utc < created + timedelta(days=h):
-                    closed_all = False
-                    continue
-                px, px_time = v13_price_at_or_after(r["symbol"], created + timedelta(days=h))
-                if px is None:
-                    closed_all = False
-                    continue
-                ret = (px / entry - 1) * 100
-                side = str(r["side"] or "").upper()
-                win = 1 if (side == "CALL" and ret > 0) or (side == "PUT" and ret < 0) else 0
-                results[key] = {"price": round(px, 4), "price_time": px_time, "return_pct": round(ret, 3), "win": win}
-            status = "CLOSED" if closed_all else "OPEN"
-            cur.execute("UPDATE v13_signal_audit SET result_json=?, status=?, evaluated_at_utc=? WHERE id=?", (json.dumps(results, ensure_ascii=False), status, now_utc.isoformat(), r["id"]))
-            updated += 1
+            price_now = v131_current_price(row["symbol"], row["asset_type"])
+            entry = safe_float(row["entry_price"])
+            if not price_now or not entry:
+                continue
+            ret = (price_now - entry) / entry * 100.0
+            fields = {}
+            if age_days >= 0.95 and row["return_1d"] is None:
+                fields.update({"price_1d": price_now, "return_1d": ret, "result_1d": v131_result_for_return(row["signal_type"], row["bias"], ret)})
+            if age_days >= 2.95 and row["return_3d"] is None:
+                fields.update({"price_3d": price_now, "return_3d": ret, "result_3d": v131_result_for_return(row["signal_type"], row["bias"], ret)})
+            if age_days >= 4.95 and row["return_5d"] is None:
+                fields.update({"price_5d": price_now, "return_5d": ret, "result_5d": v131_result_for_return(row["signal_type"], row["bias"], ret)})
+            if fields:
+                fields["updated_at"] = v131_now_iso()
+                sets = ", ".join([f"{k}=?" for k in fields.keys()])
+                conn.execute(f"UPDATE signal_audit SET {sets} WHERE id=?", list(fields.values()) + [row["id"]])
+                updated += 1
         except Exception as e:
-            print("v13_update_audit_results row error:", e)
-            continue
-    conn.commit(); conn.close()
-    return updated
-
-
-def v13_winrate_stats(symbol=None, horizon="5d"):
-    v13_update_audit_results()
-    conn = db(); cur = conn.cursor()
-    params = []
-    where = "WHERE side IN ('CALL','PUT')"
-    if symbol:
-        where += " AND symbol=?"; params.append(resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", ""))
-    rows = cur.execute(f"SELECT * FROM v13_signal_audit {where} ORDER BY id DESC LIMIT 2000", params).fetchall()
+            print("V13.1 audit update row error:", e)
+    conn.commit()
     conn.close()
-    closed = []
-    for r in rows:
-        res = json.loads(r["result_json"] or "{}")
-        if horizon in res:
-            d = dict(r); d["horizon_result"] = res[horizon]; closed.append(d)
-    total = len(closed)
-    wins = sum(1 for r in closed if int(r["horizon_result"].get("win", 0)) == 1)
-    avg_ret = sum(float(r["horizon_result"].get("return_pct", 0)) for r in closed) / total if total else 0
-    by_side = {}
+    return {"updated": updated, "checked": len(rows), "enabled": True}
+
+def v131_metrics_from_rows(rows, horizon="5d"):
+    ret_key = f"return_{horizon}"
+    result_key = f"result_{horizon}"
+    vals = [safe_float(r[ret_key]) for r in rows if r[ret_key] is not None]
+    wins = [v for v in vals if v > 0]
+    losses = [v for v in vals if v < 0]
+    n = len(vals)
+    win_rate = (len(wins) / n * 100.0) if n else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = (gross_win / gross_loss) if gross_loss else (999 if gross_win > 0 else 0)
+    expectancy = (win_rate/100.0 * avg_win) + ((1-win_rate/100.0) * avg_loss)
+    return {
+        "signals_evaluated": n,
+        "win_rate": round(win_rate, 2),
+        "avg_win_pct": round(avg_win, 3),
+        "avg_loss_pct": round(avg_loss, 3),
+        "profit_factor": round(profit_factor, 3) if profit_factor != 999 else 999,
+        "expectancy_pct": round(expectancy, 3),
+        "sample_warning": "Need more evaluated signals for statistical confidence" if n < 30 else ""
+    }
+
+def v131_get_audit_rows(limit=500):
+    conn = db()
+    rows = conn.execute("SELECT * FROM signal_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    conn.close()
+    return rows
+
+def v131_historical_winrate(symbol=None, strategy=None, horizon="5d"):
+    v131_update_audit_results()
+    conn = db()
+    q = "SELECT * FROM signal_audit WHERE 1=1"
+    params = []
+    if symbol:
+        q += " AND symbol=?"
+        params.append(symbol.upper())
+    if strategy:
+        q += " AND strategy=?"
+        params.append(strategy.upper())
+    q += " ORDER BY id DESC LIMIT 1000"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    metrics = v131_metrics_from_rows(rows, horizon)
     by_strategy = {}
-    for bucket_name, key in [("by_side", "side"), ("by_strategy", "strategy")]:
-        target = by_side if key == "side" else by_strategy
-        for r in closed:
-            k = r.get(key) or "UNKNOWN"
-            target.setdefault(k, []).append(r)
-        for k, arr in list(target.items()):
-            target[k] = {
-                "signals": len(arr),
-                "win_rate_pct": round(sum(1 for x in arr if int(x["horizon_result"].get("win", 0)) == 1) / len(arr) * 100, 2),
-                "avg_return_pct": round(sum(float(x["horizon_result"].get("return_pct", 0)) for x in arr) / len(arr), 3),
-                "avg_quality_score": round(sum(float(x["quality_score"] or 0) for x in arr) / len(arr), 2),
-            }
-    return {
-        "version": "V13 Historical Win Rate Engine",
-        "symbol": symbol.upper() if symbol else "ALL",
-        "horizon": horizon,
-        "closed_signals": total,
-        "win_rate_pct": round(wins / total * 100, 2) if total else 0,
-        "avg_return_pct": round(avg_ret, 3),
-        "by_side": by_side,
-        "by_strategy": by_strategy,
-        "sample_warning": "ต้องมี closed signals อย่างน้อยประมาณ %s รายการก่อนใช้สถิติตัดสินใจจริง" % V13_MIN_CLOSED_FOR_STATS,
-        "latest_closed": [{k: r[k] for k in ["id", "created_at_th", "symbol", "side", "strategy", "entry_price", "score", "adaptive_score", "quality_score", "false_risk_score"] if k in r} | {"result": r["horizon_result"]} for r in closed[:25]]
-    }
+    for s in sorted(set([r["strategy"] for r in rows if r["strategy"]])):
+        sr = [r for r in rows if r["strategy"] == s]
+        by_strategy[s] = v131_metrics_from_rows(sr, horizon)
+    by_symbol = {}
+    for sym in sorted(set([r["symbol"] for r in rows if r["symbol"]]))[:80]:
+        sr = [r for r in rows if r["symbol"] == sym]
+        by_symbol[sym] = v131_metrics_from_rows(sr, horizon)
+    return {"scope": {"symbol": symbol, "strategy": strategy, "horizon": horizon}, "overall": metrics, "by_strategy": by_strategy, "by_symbol": by_symbol}
 
+def v131_false_signal_detector(horizon="5d"):
+    v131_update_audit_results()
+    rows = v131_get_audit_rows(1000)
+    loss_rows = [r for r in rows if r[f"result_{horizon}"] == "LOSS"]
+    total_eval = len([r for r in rows if r[f"result_{horizon}"] is not None])
+    buckets = {}
+    for r in loss_rows:
+        keys = [
+            f"strategy:{r['strategy'] or 'UNKNOWN'}",
+            f"regime:{r['regime'] or 'UNKNOWN'}",
+            f"score_band:{(int(r['score'] or 0)//10)*10}"
+        ]
+        for k in keys:
+            buckets.setdefault(k, {"loss_count": 0, "examples": []})
+            buckets[k]["loss_count"] += 1
+            if len(buckets[k]["examples"]) < 5:
+                buckets[k]["examples"].append({"symbol": r["symbol"], "score": r["score"], "return": r[f"return_{horizon}"], "created_at": r["created_at"]})
+    ranked = []
+    for k, v in buckets.items():
+        ranked.append({"pattern": k, "loss_count": v["loss_count"], "loss_share_pct": round(v["loss_count"]/total_eval*100, 2) if total_eval else 0, "examples": v["examples"]})
+    ranked.sort(key=lambda x: x["loss_count"], reverse=True)
+    return {"horizon": horizon, "evaluated_signals": total_eval, "loss_signals": len(loss_rows), "top_false_signal_patterns": ranked[:20]}
 
-def v13_false_signal_detector(horizon="5d"):
-    stats = v13_winrate_stats(None, horizon)
-    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit WHERE side IN ('CALL','PUT') ORDER BY id DESC LIMIT 2000").fetchall(); conn.close()
-    groups = {}
-    for r in rows:
-        res = json.loads(r["result_json"] or "{}")
-        if horizon not in res:
-            continue
-        key_parts = [str(r["side"]), str(r["strategy"]), str(r["regime"] or "UNKNOWN"), str(r["breadth_regime"] or "UNKNOWN")]
-        try:
-            mtf = json.loads(r["mtf_consensus"] or "{}")
-            key_parts.append(mtf.get("direction", "UNKNOWN"))
-        except Exception:
-            key_parts.append("UNKNOWN")
-        key = " | ".join(key_parts)
-        groups.setdefault(key, []).append(r)
-    rows_out = []
-    for key, arr in groups.items():
-        if len(arr) < 3:
-            continue
-        losses = sum(1 for x in arr if int(json.loads(x["result_json"] or "{}")[horizon].get("win", 0)) == 0)
-        loss_rate = losses / len(arr) * 100
-        avg_false_risk = sum(float(x["false_risk_score"] or 0) for x in arr) / len(arr)
-        rows_out.append({"pattern": key, "signals": len(arr), "loss_rate_pct": round(loss_rate, 2), "avg_false_risk_score": round(avg_false_risk, 2)})
-    rows_out = sorted(rows_out, key=lambda x: (x["loss_rate_pct"], x["signals"]), reverse=True)
-    return {"version": "V13 False Signal Detector", "horizon": horizon, "overall": {"closed_signals": stats["closed_signals"], "win_rate_pct": stats["win_rate_pct"]}, "high_risk_patterns": rows_out[:30], "rule": "patterns need at least 3 closed samples; treat early results as exploratory"}
+def v131_strategy_leaderboard(horizon="5d"):
+    data = v131_historical_winrate(horizon=horizon)
+    items = []
+    for strategy, metrics in data["by_strategy"].items():
+        items.append({"strategy": strategy, **metrics})
+    items.sort(key=lambda x: (x.get("expectancy_pct", 0), x.get("profit_factor", 0), x.get("signals_evaluated", 0)), reverse=True)
+    return {"horizon": horizon, "leaderboard": items}
 
-
-def v13_strategy_leaderboard(horizon="5d"):
-    stats = v13_winrate_stats(None, horizon)
-    rows = []
-    for strategy, v in stats.get("by_strategy", {}).items():
-        expectancy = v["avg_return_pct"] * (v["win_rate_pct"] / 100)
-        rows.append({"strategy": strategy, **v, "expectancy_score": round(expectancy, 3)})
-    rows = sorted(rows, key=lambda x: (x["expectancy_score"], x["win_rate_pct"], x["signals"]), reverse=True)
-    return {"version": "V13 Strategy Leaderboard", "horizon": horizon, "leaderboard": rows, "note": "จัดอันดับจากผลลัพธ์ที่ปิดแล้วใน signal_audit ไม่ใช่การคาดเดา"}
-
-
-def v13_rs_ranking(limit=None):
+def v131_adaptive_thresholds(regime=None, breadth_score=None):
+    regime_text = str(regime or "").upper()
+    call_threshold = STRICT_CALL_SCORE
+    put_threshold = STRICT_PUT_SCORE
+    if "RISK_ON" in regime_text or "UPTREND" in regime_text:
+        call_threshold = max(82, STRICT_CALL_SCORE - 5)
+        put_threshold = min(18, STRICT_PUT_SCORE + 3)
+    elif "RISK_OFF" in regime_text or "DOWNTREND" in regime_text or "BEAR" in regime_text:
+        call_threshold = min(94, STRICT_CALL_SCORE + 4)
+        put_threshold = max(10, STRICT_PUT_SCORE - 4)
     try:
-        n = max(5, min(50, int(limit or request.args.get("limit", 20))))
+        b = float(breadth_score) if breadth_score is not None else None
+        if b is not None and b < 45:
+            call_threshold += 3
+        elif b is not None and b > 65:
+            call_threshold -= 2
     except Exception:
-        n = 20
-    out = []
-    for sym in V13_DEFAULT_UNIVERSE[:max(n, 20)]:
-        try:
-            s = resolve_delisted_symbol(sym).upper().replace(".BK", "").replace(".SET", "")
-            rs = v13_relative_strength_score(s)
-            if rs is None:
-                continue
-            out.append({"symbol": s, "benchmark": V13_RS_BENCHMARK, "rs_score": rs})
-        except Exception:
-            continue
-    out = sorted(out, key=lambda x: x["rs_score"], reverse=True)[:n]
-    return {"version": "V13 Relative Strength Ranking", "ranking": out}
+        pass
+    return {"call_threshold": int(call_threshold), "put_threshold": int(put_threshold)}
 
+def v131_analyze_symbol(symbol):
+    asset = normalize_asset(symbol)
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    strategy = v131_infer_strategy(analysis.get("score"), analysis.get("bias"), "", analysis.get("regime"), " ".join(analysis.get("reasons", [])))
+    thresholds = v131_adaptive_thresholds(analysis.get("regime"), None)
+    score = int(analysis.get("score") or 0)
+    decision = "WAIT"
+    if score >= thresholds["call_threshold"]:
+        decision = "CALL_WATCH"
+    elif score <= thresholds["put_threshold"]:
+        decision = "PUT_WATCH"
+    return {"symbol": asset["symbol"], "display": asset["display"], "asset_type": asset["asset_type"], "score": score, "strategy": strategy, "decision": decision, "adaptive_thresholds": thresholds, "analysis": analysis}
 
-def v13_quality_snapshot(symbol):
-    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
-    ex = None
+def v131_mtf_consensus(symbol):
+    asset = normalize_asset(symbol)
+    frames = get_mtf(asset)
+    details = []
+    bulls = bears = mixed = 0
+    for label, closes, highs, lows, volumes in frames:
+        state = trend_state(closes)
+        if state == "BULLISH":
+            bulls += 1
+        elif state == "BEARISH":
+            bears += 1
+        else:
+            mixed += 1
+        details.append({"timeframe": label, "state": state, "last_close": closes[-1] if closes else None})
+    total = len(details)
+    score = round((bulls - bears) / total * 100, 2) if total else 0
+    return {"symbol": symbol.upper(), "timeframes": details, "bullish": bulls, "bearish": bears, "mixed": mixed, "consensus_score": score}
+
+def v131_relative_strength(symbol, benchmark="QQQ", period="3mo"):
     try:
-        ex = v10_explainable_score(sym) if "v10_explainable_score" in globals() else None
+        s = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+        b = yf.Ticker(benchmark).history(period=period, interval="1d", auto_adjust=False)
+        if s is None or b is None or s.empty or b.empty:
+            return None
+        sret = (float(s["Close"].dropna().iloc[-1]) / float(s["Close"].dropna().iloc[0]) - 1) * 100
+        bret = (float(b["Close"].dropna().iloc[-1]) / float(b["Close"].dropna().iloc[0]) - 1) * 100
+        return {"symbol": symbol, "benchmark": benchmark, "symbol_return_pct": round(sret, 2), "benchmark_return_pct": round(bret, 2), "relative_strength_pct": round(sret - bret, 2)}
+    except Exception:
+        return None
+
+def v131_market_internals():
+    def one(sym):
+        try:
+            data = yf.Ticker(sym).history(period="3mo", interval="1d", auto_adjust=False)
+            if data is None or data.empty:
+                return None
+            close = data["Close"].dropna()
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) > 1 else last
+            ema20 = float(close.ewm(span=20).mean().iloc[-1]) if len(close) >= 20 else None
+            return {"symbol": sym, "last": round(last, 4), "change_pct": round((last-prev)/prev*100, 2) if prev else 0, "above_ema20": bool(ema20 and last > ema20)}
+        except Exception:
+            return None
+    proxies = {
+        "vix": "^VIX",
+        "dxy": "DX-Y.NYB",
+        "tnx": "^TNX",
+        "spy": "SPY",
+        "qqq": "QQQ",
+        "hyg": "HYG",
+        "tlt": "TLT",
+        "oil": "CL=F",
+        "gold": "GC=F"
+    }
+    data = {k: one(v) for k, v in proxies.items()}
+    risk_score = 50
+    notes = []
+    if data.get("vix") and data["vix"]["change_pct"] > 3:
+        risk_score -= 10; notes.append("VIX rising")
+    if data.get("qqq") and data["qqq"]["above_ema20"]:
+        risk_score += 10; notes.append("QQQ above EMA20")
+    if data.get("spy") and data["spy"]["above_ema20"]:
+        risk_score += 10; notes.append("SPY above EMA20")
+    if data.get("hyg") and data["hyg"]["change_pct"] < -0.5:
+        risk_score -= 8; notes.append("Credit proxy weak")
+    if data.get("tlt") and data.get("tnx") and data["tnx"]["change_pct"] > 2:
+        risk_score -= 5; notes.append("Yield pressure")
+    regime = "RISK_ON" if risk_score >= 65 else ("RISK_OFF" if risk_score <= 40 else "MIXED")
+    breadth = None
+    try:
+        if "v121_market_internals" in globals():
+            breadth = v121_market_internals()
+    except Exception:
+        breadth = None
+    return {"regime": regime, "risk_score": max(0, min(100, risk_score)), "notes": notes, "proxies": data, "market_breadth": breadth}
+
+def v131_sector_rotation():
+    sectors = {
+        "XLK_TECH": "XLK", "SMH_SEMIS": "SMH", "XLF_FINANCIALS": "XLF", "XLE_ENERGY": "XLE",
+        "XLV_HEALTHCARE": "XLV", "XLY_CONSUMER_DISC": "XLY", "XLP_STAPLES": "XLP",
+        "XLI_INDUSTRIALS": "XLI", "XLU_UTILITIES": "XLU", "IYR_REITS": "IYR"
+    }
+    out = []
+    for name, sym in sectors.items():
+        rs = v131_relative_strength(sym, "SPY", "3mo")
+        if rs:
+            out.append({"sector": name, **rs})
+    out.sort(key=lambda x: x["relative_strength_pct"], reverse=True)
+    return {"leaders": out[:5], "laggards": out[-5:], "all": out}
+
+def v131_opportunity_ranking(limit=20, mode="daily"):
+    items = []
+    universe = V131_RANKING_UNIVERSE[:80]
+    benchmark = "QQQ"
+    for sym in universe:
+        try:
+            res = v131_analyze_symbol(sym)
+            rs = v131_relative_strength(sym, benchmark, "3mo") or {}
+            mtf = v131_mtf_consensus(sym)
+            quality = res["score"] + (rs.get("relative_strength_pct", 0) * 0.35) + (mtf.get("consensus_score", 0) * 0.10)
+            if mode == "intraday":
+                quality += 3 if res["strategy"] in ("MOMENTUM", "VWAP_RECLAIM") else 0
+            if mode == "swing":
+                quality += 3 if res["strategy"] in ("CORE_TREND", "PULLBACK") else 0
+            items.append({
+                "symbol": sym, "score": res["score"], "quality_score": round(quality, 2), "decision": res["decision"],
+                "strategy": res["strategy"], "relative_strength_pct": rs.get("relative_strength_pct"),
+                "mtf_consensus_score": mtf.get("consensus_score")
+            })
+        except Exception as e:
+            continue
+    items.sort(key=lambda x: x["quality_score"], reverse=True)
+    put_items = sorted(items, key=lambda x: x["quality_score"])
+    return {"mode": mode, "top": items[:int(limit)], "weakest": put_items[:5], "universe_count": len(universe), "generated_at": now_text()}
+
+def v131_parse_portfolio_positions():
+    raw = os.getenv("PORTFOLIO_POSITIONS", "")
+    # Format: NVDA:10,TSLA:5,QQQ:20 or JSON {"NVDA":10}
+    positions = {}
+    try:
+        if raw.strip().startswith("{"):
+            obj = json.loads(raw)
+            return {str(k).upper(): float(v) for k, v in obj.items()}
+    except Exception:
+        pass
+    for part in raw.split(","):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            try:
+                positions[k.strip().upper()] = float(v.strip())
+            except Exception:
+                pass
+    return positions
+
+def v131_correlation_matrix(symbols=None, period="6mo"):
+    symbols = symbols or list(v131_parse_portfolio_positions().keys()) or V131_RANKING_UNIVERSE[:8]
+    series = {}
+    for sym in symbols[:20]:
+        try:
+            data = yf.Ticker(sym).history(period=period, interval="1d", auto_adjust=False)
+            if data is not None and not data.empty:
+                close = data["Close"].dropna()
+                rets = close.pct_change().dropna()
+                series[sym] = rets
+        except Exception:
+            pass
+    matrix = {}
+    keys = list(series.keys())
+    for a in keys:
+        matrix[a] = {}
+        for b in keys:
+            try:
+                joined = series[a].align(series[b], join="inner")
+                corr = joined[0].corr(joined[1])
+                matrix[a][b] = round(float(corr), 3) if corr == corr else None
+            except Exception:
+                matrix[a][b] = None
+    return {"symbols": keys, "correlation_matrix": matrix}
+
+def v131_position_sizing(symbol, account_size=None, risk_pct=None):
+    account_size = float(account_size or V131_ACCOUNT_SIZE)
+    risk_pct = float(risk_pct or V131_RISK_PER_TRADE_PCT)
+    try:
+        asset = normalize_asset(symbol)
+        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+        atr = calc_atr(highs, lows, closes) or (safe_float(quote.get("close")) * 0.02)
+        price = safe_float(quote.get("close"))
+        risk_dollars = account_size * (risk_pct/100)
+        stop_distance = atr * 1.2 if atr else price * 0.02
+        shares = int(risk_dollars / stop_distance) if stop_distance else 0
+        notional = shares * price if price else 0
+        return {"symbol": symbol.upper(), "account_size": account_size, "risk_pct": risk_pct, "risk_dollars": round(risk_dollars, 2), "price": price, "atr": atr, "stop_distance": stop_distance, "suggested_shares": shares, "notional": round(notional, 2), "portfolio_pct": round(notional/account_size*100, 2) if account_size else 0}
     except Exception as e:
-        ex = {"error": str(e)[:160]}
-    base_score = ex.get("final_score") if isinstance(ex, dict) else 50
-    decision = ex.get("decision", "WAIT") if isinstance(ex, dict) else "WAIT"
-    side = "CALL" if "CALL" in decision else "PUT" if "PUT" in decision else v13_side_from_signal(decision, base_score)
-    regime = (ex.get("regime") or {}).get("label") if isinstance(ex, dict) and isinstance(ex.get("regime"), dict) else None
-    mtf = v13_mtf_consensus(sym)
-    rs = v13_relative_strength_score(sym)
-    breadth = v13_safe_breadth_summary()
-    adaptive = v13_adaptive_score(sym, base_score, side, regime, breadth, rs, mtf)
-    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
-    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
-    return {"version": "V13 Signal Quality Snapshot", "symbol": sym, "side": side, "base_explainable_score": base_score, "adaptive_score": adaptive, "false_signal_risk": false_risk, "signal_quality_score": quality, "mtf_consensus": mtf, "relative_strength_score": rs, "breadth_regime": breadth, "source_explainable_score": ex}
+        return {"symbol": symbol.upper(), "error": str(e)}
 
+def v131_portfolio_heat():
+    positions = v131_parse_portfolio_positions()
+    if not positions:
+        return {"configured": False, "message": "Set PORTFOLIO_POSITIONS as NVDA:10,TSLA:5,QQQ:20 to enable portfolio heat."}
+    details = []
+    total_value = 0.0
+    for sym, qty in positions.items():
+        price = v131_current_price(sym) or 0
+        value = price * qty
+        total_value += value
+        details.append({"symbol": sym, "qty": qty, "price": price, "value": value})
+    for d in details:
+        d["weight_pct"] = round(d["value"]/total_value*100, 2) if total_value else 0
+    concentration = max([d["weight_pct"] for d in details], default=0)
+    heat = "HIGH" if concentration > 35 else ("MEDIUM" if concentration > 20 else "LOW")
+    corr = v131_correlation_matrix(list(positions.keys()))
+    return {"configured": True, "total_value": round(total_value, 2), "concentration_max_pct": concentration, "portfolio_heat": heat, "positions": details, "correlation": corr}
 
-def v13_dashboard():
-    horizon = request.args.get("horizon", "5d") if "request" in globals() else "5d"
-    winrate = v13_winrate_stats(None, horizon)
-    false_signals = v13_false_signal_detector(horizon)
-    leaderboard = v13_strategy_leaderboard(horizon)
-    rs = v13_rs_ranking(10)
+def v131_performance_dashboard():
+    v131_update_audit_results()
+    winrate = v131_historical_winrate(horizon="5d")
+    false_signals = v131_false_signal_detector(horizon="5d")
+    leaderboard = v131_strategy_leaderboard(horizon="5d")
+    internals = v131_market_internals()
+    rotation = v131_sector_rotation()
+    ranking_daily = v131_opportunity_ranking(20, "daily")
+    ranking_intraday = v131_opportunity_ranking(5, "intraday")
+    ranking_swing = v131_opportunity_ranking(5, "swing")
+    portfolio = v131_portfolio_heat()
     return {
-        "version": "V13 Signal Quality Layer Free 100%",
+        "version": "V13.1 Signal Quality + Institutional Analytics Free 100%",
         "time": now_text(),
-        "executive_summary": {
-            "closed_signals": winrate.get("closed_signals"),
-            "win_rate_pct": winrate.get("win_rate_pct"),
-            "avg_return_pct": winrate.get("avg_return_pct"),
-            "best_strategy": (leaderboard.get("leaderboard") or [{}])[0],
-            "highest_false_signal_pattern": (false_signals.get("high_risk_patterns") or [{}])[0],
-            "top_relative_strength": (rs.get("ranking") or [{}])[:5]
+        "performance": winrate["overall"],
+        "strategy_leaderboard": leaderboard["leaderboard"][:10],
+        "false_signal_detector": false_signals["top_false_signal_patterns"][:10],
+        "institutional_internals": internals,
+        "sector_rotation": {"leaders": rotation["leaders"], "laggards": rotation["laggards"]},
+        "opportunity_ranking": {
+            "top_20_daily": ranking_daily["top"],
+            "top_5_intraday": ranking_intraday["top"],
+            "top_5_swing": ranking_swing["top"]
         },
-        "winrate": winrate,
-        "strategy_leaderboard": leaderboard,
-        "false_signal_detector": false_signals,
-        "relative_strength_ranking": rs,
-        "routes": ["/v13/status", "/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
+        "portfolio_engine": portfolio,
+        "note": "Win-rate/expectancy becomes meaningful only after enough real signals are audited over time."
     }
 
-
-@app.route("/v13/status", methods=["GET"])
-def v13_status_route():
+@app.route("/v13-1/status", methods=["GET"])
+def v131_status_route():
     return jsonify({
-        "version": "V13 Signal Quality Layer Free 100%",
-        "enabled": V13_ENABLED,
-        "bugfixes": {
-            "us_session_start_th": US_SESSION_START_TH,
-            "us_session_end_th": US_SESSION_END_TH,
-            "us_allow_premarket_alerts": US_ALLOW_PREMARKET_ALERTS,
-            "premarket_reminder_enabled": ENABLE_PREMARKET_REMINDER,
-            "premarket_reminder_th": PREMARKET_REMINDER_TH,
-            "top5_daily_time_th": TOP5_DAILY_TIME_TH,
-            "intuch_alias": DELISTED_SYMBOL_ALIASES.get("INTUCH")
-        },
-        "modules": ["Signal Audit Engine", "Historical Win Rate Engine", "False Signal Detector", "Adaptive Scoring", "Multi-Timeframe Consensus", "Relative Strength Ranking", "Strategy Leaderboard", "Signal Quality Dashboard"],
-        "routes": ["/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
+        "version": "V13.1 Signal Quality + Institutional Analytics Free 100%",
+        "enabled": V131_ENABLED,
+        "modules": [
+            "Signal Audit Engine", "Historical Win Rate", "Expectancy", "False Signal Detector",
+            "Strategy Leaderboard", "VIX/DXY/TNX Internals", "Market Breadth", "Sector Rotation",
+            "Top 20 Daily", "Top 5 Intraday", "Top 5 Swing", "Correlation Matrix",
+            "Position Sizing", "Portfolio Heat", "Performance Dashboard"
+        ],
+        "routes": [
+            "/v13-1/dashboard", "/v13-1/audit", "/v13-1/winrate", "/v13-1/false-signals",
+            "/v13-1/leaderboard", "/v13-1/internals", "/v13-1/sector-rotation",
+            "/v13-1/ranking/daily", "/v13-1/ranking/intraday", "/v13-1/ranking/swing",
+            "/v13-1/correlation", "/v13-1/position-size/<symbol>", "/v13-1/portfolio-heat",
+            "/v13-1/mtf/<symbol>", "/v13-1/rs/<symbol>"
+        ]
     })
 
+@app.route("/v13-1/dashboard", methods=["GET"])
+def v131_dashboard_route():
+    return jsonify(v131_performance_dashboard())
 
-@app.route("/v13/dashboard", methods=["GET"])
-def v13_dashboard_route():
-    return jsonify(v13_dashboard())
+@app.route("/v13-1/audit", methods=["GET"])
+def v131_audit_route():
+    limit = int(request.args.get("limit", "100"))
+    v131_update_audit_results()
+    rows = v131_get_audit_rows(limit)
+    return jsonify({"count": len(rows), "rows": [dict(r) for r in rows]})
 
+@app.route("/v13-1/winrate", methods=["GET"])
+def v131_winrate_route():
+    return jsonify(v131_historical_winrate(request.args.get("symbol"), request.args.get("strategy"), request.args.get("horizon", "5d")))
 
-@app.route("/v13/audit", methods=["GET"])
-def v13_audit_route():
-    v13_update_audit_results()
-    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit ORDER BY id DESC LIMIT 100").fetchall(); conn.close()
-    return jsonify({"version": "V13 Signal Audit Engine", "count": len(rows), "latest": [dict(r) for r in rows]})
+@app.route("/v13-1/false-signals", methods=["GET"])
+def v131_false_signals_route():
+    return jsonify(v131_false_signal_detector(request.args.get("horizon", "5d")))
 
+@app.route("/v13-1/leaderboard", methods=["GET"])
+def v131_leaderboard_route():
+    return jsonify(v131_strategy_leaderboard(request.args.get("horizon", "5d")))
 
-@app.route("/v13/winrate", methods=["GET"])
-def v13_winrate_route():
-    return jsonify(v13_winrate_stats(request.args.get("symbol"), request.args.get("horizon", "5d")))
+@app.route("/v13-1/internals", methods=["GET"])
+def v131_internals_route():
+    return jsonify(v131_market_internals())
 
+@app.route("/v13-1/sector-rotation", methods=["GET"])
+def v131_sector_rotation_route():
+    return jsonify(v131_sector_rotation())
 
-@app.route("/v13/false-signals", methods=["GET"])
-def v13_false_signals_route():
-    return jsonify(v13_false_signal_detector(request.args.get("horizon", "5d")))
+@app.route("/v13-1/ranking/<mode>", methods=["GET"])
+def v131_ranking_route(mode):
+    limit = int(request.args.get("limit", "20" if mode == "daily" else "5"))
+    return jsonify(v131_opportunity_ranking(limit, mode))
 
+@app.route("/v13-1/correlation", methods=["GET"])
+def v131_correlation_route():
+    symbols = request.args.get("symbols", "")
+    symbols = [x.strip().upper() for x in symbols.split(",") if x.strip()] if symbols else None
+    return jsonify(v131_correlation_matrix(symbols))
 
-@app.route("/v13/adaptive/<symbol>", methods=["GET"])
-def v13_adaptive_route(symbol):
-    return jsonify(v13_quality_snapshot(symbol))
+@app.route("/v13-1/position-size/<symbol>", methods=["GET"])
+def v131_position_size_route(symbol):
+    return jsonify(v131_position_sizing(symbol, request.args.get("account"), request.args.get("risk_pct")))
 
+@app.route("/v13-1/portfolio-heat", methods=["GET"])
+def v131_portfolio_heat_route():
+    return jsonify(v131_portfolio_heat())
 
-@app.route("/v13/mtf/<symbol>", methods=["GET"])
-def v13_mtf_route(symbol):
-    return jsonify(v13_mtf_consensus(symbol))
+@app.route("/v13-1/mtf/<symbol>", methods=["GET"])
+def v131_mtf_route(symbol):
+    return jsonify(v131_mtf_consensus(symbol))
 
+@app.route("/v13-1/rs/<symbol>", methods=["GET"])
+def v131_rs_route(symbol):
+    return jsonify(v131_relative_strength(symbol.upper(), request.args.get("benchmark", "QQQ")) or {"error": "no data"})
 
-@app.route("/v13/rs-ranking", methods=["GET"])
-def v13_rs_ranking_route():
-    return jsonify(v13_rs_ranking(request.args.get("limit")))
+@app.route("/v13-1/analyze/<symbol>", methods=["GET"])
+def v131_analyze_route(symbol):
+    return jsonify(v131_analyze_symbol(symbol))
 
-
-@app.route("/v13/leaderboard", methods=["GET"])
-def v13_leaderboard_route():
-    return jsonify(v13_strategy_leaderboard(request.args.get("horizon", "5d")))
 
 init_db()
+v131_init_db()
 v10_init_db()
 v11_init_db()
-v13_init_db()
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
