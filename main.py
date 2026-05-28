@@ -7437,6 +7437,324 @@ def v141_status_route():
         "test_routes": ["/v14/status", "/v14/dashboard", "/v14-1/status", "/v10/options/NVDA", "/v13-1/ranking/daily"]
     })
 
+
+# ============================================================
+# V15 RESEARCH DASHBOARD LAYER - HTML TERMINAL UI
+# ============================================================
+# Purpose: turn the JSON API engine into a readable institutional-style dashboard.
+# No extra dependency. Uses existing V10/V12/V13.1/V14 engines.
+
+V15_VERSION = "V15 Research Dashboard Layer Free 100%"
+
+
+def v15_escape(value):
+    text = "" if value is None else str(value)
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&#39;"))
+
+
+def v15_num(value, digits=2):
+    try:
+        if value is None:
+            return "N/A"
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return v15_escape(value)
+
+
+def v15_pct(value, digits=2):
+    try:
+        if value is None:
+            return "N/A"
+        return f"{float(value):,.{digits}f}%"
+    except Exception:
+        return v15_escape(value)
+
+
+def v15_badge_class(value):
+    text = str(value or "").upper()
+    if any(x in text for x in ["CALL", "BULL", "RISK_ON", "WIN", "STRONG", "LOW", "BUY"]):
+        return "good"
+    if any(x in text for x in ["PUT", "BEAR", "RISK_OFF", "LOSS", "HIGH", "SELL"]):
+        return "bad"
+    if any(x in text for x in ["WAIT", "MIXED", "NEUTRAL", "RANGE"]):
+        return "warn"
+    return "neutral"
+
+
+def v15_card(title, value, subtitle="", klass=""):
+    return f"""
+    <div class=\"card {klass}\">
+      <div class=\"card-title\">{v15_escape(title)}</div>
+      <div class=\"card-value\">{v15_escape(value)}</div>
+      <div class=\"card-subtitle\">{v15_escape(subtitle)}</div>
+    </div>
+    """
+
+
+def v15_badge(text):
+    return f"<span class='badge {v15_badge_class(text)}'>{v15_escape(text)}</span>"
+
+
+def v15_table(rows, columns, empty="No data yet"):
+    if not rows:
+        return f"<div class='empty'>{v15_escape(empty)}</div>"
+    head = "".join(f"<th>{v15_escape(label)}</th>" for key, label in columns)
+    body = []
+    for r in rows:
+        tds = []
+        for key, label in columns:
+            val = r.get(key) if isinstance(r, dict) else getattr(r, key, None)
+            if key in {"decision", "strategy", "side", "signal_type", "status", "regime", "breadth_regime"}:
+                cell = v15_badge(val)
+            elif isinstance(val, float):
+                cell = v15_num(val)
+            else:
+                cell = v15_escape(val)
+            tds.append(f"<td>{cell}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def v15_layout(title, body, active="dashboard", refresh=False):
+    refresh_tag = "<meta http-equiv='refresh' content='180'>" if refresh else ""
+    nav = [
+        ("Dashboard", "/v15/dashboard", "dashboard"),
+        ("Ranking", "/v15/ranking", "ranking"),
+        ("Journal", "/v15/journal", "journal"),
+        ("Portfolio", "/v15/portfolio", "portfolio"),
+        ("Correlation", "/v15/correlation", "correlation"),
+        ("Terminal", "/v15", "terminal"),
+    ]
+    links = "".join(
+        f"<a class='nav-link {'active' if active == key else ''}' href='{href}'>{label}</a>"
+        for label, href, key in nav
+    )
+    html = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+<meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+{refresh_tag}
+<title>{v15_escape(title)}</title>
+<style>
+:root {{
+  --bg:#080b12; --panel:#111827; --panel2:#0f172a; --text:#e5e7eb; --muted:#94a3b8;
+  --line:#1f2937; --good:#22c55e; --bad:#ef4444; --warn:#f59e0b; --blue:#38bdf8; --purple:#a78bfa;
+}}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:linear-gradient(180deg,#070a12,#0b1020); color:var(--text); font-family:Arial, Helvetica, sans-serif; }}
+a {{ color:inherit; text-decoration:none; }}
+.header {{ position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:14px 18px; background:rgba(8,11,18,.92); border-bottom:1px solid var(--line); backdrop-filter: blur(8px); }}
+.brand {{ display:flex; gap:12px; align-items:center; }}
+.logo {{ width:36px; height:36px; border-radius:12px; background:linear-gradient(135deg,var(--blue),var(--purple)); display:flex; align-items:center; justify-content:center; font-weight:800; }}
+.brand h1 {{ font-size:17px; margin:0; }}
+.brand p {{ font-size:12px; margin:2px 0 0; color:var(--muted); }}
+.nav {{ display:flex; gap:8px; flex-wrap:wrap; }}
+.nav-link {{ padding:8px 10px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:13px; }}
+.nav-link.active, .nav-link:hover {{ color:white; border-color:#334155; background:#111827; }}
+.container {{ max-width:1280px; margin:0 auto; padding:18px; }}
+.grid {{ display:grid; gap:14px; }}
+.grid-4 {{ grid-template-columns:repeat(4,minmax(0,1fr)); }}
+.grid-3 {{ grid-template-columns:repeat(3,minmax(0,1fr)); }}
+.grid-2 {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+.card {{ background:linear-gradient(180deg,var(--panel),var(--panel2)); border:1px solid var(--line); border-radius:18px; padding:16px; box-shadow:0 16px 40px rgba(0,0,0,.22); }}
+.card-title {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }}
+.card-value {{ font-size:25px; font-weight:800; margin-top:8px; }}
+.card-subtitle {{ color:var(--muted); font-size:12px; margin-top:6px; line-height:1.35; }}
+.section {{ margin-top:16px; background:rgba(17,24,39,.66); border:1px solid var(--line); border-radius:18px; overflow:hidden; }}
+.section h2 {{ margin:0; padding:14px 16px; border-bottom:1px solid var(--line); font-size:16px; }}
+.section-body {{ padding:14px; overflow:auto; }}
+table {{ width:100%; border-collapse:collapse; min-width:760px; }}
+th,td {{ padding:10px 9px; text-align:left; border-bottom:1px solid #1e293b; font-size:13px; vertical-align:top; }}
+th {{ color:#cbd5e1; font-size:12px; text-transform:uppercase; letter-spacing:.04em; background:#0b1220; position:sticky; top:0; }}
+.badge {{ display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid #334155; }}
+.badge.good {{ color:#86efac; background:rgba(34,197,94,.11); border-color:rgba(34,197,94,.35); }}
+.badge.bad {{ color:#fecaca; background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.35); }}
+.badge.warn {{ color:#fde68a; background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.35); }}
+.badge.neutral {{ color:#cbd5e1; background:rgba(148,163,184,.10); }}
+.empty {{ color:var(--muted); padding:20px; border:1px dashed #334155; border-radius:14px; }}
+.actions {{ display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 0; }}
+.button {{ background:#172554; border:1px solid #1d4ed8; color:#bfdbfe; padding:8px 11px; border-radius:10px; font-size:13px; }}
+.code {{ font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color:#d1d5db; background:#020617; border:1px solid var(--line); border-radius:12px; padding:12px; overflow:auto; white-space:pre-wrap; }}
+.footer {{ color:var(--muted); font-size:12px; text-align:center; padding:22px; }}
+@media(max-width:900px) {{ .grid-4,.grid-3,.grid-2 {{ grid-template-columns:1fr; }} .header {{ align-items:flex-start; flex-direction:column; gap:12px; }} table {{ min-width:680px; }} }}
+</style>
+</head>
+<body>
+<div class=\"header\">
+  <div class=\"brand\"><div class=\"logo\">V15</div><div><h1>Research Dashboard Terminal</h1><p>{v15_escape(V15_VERSION)} · {v15_escape(now_text())}</p></div></div>
+  <div class=\"nav\">{links}</div>
+</div>
+<div class=\"container\">{body}</div>
+<div class=\"footer\">Free data stack. Not investment advice. Use as research cockpit only.</div>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
+
+
+def v15_safe_call(fn, default=None):
+    try:
+        return fn()
+    except Exception as e:
+        return default if default is not None else {"error": str(e)[:300]}
+
+
+def v15_get_status_snapshot():
+    return {
+        "v14": v15_safe_call(lambda: v14_dashboard(), {}),
+        "v131": v15_safe_call(lambda: v131_performance_dashboard(), {}),
+        "internals": v15_safe_call(lambda: v131_market_internals(), {}),
+        "ranking_daily": v15_safe_call(lambda: v131_opportunity_ranking(20, "daily"), {}),
+        "ranking_intraday": v15_safe_call(lambda: v131_opportunity_ranking(5, "intraday"), {}),
+        "ranking_swing": v15_safe_call(lambda: v131_opportunity_ranking(5, "swing"), {}),
+        "portfolio_heat": v15_safe_call(lambda: v131_portfolio_heat(), {}),
+    }
+
+
+def v15_dashboard_body():
+    snap = v15_get_status_snapshot()
+    exp = v15_safe_call(lambda: v14_expectancy(horizon=request.args.get("horizon", "5d")), {})
+    overall = exp.get("overall", {}) if isinstance(exp, dict) else {}
+    internals = snap.get("internals", {}) or {}
+    breadth = internals.get("market_breadth") or internals.get("breadth") or {}
+    macro = internals.get("macro", {}) or internals.get("macro_proxies", {}) or {}
+    ranking = (snap.get("ranking_daily", {}) or {}).get("top") or (snap.get("ranking_daily", {}) or {}).get("ranking") or []
+    leaderboard = v15_safe_call(lambda: v14_leaderboard(request.args.get("horizon", "5d")), {}).get("leaderboard", [])
+
+    cards = "<div class='grid grid-4'>"
+    cards += v15_card("Win Rate", v15_pct(overall.get("win_rate")), f"Signals evaluated: {overall.get('signals_evaluated', 0)}")
+    cards += v15_card("Expectancy", v15_pct(overall.get("expectancy_pct")), f"Profit Factor: {v15_num(overall.get('profit_factor'))}")
+    cards += v15_card("Market Breadth", breadth.get("breadth_regime") or breadth.get("regime") or "N/A", f"Score: {breadth.get('breadth_score', 'N/A')}")
+    cards += v15_card("Top Daily", (ranking[0].get("symbol") if ranking else "N/A"), f"Quality: {(ranking[0].get('quality_score') if ranking else 'N/A')}")
+    cards += "</div>"
+
+    body = cards
+    body += "<div class='actions'><a class='button' href='/v15/ranking'>Open Ranking</a><a class='button' href='/v15/journal'>Open Journal</a><a class='button' href='/v15/portfolio'>Open Portfolio</a><a class='button' href='/v15/correlation'>Open Correlation</a><a class='button' href='/v14/update-outcomes'>Update Outcomes</a></div>"
+    body += "<div class='grid grid-2'>"
+    body += "<div class='section'><h2>Top 20 Daily Opportunities</h2><div class='section-body'>" + v15_table(ranking[:20], [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality"),("score","Score"),("strategy","Strategy"),("relative_strength_pct","RS %"),("mtf_consensus_score","MTF")], "No ranking data") + "</div></div>"
+    body += "<div class='section'><h2>Strategy Leaderboard</h2><div class='section-body'>" + v15_table(leaderboard[:15], [("strategy","Strategy"),("signals_evaluated","Signals"),("win_rate","Win Rate"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss"),("profit_factor","PF"),("expectancy_pct","Expectancy")], "No strategy results yet") + "</div></div>"
+    body += "</div>"
+    body += "<div class='section'><h2>Market Internals Snapshot</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(internals, ensure_ascii=False, indent=2)[:6000]) + "</div></div></div>"
+    return body
+
+
+def v15_ranking_body():
+    mode = request.args.get("mode", "daily")
+    data = v15_safe_call(lambda: v131_opportunity_ranking(20 if mode == "daily" else 5, mode), {})
+    rows = data.get("top") or data.get("ranking") or []
+    body = "<div class='grid grid-3'>"
+    for m in ["daily", "intraday", "swing"]:
+        body += v15_card(f"{m.title()} Ranking", "Open", f"/v15/ranking?mode={m}")
+    body += "</div>"
+    body += f"<div class='actions'><a class='button' href='/v15/ranking?mode=daily'>Daily</a><a class='button' href='/v15/ranking?mode=intraday'>Intraday</a><a class='button' href='/v15/ranking?mode=swing'>Swing</a></div>"
+    body += f"<div class='section'><h2>Opportunity Ranking · {v15_escape(mode)}</h2><div class='section-body'>"
+    body += v15_table(rows, [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality"),("score","Base Score"),("strategy","Strategy"),("relative_strength_pct","Relative Strength"),("mtf_consensus_score","MTF"),("regime","Regime")], "No opportunity ranking available")
+    body += "</div></div>"
+    return body
+
+
+def v15_journal_body():
+    v15_safe_call(lambda: v14_update_outcomes(), {})
+    exp = v15_safe_call(lambda: v14_expectancy(horizon=request.args.get("horizon", "5d")), {})
+    overall = exp.get("overall", {}) if isinstance(exp, dict) else {}
+    rows = v15_safe_call(lambda: v14_get_journal_rows(limit=300), []) or []
+    rows = [dict(r) for r in rows]
+    body = "<div class='grid grid-4'>"
+    body += v15_card("Signals Evaluated", overall.get("signals_evaluated", 0), "Closed journal rows")
+    body += v15_card("Win Rate", v15_pct(overall.get("win_rate")), "Selected horizon")
+    body += v15_card("Profit Factor", v15_num(overall.get("profit_factor")), "Avg win / Avg loss")
+    body += v15_card("Expectancy", v15_pct(overall.get("expectancy_pct")), "Expected return per signal")
+    body += "</div>"
+    body += "<div class='actions'><a class='button' href='/v14/journal/log/NVDA?side=CALL&entry=212&strategy=MOMENTUM'>Test Log NVDA</a><a class='button' href='/v14/update-outcomes'>Update Outcomes</a><a class='button' href='/v14/expectancy'>Raw Expectancy JSON</a></div>"
+    body += "<div class='section'><h2>Trade Journal</h2><div class='section-body'>"
+    body += v15_table(rows[:100], [("created_at","Created"),("symbol","Symbol"),("side","Side"),("strategy","Strategy"),("entry_price","Entry"),("score","Score"),("status","Status"),("return_5d","Return 5D"),("result_5d","Result 5D")], "No journal rows yet. Run /v14/backfill or wait for new alerts.")
+    body += "</div></div>"
+    return body
+
+
+def v15_portfolio_body():
+    heat = v15_safe_call(lambda: v131_portfolio_heat(), {})
+    sizing_symbol = request.args.get("symbol", "NVDA")
+    sizing = v15_safe_call(lambda: v131_position_sizing(sizing_symbol), {})
+    body = "<div class='grid grid-3'>"
+    body += v15_card("Portfolio Heat", heat.get("portfolio_heat", heat.get("message", "N/A")), "Set PORTFOLIO_POSITIONS=NVDA:10,TSLA:5,QQQ:20")
+    body += v15_card("Sizing Symbol", sizing.get("symbol", sizing_symbol), f"Suggested shares: {sizing.get('suggested_shares', 'N/A')}")
+    body += v15_card("Risk Dollars", v15_num(sizing.get("risk_dollars")), f"Account: {v15_num(sizing.get('account_size'))}")
+    body += "</div>"
+    body += "<div class='section'><h2>Portfolio Heat Details</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(heat, ensure_ascii=False, indent=2)[:6000]) + "</div></div></div>"
+    body += "<div class='section'><h2>Position Sizing</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(sizing, ensure_ascii=False, indent=2)[:4000]) + "</div></div></div>"
+    return body
+
+
+def v15_correlation_body():
+    corr = v15_safe_call(lambda: v131_correlation_matrix(), {})
+    symbols = corr.get("symbols") or []
+    matrix = corr.get("correlation_matrix") or corr.get("matrix") or {}
+    rows = []
+    for s in symbols:
+        row = {"symbol": s}
+        vals = matrix.get(s, {}) if isinstance(matrix, dict) else {}
+        for t in symbols:
+            row[t] = vals.get(t)
+        rows.append(row)
+    columns = [("symbol","Symbol")] + [(s, s) for s in symbols]
+    body = "<div class='section'><h2>Correlation Matrix</h2><div class='section-body'>"
+    body += v15_table(rows, columns, "No correlation data available")
+    body += "</div></div>"
+    body += "<div class='section'><h2>Raw Correlation Data</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(corr, ensure_ascii=False, indent=2)[:5000]) + "</div></div></div>"
+    return body
+
+
+@app.route("/v15/status", methods=["GET"])
+def v15_status_route():
+    return jsonify({
+        "version": V15_VERSION,
+        "enabled": True,
+        "purpose": "HTML dashboard layer over existing V13.1/V14 research engines",
+        "modules": ["Executive Dashboard", "Opportunity Ranking Table", "Trade Journal UI", "Portfolio Heat UI", "Correlation Matrix UI", "Research Terminal"],
+        "routes": ["/v15", "/v15/dashboard", "/v15/ranking", "/v15/journal", "/v15/portfolio", "/v15/correlation", "/v15/api/snapshot"]
+    })
+
+
+@app.route("/v15", methods=["GET"])
+def v15_terminal_route():
+    return v15_layout("V15 Research Terminal", v15_dashboard_body(), active="terminal", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/dashboard", methods=["GET"])
+def v15_dashboard_route():
+    return v15_layout("V15 Dashboard", v15_dashboard_body(), active="dashboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/ranking", methods=["GET"])
+def v15_ranking_route():
+    return v15_layout("V15 Opportunity Ranking", v15_ranking_body(), active="ranking", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/journal", methods=["GET"])
+def v15_journal_route():
+    return v15_layout("V15 Trade Journal", v15_journal_body(), active="journal", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/portfolio", methods=["GET"])
+def v15_portfolio_route():
+    return v15_layout("V15 Portfolio", v15_portfolio_body(), active="portfolio", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/correlation", methods=["GET"])
+def v15_correlation_route():
+    return v15_layout("V15 Correlation", v15_correlation_body(), active="correlation", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v15/api/snapshot", methods=["GET"])
+def v15_api_snapshot_route():
+    return jsonify(v15_get_status_snapshot())
+
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
