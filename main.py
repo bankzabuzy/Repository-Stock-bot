@@ -8072,6 +8072,583 @@ def v16_portfolio_route():
 def v16_api_snapshot_route():
     return jsonify(v16_snapshot())
 
+
+# ============================================================
+# V17 TRUE INSTITUTIONAL RESEARCH & PORTFOLIO TERMINAL
+# ============================================================
+V17_VERSION = "V17 True Institutional Research & Portfolio Terminal Free 100%"
+V17_MIN_SAMPLE = int(os.getenv("V17_MIN_SAMPLE", os.getenv("V14_MIN_SAMPLE", "10")))
+V17_DEFAULT_HORIZON = os.getenv("V17_DEFAULT_HORIZON", "5d")
+
+
+def v17_safe(fn, default=None):
+    try:
+        return fn()
+    except Exception as e:
+        return default if default is not None else {"error": str(e)[:300]}
+
+
+def v17_clamp(value, low=0, high=100):
+    try:
+        return max(low, min(high, float(value)))
+    except Exception:
+        return low
+
+
+def v17_round(value, n=2):
+    try:
+        return round(float(value), n)
+    except Exception:
+        return value
+
+
+def v17_get_closed_rows(horizon=None, limit=5000):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    try:
+        if "v14_update_outcomes" in globals():
+            v14_update_outcomes()
+        rows = v14_get_journal_rows(limit=limit) if "v14_get_journal_rows" in globals() else []
+        return [dict(r) for r in rows if r[f"return_{horizon}"] is not None]
+    except Exception:
+        return []
+
+
+def v17_pnl_for_row(row, horizon=None):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    ret = safe_float(row.get(f"return_{horizon}"), None)
+    if ret is None:
+        return None
+    result = str(row.get(f"result_{horizon}") or "").upper()
+    # Underlying return is inverted for PUT winners/losses. Convert to signal PnL sign.
+    if result == "WIN":
+        return abs(ret)
+    if result == "LOSS":
+        return -abs(ret)
+    return ret
+
+
+def v17_performance_metrics(rows=None, horizon=None):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    rows = rows if rows is not None else v17_get_closed_rows(horizon)
+    pnls = [v17_pnl_for_row(r, horizon) for r in rows]
+    pnls = [p for p in pnls if p is not None]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    n = len(pnls)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    win_rate = len(wins) / n * 100 if n else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    profit_factor = gross_win / gross_loss if gross_loss else (999 if gross_win > 0 else 0)
+    p_win = win_rate / 100.0
+    expectancy = p_win * avg_win - (1 - p_win) * abs(avg_loss)
+    return {
+        "signals_evaluated": n,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": round(win_rate, 2),
+        "avg_win_pct": round(avg_win, 3),
+        "avg_loss_pct": round(avg_loss, 3),
+        "profit_factor": round(profit_factor, 3) if profit_factor != 999 else 999,
+        "expectancy_pct": round(expectancy, 3),
+        "sample_quality": "LOW" if n < V17_MIN_SAMPLE else "OK",
+        "sample_warning": f"Need at least {V17_MIN_SAMPLE} closed outcomes" if n < V17_MIN_SAMPLE else "",
+    }
+
+
+def v17_equity_curve(horizon=None, starting_equity=100.0):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    rows = v17_get_closed_rows(horizon)
+    rows.sort(key=lambda r: safe_float(r.get("created_ts"), 0))
+    equity = float(starting_equity)
+    curve = []
+    peak = equity
+    max_dd = 0.0
+    for r in rows:
+        pnl_pct = v17_pnl_for_row(r, horizon)
+        if pnl_pct is None:
+            continue
+        equity *= (1 + pnl_pct / 100.0)
+        peak = max(peak, equity)
+        dd = (equity - peak) / peak * 100.0 if peak else 0.0
+        max_dd = min(max_dd, dd)
+        curve.append({
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "symbol": r.get("symbol"),
+            "strategy": r.get("strategy"),
+            "pnl_pct": round(pnl_pct, 3),
+            "equity": round(equity, 3),
+            "drawdown_pct": round(dd, 3),
+        })
+    total_return = (equity - starting_equity) / starting_equity * 100.0 if starting_equity else 0.0
+    return {"horizon": horizon, "starting_equity": starting_equity, "ending_equity": round(equity, 3), "total_return_pct": round(total_return, 3), "max_drawdown_pct": round(max_dd, 3), "points": curve[-200:]}
+
+
+def v17_drawdown_analytics(horizon=None):
+    curve = v17_equity_curve(horizon)
+    points = curve.get("points", [])
+    dds = [safe_float(p.get("drawdown_pct"), 0) for p in points]
+    return {
+        "horizon": curve.get("horizon"),
+        "max_drawdown_pct": curve.get("max_drawdown_pct"),
+        "current_drawdown_pct": round(dds[-1], 3) if dds else 0,
+        "worst_5_drawdowns": sorted(dds)[:5],
+        "ending_equity": curve.get("ending_equity"),
+        "total_return_pct": curve.get("total_return_pct"),
+    }
+
+
+def v17_kelly_sizing(strategy=None, horizon=None):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    rows = v17_get_closed_rows(horizon)
+    if strategy:
+        rows = [r for r in rows if str(r.get("strategy") or "").upper() == str(strategy).upper()]
+    m = v17_performance_metrics(rows, horizon)
+    p = safe_float(m.get("win_rate_pct"), 0) / 100.0
+    avg_win = abs(safe_float(m.get("avg_win_pct"), 0))
+    avg_loss = abs(safe_float(m.get("avg_loss_pct"), 0))
+    b = avg_win / avg_loss if avg_loss else 0
+    if b <= 0 or m.get("signals_evaluated", 0) < V17_MIN_SAMPLE:
+        kelly = 0.0
+        note = "Insufficient sample or no loss data; use minimum risk only."
+    else:
+        kelly = p - (1 - p) / b
+        note = "Use fractional Kelly only; cap hard to avoid overbetting."
+    half_kelly = max(0.0, min(0.10, kelly / 2.0))
+    quarter_kelly = max(0.0, min(0.05, kelly / 4.0))
+    return {"strategy": strategy or "ALL", "horizon": horizon, "metrics": m, "kelly_fraction": round(kelly, 4), "half_kelly_cap": round(half_kelly, 4), "quarter_kelly_cap": round(quarter_kelly, 4), "note": note}
+
+
+def v17_monte_carlo(horizon=None, trials=500, steps=50):
+    import random
+    horizon = horizon or V17_DEFAULT_HORIZON
+    rows = v17_get_closed_rows(horizon)
+    returns = [v17_pnl_for_row(r, horizon) for r in rows]
+    returns = [r for r in returns if r is not None]
+    if len(returns) < 5:
+        # Conservative fallback, not a claim of real edge.
+        returns = [0.6, -0.5, 0.8, -0.7, 1.0, -0.6, 0.4, -0.4]
+        sample_note = "fallback synthetic small-return set; collect journal outcomes for real Monte Carlo"
+    else:
+        sample_note = "bootstrap from closed journal outcomes"
+    finals = []
+    maxdds = []
+    for _ in range(int(trials)):
+        equity = 100.0
+        peak = 100.0
+        maxdd = 0.0
+        for _ in range(int(steps)):
+            r = random.choice(returns)
+            equity *= (1 + r / 100.0)
+            peak = max(peak, equity)
+            dd = (equity - peak) / peak * 100.0
+            maxdd = min(maxdd, dd)
+        finals.append(equity)
+        maxdds.append(maxdd)
+    finals.sort(); maxdds.sort()
+    def pct(arr, q):
+        if not arr:
+            return None
+        idx = max(0, min(len(arr)-1, int(len(arr)*q)))
+        return round(arr[idx], 3)
+    return {
+        "horizon": horizon,
+        "trials": int(trials),
+        "steps": int(steps),
+        "sample_size": len(returns),
+        "sample_note": sample_note,
+        "ending_equity_p10": pct(finals, 0.10),
+        "ending_equity_p50": pct(finals, 0.50),
+        "ending_equity_p90": pct(finals, 0.90),
+        "max_drawdown_p10": pct(maxdds, 0.10),
+        "max_drawdown_p50": pct(maxdds, 0.50),
+    }
+
+
+def v17_quality_distribution(rows=None):
+    rows = rows if rows is not None else v17_opportunity_ranking(50, "daily").get("top", [])
+    bins = {"90-100": 0, "80-89": 0, "70-79": 0, "60-69": 0, "0-59": 0}
+    for r in rows:
+        q = safe_float(r.get("quality_score"), 0)
+        if q >= 90:
+            bins["90-100"] += 1
+        elif q >= 80:
+            bins["80-89"] += 1
+        elif q >= 70:
+            bins["70-79"] += 1
+        elif q >= 60:
+            bins["60-69"] += 1
+        else:
+            bins["0-59"] += 1
+    return bins
+
+
+def v17_market_context():
+    ctx = v17_safe(lambda: v16_market_context(), {}) if "v16_market_context" in globals() else {}
+    breadth = ctx.get("breadth_score") or v17_get_breadth_score(ctx)
+    regime = ctx.get("regime") or "UNKNOWN"
+    return {**ctx, "breadth_score": breadth, "regime": regime}
+
+
+def v17_get_breadth_score(ctx=None):
+    ctx = ctx or {}
+    b = ctx.get("breadth") or ctx.get("internals", {}).get("breadth") or ctx.get("internals", {}).get("market_breadth") or {}
+    for key in ["breadth_score", "score"]:
+        if isinstance(b, dict) and b.get(key) is not None:
+            return safe_float(b.get(key), 50)
+    return safe_float(ctx.get("breadth_score"), 50)
+
+
+def v17_regime_penalty(row, ctx=None):
+    ctx = ctx or v17_market_context()
+    regime = str(ctx.get("regime") or "UNKNOWN").upper()
+    breadth = safe_float(ctx.get("breadth_score"), 50)
+    decision = str(row.get("decision") or "").upper()
+    strategy = str(row.get("strategy") or "").upper()
+    penalty = 0
+    notes = []
+    if "RISK_OFF" in regime:
+        if "CALL" in decision:
+            penalty -= 22; notes.append("RISK_OFF haircut for long/CALL")
+        if strategy in {"MOMENTUM", "BREAKOUT"}:
+            penalty -= 8; notes.append("Risk-off weakens momentum/breakout")
+        if "PUT" in decision:
+            penalty += 5; notes.append("RISK_OFF supports bearish setups")
+    elif "RISK_ON" in regime:
+        if "PUT" in decision:
+            penalty -= 15; notes.append("RISK_ON haircut for PUT")
+        if "CALL" in decision and strategy in {"MOMENTUM", "CORE_TREND"}:
+            penalty += 3; notes.append("RISK_ON modest support")
+    if breadth < 45 and "CALL" in decision:
+        penalty -= 12; notes.append("Weak breadth haircut")
+    if breadth > 65 and "PUT" in decision:
+        penalty -= 10; notes.append("Strong breadth haircut for PUT")
+    return {"penalty": int(max(-35, min(10, penalty))), "notes": "; ".join(notes) or "No regime haircut"}
+
+
+def v17_strategy_history_modifier(strategy, horizon=None):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    try:
+        mod = v14_strategy_modifier(strategy, horizon) if "v14_strategy_modifier" in globals() else {"modifier": 0, "reason": "No v14"}
+        return {"modifier": int(mod.get("modifier") or 0), "reason": mod.get("reason"), "metrics": mod.get("metrics")}
+    except Exception as e:
+        return {"modifier": 0, "reason": str(e)[:120]}
+
+
+def v17_institutional_score(row, ctx=None):
+    ctx = ctx or v17_market_context()
+    base = safe_float(row.get("score"), 50)
+    rs = safe_float(row.get("relative_strength_pct"), 0)
+    mtf = safe_float(row.get("mtf_consensus_score"), 0)
+    q = safe_float(row.get("quality_score"), base)
+    breadth = safe_float(ctx.get("breadth_score"), 50)
+    regime_score = safe_float(ctx.get("risk_score"), 50)
+    # Normalize RS roughly from -100..+130 into 0..100.
+    rs_norm = v17_clamp(50 + rs / 2.0)
+    trend_norm = v17_clamp(base)
+    mtf_norm = v17_clamp(mtf)
+    volume_norm = v17_clamp(q)
+    breadth_norm = v17_clamp(breadth)
+    regime_norm = v17_clamp(regime_score)
+    score = (trend_norm*0.30 + rs_norm*0.20 + volume_norm*0.15 + mtf_norm*0.15 + breadth_norm*0.10 + regime_norm*0.10)
+    return round(v17_clamp(score), 2)
+
+
+def v17_opportunity_ranking(limit=20, mode="daily"):
+    limit = int(limit or 20)
+    ctx = v17_market_context()
+    raw_data = v17_safe(lambda: v131_opportunity_ranking(max(limit, 40), mode), {}) if "v131_opportunity_ranking" in globals() else {}
+    rows = raw_data.get("top") or raw_data.get("ranking") or []
+    adjusted = []
+    for r in rows:
+        row = dict(r)
+        raw_quality = safe_float(row.get("quality_score"), row.get("score", 50))
+        reg = v17_regime_penalty(row, ctx)
+        hist = v17_strategy_history_modifier(row.get("strategy"), V17_DEFAULT_HORIZON)
+        inst = v17_institutional_score(row, ctx)
+        final_quality = raw_quality + reg.get("penalty", 0) + safe_float(hist.get("modifier"), 0)
+        # Blend with institutional composite so 100s do not dominate blindly.
+        final_quality = final_quality*0.65 + inst*0.35
+        row["raw_quality"] = round(raw_quality, 2)
+        row["regime_penalty"] = reg.get("penalty")
+        row["history_modifier"] = hist.get("modifier")
+        row["regime_filter_notes"] = reg.get("notes")
+        row["institutional_score"] = inst
+        row["quality_score"] = round(v17_clamp(final_quality), 2)
+        # Reclassify decision after final quality.
+        q = row["quality_score"]
+        old_dec = str(row.get("decision") or "").upper()
+        if q >= 82 and "PUT" not in old_dec:
+            row["decision"] = "CALL_WATCH"
+        elif q <= 28:
+            row["decision"] = "PUT_WATCH"
+        elif "PUT" in old_dec and q <= 45:
+            row["decision"] = "PUT_WATCH"
+        else:
+            row["decision"] = "WAIT"
+        adjusted.append(row)
+    adjusted.sort(key=lambda x: safe_float(x.get("quality_score"), 0), reverse=True)
+    return {"version": V17_VERSION, "mode": mode, "context": ctx, "top": adjusted[:limit], "quality_distribution": v17_quality_distribution(adjusted)}
+
+
+def v17_strategy_leaderboard(horizon=None):
+    horizon = horizon or V17_DEFAULT_HORIZON
+    hist = v17_safe(lambda: v14_leaderboard(horizon), {"leaderboard": []}) if "v14_leaderboard" in globals() else {"leaderboard": []}
+    hist_rows = hist.get("leaderboard") or []
+    live = v17_opportunity_ranking(50, "daily").get("top", [])
+    live_map = {}
+    for r in live:
+        st = str(r.get("strategy") or "UNKNOWN").upper()
+        live_map.setdefault(st, {"strategy": st, "live_setups": 0, "avg_quality": 0, "call": 0, "put": 0, "wait": 0, "_sum": 0})
+        live_map[st]["live_setups"] += 1
+        live_map[st]["_sum"] += safe_float(r.get("quality_score"), 0)
+        d = str(r.get("decision") or "").upper()
+        if "CALL" in d: live_map[st]["call"] += 1
+        elif "PUT" in d: live_map[st]["put"] += 1
+        else: live_map[st]["wait"] += 1
+    live_rows = []
+    for v in live_map.values():
+        n = v.get("live_setups") or 1
+        v["avg_quality"] = round(v.pop("_sum")/n, 2)
+        live_rows.append(v)
+    live_rows.sort(key=lambda x: x.get("avg_quality", 0), reverse=True)
+    return {"version": V17_VERSION, "horizon": horizon, "historical_leaderboard": hist_rows, "live_strategy_distribution": live_rows, "note": "Historical leaderboard is real only after closed journal outcomes exist; live distribution is current setup mix."}
+
+
+def v17_sector_rotation():
+    data = v17_safe(lambda: v131_sector_rotation(), {}) if "v131_sector_rotation" in globals() else {}
+    rows = data.get("ranking") or data.get("sectors") or data.get("sector_rotation") or []
+    if isinstance(rows, dict):
+        rows = [{"sector": k, **(v if isinstance(v, dict) else {"value": v})} for k, v in rows.items()]
+    rows = [dict(x) for x in rows] if isinstance(rows, list) else []
+    rows.sort(key=lambda x: safe_float(x.get("relative_strength_pct", x.get("score", x.get("return_pct", 0))), 0), reverse=True)
+    return {"version": V17_VERSION, "top_sectors": rows[:12], "raw": data}
+
+
+def v17_portfolio_positions():
+    raw = os.getenv("PORTFOLIO_POSITIONS", "")
+    positions = []
+    for part in raw.split(","):
+        if not part.strip() or ":" not in part:
+            continue
+        sym, weight = part.split(":", 1)
+        positions.append({"symbol": resolve_delisted_symbol(sym.strip().upper()).replace(".BK", ""), "weight_pct": safe_float(weight, 0)})
+    return positions
+
+
+V17_SECTOR_MAP = {
+    "NVDA":"SEMICONDUCTOR", "AMD":"SEMICONDUCTOR", "AVGO":"SEMICONDUCTOR", "SMCI":"SEMICONDUCTOR", "MU":"SEMICONDUCTOR", "ARM":"SEMICONDUCTOR", "TSM":"SEMICONDUCTOR", "SOXX":"SEMICONDUCTOR", "SMH":"SEMICONDUCTOR",
+    "QQQ":"ETF_TECH", "SPY":"ETF_BROAD", "IWM":"ETF_SMALLCAP", "DIA":"ETF_DOW", "TQQQ":"LEVERAGED_ETF", "SQQQ":"LEVERAGED_ETF", "SOXL":"LEVERAGED_SEMI", "SOXS":"LEVERAGED_SEMI",
+    "AAPL":"MEGA_TECH", "MSFT":"MEGA_TECH", "GOOGL":"MEGA_TECH", "GOOG":"MEGA_TECH", "META":"MEGA_TECH", "AMZN":"MEGA_TECH", "NFLX":"CONSUMER_TECH",
+    "TSLA":"EV", "RIVN":"EV", "LCID":"EV",
+    "JPM":"FINANCIAL", "BAC":"FINANCIAL", "XOM":"ENERGY", "CVX":"ENERGY", "LLY":"HEALTHCARE", "UNH":"HEALTHCARE", "NVO":"HEALTHCARE",
+}
+
+
+def v17_portfolio_heat():
+    positions = v17_portfolio_positions()
+    if not positions:
+        return {"configured": False, "message": "Set PORTFOLIO_POSITIONS=NVDA:10,TSLA:5,QQQ:20 to enable true portfolio heat."}
+    total = sum(safe_float(p.get("weight_pct"), 0) for p in positions) or 1
+    exposures = {}
+    for p in positions:
+        sym = p.get("symbol")
+        weight = safe_float(p.get("weight_pct"), 0) / total * 100
+        sector = V17_SECTOR_MAP.get(sym, "OTHER")
+        exposures[sector] = exposures.get(sector, 0) + weight
+    top_sector, top_weight = max(exposures.items(), key=lambda kv: kv[1]) if exposures else ("N/A", 0)
+    heat = min(100, top_weight * 1.15 + max(0, len([x for x in exposures.values() if x > 20]) - 1) * 8)
+    corr = v17_safe(lambda: v131_correlation_matrix([p.get("symbol") for p in positions]), {}) if "v131_correlation_matrix" in globals() else {}
+    warnings = []
+    if top_weight >= 50:
+        warnings.append(f"High concentration in {top_sector}: {round(top_weight,1)}%")
+    if heat >= 70:
+        warnings.append("Portfolio heat is elevated; reduce correlated exposure or position size.")
+    return {"configured": True, "positions": positions, "sector_exposure": {k: round(v,2) for k,v in exposures.items()}, "top_exposure": {"sector": top_sector, "weight_pct": round(top_weight,2)}, "portfolio_heat": round(heat,2), "risk_level": "HIGH" if heat >= 70 else "MEDIUM" if heat >= 45 else "LOW", "warnings": warnings, "correlation": corr}
+
+
+def v17_correlation_engine(symbols=None):
+    if symbols is None:
+        positions = v17_portfolio_positions()
+        symbols = [p.get("symbol") for p in positions] if positions else ["NVDA", "AMD", "AAPL", "MSFT", "META", "QQQ", "SPY"]
+    return v17_safe(lambda: v131_correlation_matrix(symbols), {"symbols": symbols, "error": "correlation unavailable"}) if "v131_correlation_matrix" in globals() else {"symbols": symbols, "error": "v131_correlation_matrix missing"}
+
+
+def v17_snapshot():
+    horizon = request.args.get("horizon", V17_DEFAULT_HORIZON) if "request" in globals() else V17_DEFAULT_HORIZON
+    return {
+        "version": V17_VERSION,
+        "time": now_text(),
+        "performance": v17_performance_metrics(horizon=horizon),
+        "strategy_leaderboard": v17_strategy_leaderboard(horizon),
+        "equity_curve": v17_equity_curve(horizon),
+        "drawdown": v17_drawdown_analytics(horizon),
+        "kelly": v17_kelly_sizing(horizon=horizon),
+        "monte_carlo": v17_monte_carlo(horizon=horizon, trials=200, steps=50),
+        "market_context": v17_market_context(),
+        "sector_rotation": v17_sector_rotation(),
+        "ranking_daily": v17_opportunity_ranking(20, "daily"),
+        "ranking_intraday": v17_opportunity_ranking(5, "intraday"),
+        "ranking_swing": v17_opportunity_ranking(5, "swing"),
+        "portfolio_heat": v17_portfolio_heat(),
+        "correlation": v17_correlation_engine(),
+    }
+
+
+def v17_bars_from_distribution(dist):
+    html = "<div class='bars'>"
+    maxv = max(dist.values()) if dist else 1
+    for k, v in dist.items():
+        pct = int((v / maxv) * 100) if maxv else 0
+        html += f"<div class='barrow'><span>{v15_escape(k)}</span><div class='bar'><i style='width:{pct}%'></i></div><b>{v}</b></div>"
+    html += "</div>"
+    return html
+
+
+def v17_dashboard_body():
+    horizon = request.args.get("horizon", V17_DEFAULT_HORIZON)
+    perf = v17_performance_metrics(horizon=horizon)
+    eq = v17_equity_curve(horizon)
+    dd = v17_drawdown_analytics(horizon)
+    mc = v17_monte_carlo(horizon, trials=250, steps=50)
+    ranking = v17_opportunity_ranking(20, "daily")
+    rows = ranking.get("top", [])
+    lb = v17_strategy_leaderboard(horizon)
+    portfolio = v17_portfolio_heat()
+    body = "<div class='grid grid-4'>"
+    body += v15_card("Win Rate", v15_pct(perf.get("win_rate_pct")), f"Closed outcomes: {perf.get('signals_evaluated', 0)}")
+    body += v15_card("Profit Factor", v15_num(perf.get("profit_factor")), "Gross win / gross loss")
+    body += v15_card("Expectancy", v15_pct(perf.get("expectancy_pct")), f"Horizon: {horizon}")
+    body += v15_card("Max Drawdown", v15_pct(dd.get("max_drawdown_pct")), f"Equity: {eq.get('ending_equity')}")
+    body += "</div>"
+    body += "<div class='grid grid-3'>"
+    body += v15_card("Monte Carlo P50", mc.get("ending_equity_p50"), mc.get("sample_note"))
+    body += v15_card("Portfolio Heat", portfolio.get("portfolio_heat", "Not configured"), portfolio.get("risk_level", portfolio.get("message", "")))
+    body += v15_card("Top Setup", rows[0].get("symbol") if rows else "N/A", f"Quality: {rows[0].get('quality_score') if rows else 'N/A'}")
+    body += "</div>"
+    body += "<div class='section'><h2>Quality Distribution</h2><div class='section-body'>" + v17_bars_from_distribution(ranking.get("quality_distribution", {})) + "</div></div>"
+    body += "<div class='grid grid-2'>"
+    body += "<div class='section'><h2>Top 20 Institutional Composite Ranking</h2><div class='section-body'>" + v15_table(rows, [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality"),("institutional_score","Inst Score"),("raw_quality","Raw"),("regime_penalty","Regime"),("history_modifier","History"),("strategy","Strategy")], "No ranking") + "</div></div>"
+    body += "<div class='section'><h2>True Strategy Leaderboard</h2><div class='section-body'>" + v15_table(lb.get("historical_leaderboard", []), [("strategy","Strategy"),("signals_evaluated","Signals"),("win_rate_pct","Win Rate"),("profit_factor","PF"),("expectancy_pct","Expectancy"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss")], "No closed outcomes yet. Use /v14/backfill then /v14/update-outcomes after enough time.") + "</div></div>"
+    body += "</div>"
+    body += "<div class='section'><h2>Live Strategy Distribution</h2><div class='section-body'>" + v15_table(lb.get("live_strategy_distribution", []), [("strategy","Strategy"),("live_setups","Live"),("avg_quality","Avg Quality"),("call","CALL"),("put","PUT"),("wait","WAIT")], "No live strategy distribution") + "</div></div>"
+    return body
+
+
+def v17_ranking_body():
+    mode = request.args.get("mode", "daily")
+    data = v17_opportunity_ranking(int(request.args.get("limit", "20")), mode)
+    ctx = data.get("context", {})
+    body = "<div class='grid grid-4'>" + v15_card("Mode", mode, "daily / intraday / swing") + v15_card("Regime", ctx.get("regime"), "Penalty driver") + v15_card("Breadth", ctx.get("breadth_score"), "Penalty driver") + v15_card("Distribution", json.dumps(data.get("quality_distribution", {})), "Quality bins") + "</div>"
+    body += "<div class='actions'><a class='button' href='/v17/ranking?mode=daily'>Daily</a><a class='button' href='/v17/ranking?mode=intraday&limit=5'>Intraday</a><a class='button' href='/v17/ranking?mode=swing&limit=5'>Swing</a></div>"
+    body += "<div class='section'><h2>Regime + History + Composite Adjusted Ranking</h2><div class='section-body'>" + v15_table(data.get("top", []), [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality"),("institutional_score","Inst"),("raw_quality","Raw"),("regime_penalty","Regime"),("history_modifier","History"),("regime_filter_notes","Notes"),("strategy","Strategy"),("relative_strength_pct","RS")], "No ranking") + "</div></div>"
+    return body
+
+
+def v17_leaderboard_body():
+    data = v17_strategy_leaderboard(request.args.get("horizon", V17_DEFAULT_HORIZON))
+    body = "<div class='section'><h2>Historical Strategy Leaderboard · Real Closed Outcomes</h2><div class='section-body'>" + v15_table(data.get("historical_leaderboard", []), [("strategy","Strategy"),("signals_evaluated","Signals"),("win_rate_pct","Win Rate"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss"),("profit_factor","PF"),("expectancy_pct","Expectancy")], "No closed outcomes yet. This becomes real after journal outcomes close.") + "</div></div>"
+    body += "<div class='section'><h2>Live Strategy Distribution</h2><div class='section-body'>" + v15_table(data.get("live_strategy_distribution", []), [("strategy","Strategy"),("live_setups","Live Setups"),("avg_quality","Avg Quality"),("call","CALL"),("put","PUT"),("wait","WAIT")], "No live distribution") + "</div></div>"
+    return body
+
+
+def v17_risk_body():
+    horizon = request.args.get("horizon", V17_DEFAULT_HORIZON)
+    kelly = v17_kelly_sizing(request.args.get("strategy"), horizon)
+    mc = v17_monte_carlo(horizon, trials=int(request.args.get("trials", "500")), steps=int(request.args.get("steps", "50")))
+    dd = v17_drawdown_analytics(horizon)
+    eq = v17_equity_curve(horizon)
+    body = "<div class='grid grid-4'>"
+    body += v15_card("Kelly", kelly.get("kelly_fraction"), "Full Kelly, do not use uncapped")
+    body += v15_card("Half Kelly Cap", kelly.get("half_kelly_cap"), "Capped at 10%")
+    body += v15_card("MC P50", mc.get("ending_equity_p50"), mc.get("sample_note"))
+    body += v15_card("Max DD", v15_pct(dd.get("max_drawdown_pct")), f"Equity: {eq.get('ending_equity')}")
+    body += "</div>"
+    body += "<div class='section'><h2>Equity Curve Latest Points</h2><div class='section-body'>" + v15_table(eq.get("points", [])[-50:], [("created_at","Created"),("symbol","Symbol"),("strategy","Strategy"),("pnl_pct","PnL %"),("equity","Equity"),("drawdown_pct","DD %")], "No equity curve yet") + "</div></div>"
+    body += "<div class='section'><h2>Risk Raw JSON</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps({"kelly": kelly, "monte_carlo": mc, "drawdown": dd}, ensure_ascii=False, indent=2)[:8000]) + "</div></div></div>"
+    return body
+
+
+def v17_portfolio_body():
+    heat = v17_portfolio_heat()
+    corr = v17_correlation_engine()
+    body = "<div class='grid grid-3'>"
+    body += v15_card("Portfolio Heat", heat.get("portfolio_heat", "Not configured"), heat.get("risk_level", heat.get("message", "")))
+    top = heat.get("top_exposure") or {}
+    body += v15_card("Top Exposure", f"{top.get('sector','N/A')} {top.get('weight_pct','')}%", "Largest concentration")
+    body += v15_card("Positions", len(heat.get("positions", [])), "From PORTFOLIO_POSITIONS")
+    body += "</div>"
+    body += "<div class='section'><h2>Sector / Theme Exposure</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(heat.get("sector_exposure", heat), ensure_ascii=False, indent=2)[:5000]) + "</div></div></div>"
+    body += "<div class='section'><h2>Correlation Engine</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(corr, ensure_ascii=False, indent=2)[:7000]) + "</div></div></div>"
+    return body
+
+
+def v17_internals_body():
+    ctx = v17_market_context()
+    sector = v17_sector_rotation()
+    body = "<div class='section'><h2>Market Internals</h2><div class='section-body'>" + (v16_market_internals_cards() if "v16_market_internals_cards" in globals() else "") + "</div></div>"
+    body += "<div class='section'><h2>Sector Rotation</h2><div class='section-body'>" + v15_table(sector.get("top_sectors", []), [("sector","Sector"),("symbol","Symbol"),("relative_strength_pct","RS"),("return_pct","Return"),("score","Score")], "No sector rotation data") + "</div></div>"
+    body += "<div class='section'><h2>Raw Context</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps({"market": ctx, "sector": sector}, ensure_ascii=False, indent=2)[:8000]) + "</div></div></div>"
+    return body
+
+
+def v17_layout(title, body, active="dashboard", refresh=False):
+    refresh_tag = "<meta http-equiv='refresh' content='180'>" if refresh else ""
+    nav = [("Dashboard","/v17/dashboard","dashboard"),("Ranking","/v17/ranking","ranking"),("Leaderboard","/v17/leaderboard","leaderboard"),("Risk","/v17/risk","risk"),("Internals","/v17/internals","internals"),("Portfolio","/v17/portfolio","portfolio"),("JSON","/v17/api/snapshot","json")]
+    links = "".join([f"<a class='{ 'active' if key==active else '' }' href='{href}'>{label}</a>" for label, href, key in nav])
+    css = """
+    body{margin:0;background:#0b1020;color:#e5edf7;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1280px;margin:0 auto;padding:24px}.top{display:flex;justify-content:space-between;gap:18px;align-items:center}.brand{display:flex;gap:12px;align-items:center}.logo{background:linear-gradient(135deg,#60a5fa,#8b5cf6);padding:10px;border-radius:12px;font-weight:800}.nav a{color:#b8c4d6;text-decoration:none;margin-left:8px;padding:8px 12px;border-radius:999px;background:#151c32}.nav a.active{background:#2563eb;color:white}.grid{display:grid;gap:14px;margin:16px 0}.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:repeat(3,1fr)}.grid-4{grid-template-columns:repeat(4,1fr)}.card,.section{background:#121a2e;border:1px solid #26334f;border-radius:16px;box-shadow:0 10px 30px #0004}.card{padding:18px}.card .label{font-size:12px;text-transform:uppercase;color:#94a3b8}.card .value{font-size:26px;font-weight:800;margin:8px 0}.card .sub{color:#9fb0c8;font-size:12px}.section h2{margin:0;padding:16px 18px;border-bottom:1px solid #26334f}.section-body{padding:14px 18px;overflow:auto}.tbl{width:100%;border-collapse:collapse}.tbl th{color:#a8bad3;text-transform:uppercase;font-size:12px}.tbl td,.tbl th{padding:10px;border-bottom:1px solid #26334f;text-align:left}.pill{display:inline-block;padding:5px 9px;border-radius:999px;background:#273757}.pill.green{background:#14532d;color:#bbf7d0}.pill.red{background:#7f1d1d;color:#fecaca}.pill.yellow{background:#713f12;color:#fde68a}.code{white-space:pre-wrap;background:#070b16;border:1px solid #1f2a44;border-radius:12px;padding:12px;color:#c7d2fe;font-size:12px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.button{display:inline-block;color:white;background:#1d4ed8;text-decoration:none;padding:10px 14px;border-radius:10px}.bars{display:grid;gap:8px}.barrow{display:grid;grid-template-columns:80px 1fr 40px;gap:10px;align-items:center}.bar{height:12px;background:#17203a;border-radius:999px;overflow:hidden}.bar i{display:block;height:100%;background:#60a5fa}@media(max-width:900px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.top{display:block}.nav{margin-top:12px}}
+    """
+    return f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>{refresh_tag}<title>{v15_escape(title)}</title><style>{css}</style></head><body><div class='wrap'><div class='top'><div class='brand'><div class='logo'>V17</div><div><h1>{v15_escape(title)}</h1><div style='color:#94a3b8'>{V17_VERSION} · {now_text()}</div></div></div><div class='nav'>{links}</div></div>{body}<p style='text-align:center;color:#718096;margin:34px 0'>Free data stack. Research cockpit only. Not investment advice.</p></div></body></html>"
+
+
+@app.route("/v17/status", methods=["GET"])
+def v17_status_route():
+    return jsonify({"version": V17_VERSION, "enabled": True, "tier1": ["Trade Journal", "Expectancy", "Profit Factor", "True Strategy Leaderboard", "Quality Distribution", "Real Regime Penalty"], "tier2": ["Sector Rotation", "Correlation Engine", "True Portfolio Heat", "Institutional Composite Score"], "tier3": ["Kelly Sizing", "Monte Carlo", "Equity Curve", "Drawdown Analytics"], "routes": ["/v17", "/v17/dashboard", "/v17/ranking", "/v17/leaderboard", "/v17/risk", "/v17/internals", "/v17/portfolio", "/v17/api/snapshot"]})
+
+
+@app.route("/v17", methods=["GET"])
+def v17_terminal_route():
+    return v17_layout("V17 Institutional Portfolio Management Terminal", v17_dashboard_body(), active="dashboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/dashboard", methods=["GET"])
+def v17_dashboard_route():
+    return v17_layout("V17 Dashboard", v17_dashboard_body(), active="dashboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/ranking", methods=["GET"])
+def v17_ranking_route():
+    return v17_layout("V17 Institutional Ranking", v17_ranking_body(), active="ranking", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/leaderboard", methods=["GET"])
+def v17_leaderboard_route():
+    return v17_layout("V17 True Strategy Leaderboard", v17_leaderboard_body(), active="leaderboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/risk", methods=["GET"])
+def v17_risk_route():
+    return v17_layout("V17 Risk Analytics", v17_risk_body(), active="risk", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/internals", methods=["GET"])
+def v17_internals_route():
+    return v17_layout("V17 Market Internals + Sector Rotation", v17_internals_body(), active="internals", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/portfolio", methods=["GET"])
+def v17_portfolio_route():
+    return v17_layout("V17 Portfolio Heat + Correlation", v17_portfolio_body(), active="portfolio", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v17/api/snapshot", methods=["GET"])
+def v17_api_snapshot_route():
+    return jsonify(v17_snapshot())
+
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
