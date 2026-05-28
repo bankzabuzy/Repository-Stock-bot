@@ -7755,6 +7755,323 @@ def v15_api_snapshot_route():
     return jsonify(v15_get_status_snapshot())
 
 
+# ============================================================
+# V16 INSTITUTIONAL RESEARCH TERMINAL + SIGNAL GOVERNANCE
+# ============================================================
+V16_VERSION = "V16 Institutional Research Terminal Free 100%"
+
+
+def v16_clamp(value, low=0, high=100):
+    try:
+        return max(low, min(high, float(value)))
+    except Exception:
+        return 0
+
+
+def v16_get_nested(d, *keys, default=None):
+    cur = d
+    try:
+        for k in keys:
+            if cur is None:
+                return default
+            if isinstance(cur, dict):
+                cur = cur.get(k)
+            else:
+                return default
+        return cur if cur is not None else default
+    except Exception:
+        return default
+
+
+def v16_market_context():
+    internals = v15_safe_call(lambda: v131_market_internals(), {}) if "v15_safe_call" in globals() else {}
+    breadth = internals.get("market_breadth") or internals.get("breadth") or {}
+    regime = internals.get("regime") or v16_get_nested(breadth, "regime") or v16_get_nested(breadth, "breadth_regime") or "UNKNOWN"
+    risk_score = safe_float(internals.get("risk_score"), None)
+    breadth_score = safe_float(v16_get_nested(breadth, "breadth_score"), None)
+    if breadth_score is None:
+        breadth_score = safe_float(v16_get_nested(breadth, "breadth_summary", "breadth_score"), None)
+    return {"internals": internals, "breadth": breadth, "regime": str(regime), "risk_score": risk_score, "breadth_score": breadth_score}
+
+
+def v16_regime_penalty(row, context=None):
+    """Institutional regime filter. Applies real score haircuts so quality does not blindly favor calls."""
+    context = context or v16_market_context()
+    decision = str(row.get("decision") or "").upper()
+    regime = str(context.get("regime") or "").upper()
+    breadth_score = context.get("breadth_score")
+    risk_score = context.get("risk_score")
+    penalty = 0
+    reasons = []
+
+    if "CALL" in decision:
+        if "RISK_OFF" in regime or "BEAR" in regime:
+            penalty -= 14; reasons.append("CALL haircut: risk-off/bearish regime")
+        elif "MIXED" in regime or "RANGE" in regime:
+            penalty -= 5; reasons.append("CALL haircut: mixed/range regime")
+        if breadth_score is not None and breadth_score < 45:
+            penalty -= 10; reasons.append("CALL haircut: weak breadth")
+        if risk_score is not None and risk_score < 45:
+            penalty -= 8; reasons.append("CALL haircut: macro risk weak")
+    elif "PUT" in decision:
+        if "RISK_ON" in regime:
+            penalty -= 10; reasons.append("PUT haircut: risk-on regime")
+        if breadth_score is not None and breadth_score > 65:
+            penalty -= 8; reasons.append("PUT haircut: strong breadth")
+    else:
+        if "RISK_OFF" in regime or "MIXED" in regime:
+            penalty += 2; reasons.append("WAIT supported by uncertain regime")
+
+    return {"penalty": int(penalty), "reasons": reasons, "regime": context.get("regime"), "breadth_score": breadth_score, "risk_score": risk_score}
+
+
+def v16_adjust_ranking_rows(rows, context=None):
+    context = context or v16_market_context()
+    adjusted = []
+    for raw in rows or []:
+        row = dict(raw)
+        base_q = safe_float(row.get("quality_score"), safe_float(row.get("quality"), safe_float(row.get("score"), 0)))
+        reg = v16_regime_penalty(row, context)
+        strategy = str(row.get("strategy") or "").upper()
+        strategy_mod = 0
+        try:
+            if "v14_strategy_modifier" in globals() and strategy:
+                strategy_mod = int((v14_strategy_modifier(strategy).get("modifier") or 0))
+        except Exception:
+            strategy_mod = 0
+        adjusted_q = v16_clamp(base_q + reg["penalty"] + strategy_mod)
+        row["raw_quality"] = round(base_q, 2)
+        row["regime_penalty"] = reg["penalty"]
+        row["strategy_modifier"] = strategy_mod
+        row["quality_score"] = round(adjusted_q, 2)
+        row["quality_clamped"] = True
+        row["regime_filter_notes"] = "; ".join(reg["reasons"]) or "No regime haircut"
+        adjusted.append(row)
+    adjusted.sort(key=lambda x: safe_float(x.get("quality_score"), 0), reverse=True)
+    return adjusted
+
+
+def v16_opportunity_ranking(limit=20, mode="daily"):
+    raw = v15_safe_call(lambda: v131_opportunity_ranking(max(limit, 20), mode), {}) if "v15_safe_call" in globals() else {}
+    rows = raw.get("top") or raw.get("ranking") or []
+    context = v16_market_context()
+    adjusted = v16_adjust_ranking_rows(rows, context)
+    return {"version": V16_VERSION, "mode": mode, "top": adjusted[:int(limit)], "context": {"regime": context.get("regime"), "risk_score": context.get("risk_score"), "breadth_score": context.get("breadth_score")}, "quality_rule": "quality_score is clamped to 0-100 and adjusted by regime/breadth/strategy history"}
+
+
+def v16_strategy_leaderboard(horizon="5d"):
+    lb = v15_safe_call(lambda: v14_leaderboard(horizon), {}) if "v15_safe_call" in globals() else {}
+    rows = lb.get("leaderboard") or []
+    live = v16_opportunity_ranking(40, "daily").get("top", [])
+    live_counts = {}
+    for r in live:
+        st = r.get("strategy") or "UNKNOWN"
+        live_counts.setdefault(st, {"strategy": st, "live_setups": 0, "avg_quality": 0.0, "call_watch": 0, "put_watch": 0, "wait": 0, "_sum": 0.0})
+        live_counts[st]["live_setups"] += 1
+        live_counts[st]["_sum"] += safe_float(r.get("quality_score"), 0)
+        d = str(r.get("decision") or "").upper()
+        if "CALL" in d:
+            live_counts[st]["call_watch"] += 1
+        elif "PUT" in d:
+            live_counts[st]["put_watch"] += 1
+        else:
+            live_counts[st]["wait"] += 1
+    live_rows = []
+    for v in live_counts.values():
+        n = v.get("live_setups") or 1
+        v["avg_quality"] = round(v.pop("_sum") / n, 2)
+        live_rows.append(v)
+    live_rows.sort(key=lambda x: x.get("avg_quality", 0), reverse=True)
+    return {"version": V16_VERSION, "horizon": horizon, "historical_leaderboard": rows, "live_strategy_distribution": live_rows, "note": "Historical leaderboard uses closed journal outcomes. Live distribution is not win rate; it only explains current setup concentration."}
+
+
+def v16_market_internals_cards():
+    ctx = v16_market_context()
+    internals = ctx.get("internals") or {}
+    proxies = internals.get("proxies") or {}
+    def proxy_card(key, label):
+        p = proxies.get(key) or {}
+        if not p:
+            return v15_card(label, "N/A", "No proxy data")
+        value = p.get("last")
+        chg = p.get("change_pct")
+        ema = "Above EMA20" if p.get("above_ema20") else "Below EMA20"
+        return v15_card(label, value, f"{chg}% · {ema}")
+    body = "<div class='grid grid-4'>"
+    body += v15_card("Market Regime", ctx.get("regime", "N/A"), f"Risk score: {ctx.get('risk_score', 'N/A')}")
+    body += v15_card("Breadth Score", ctx.get("breadth_score", "N/A"), "Regime-adjusted ranking input")
+    body += proxy_card("vix", "VIX")
+    body += proxy_card("tnx", "TNX / 10Y Yield")
+    body += proxy_card("dxy", "DXY")
+    body += proxy_card("spy", "SPY")
+    body += proxy_card("qqq", "QQQ")
+    body += proxy_card("hyg", "HYG Credit Proxy")
+    body += "</div>"
+    return body
+
+
+def v16_portfolio_heat_card():
+    heat = v15_safe_call(lambda: v131_portfolio_heat(), {}) if "v15_safe_call" in globals() else {}
+    if not heat or heat.get("configured") is False:
+        return "<div class='grid grid-3'>" + v15_card("Portfolio Heat", "Not configured", "Set PORTFOLIO_POSITIONS=NVDA:10,TSLA:5,QQQ:20") + v15_card("Risk Budget", "N/A", "Waiting for portfolio weights") + v15_card("Concentration", "N/A", "No exposure data") + "</div>"
+    heat_val = heat.get("portfolio_heat") or heat.get("heat_score") or heat.get("risk_level") or "N/A"
+    exposures = heat.get("sector_exposure") or heat.get("theme_exposure") or heat.get("exposures") or {}
+    top_exp = "N/A"
+    try:
+        if isinstance(exposures, dict) and exposures:
+            top_exp = max(exposures.items(), key=lambda kv: safe_float(kv[1], 0))
+            top_exp = f"{top_exp[0]} {top_exp[1]}%"
+    except Exception:
+        pass
+    return "<div class='grid grid-3'>" + v15_card("Portfolio Heat", heat_val, heat.get("message", "Portfolio risk snapshot")) + v15_card("Top Exposure", top_exp, "Largest sector/theme concentration") + v15_card("Configured", str(heat.get("configured", True)), "PORTFOLIO_POSITIONS detected") + "</div>"
+
+
+def v16_performance_snapshot(horizon="5d"):
+    try:
+        if "v14_update_outcomes" in globals():
+            v14_update_outcomes()
+    except Exception:
+        pass
+    exp = v15_safe_call(lambda: v14_expectancy(horizon=horizon), {}) if "v15_safe_call" in globals() else {}
+    overall = exp.get("overall", {}) if isinstance(exp, dict) else {}
+    lb = v16_strategy_leaderboard(horizon)
+    return {"expectancy": exp, "overall": overall, "leaderboard": lb}
+
+
+def v16_dashboard_body():
+    horizon = request.args.get("horizon", "5d")
+    perf = v16_performance_snapshot(horizon)
+    overall = perf.get("overall", {})
+    ranking = v16_opportunity_ranking(20, "daily").get("top", [])
+    lb = perf.get("leaderboard", {})
+    hist_rows = lb.get("historical_leaderboard") or []
+    live_rows = lb.get("live_strategy_distribution") or []
+
+    body = "<div class='grid grid-4'>"
+    body += v15_card("Win Rate", v15_pct(overall.get("win_rate_pct", overall.get("win_rate"))), f"Evaluated: {overall.get('signals_evaluated', 0)}")
+    body += v15_card("Profit Factor", v15_num(overall.get("profit_factor")), "Closed journal outcomes")
+    body += v15_card("Expectancy", v15_pct(overall.get("expectancy_pct")), f"Horizon: {horizon}")
+    body += v15_card("Top Setup", ranking[0].get("symbol") if ranking else "N/A", f"Quality: {ranking[0].get('quality_score') if ranking else 'N/A'}")
+    body += "</div>"
+    body += "<div class='section'><h2>Market Internals</h2><div class='section-body'>" + v16_market_internals_cards() + "</div></div>"
+    body += "<div class='section'><h2>Portfolio Heat</h2><div class='section-body'>" + v16_portfolio_heat_card() + "</div></div>"
+    body += "<div class='grid grid-2'>"
+    body += "<div class='section'><h2>Top 20 Daily Opportunities · Regime Adjusted</h2><div class='section-body'>" + v15_table(ranking, [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality 0-100"),("raw_quality","Raw"),("regime_penalty","Regime"),("strategy_modifier","History"),("score","Base"),("strategy","Strategy")], "No ranking data") + "</div></div>"
+    body += "<div class='section'><h2>Strategy Leaderboard · Real Outcomes</h2><div class='section-body'>" + v15_table(hist_rows[:20], [("strategy","Strategy"),("signals_evaluated","Signals"),("win_rate_pct","Win Rate"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss"),("profit_factor","PF"),("expectancy_pct","Expectancy")], "No closed strategy outcomes yet. Use Journal/Outcome tracking to build the real leaderboard.") + "</div></div>"
+    body += "</div>"
+    body += "<div class='section'><h2>Live Strategy Distribution</h2><div class='section-body'>" + v15_table(live_rows, [("strategy","Strategy"),("live_setups","Live Setups"),("avg_quality","Avg Quality"),("call_watch","CALL"),("put_watch","PUT"),("wait","WAIT")], "No live strategy distribution") + "</div></div>"
+    return body
+
+
+def v16_ranking_body():
+    mode = request.args.get("mode", "daily")
+    limit = int(request.args.get("limit", "20"))
+    data = v16_opportunity_ranking(limit, mode)
+    rows = data.get("top", [])
+    body = "<div class='grid grid-3'>" + v15_card("Mode", mode, "daily / intraday / swing") + v15_card("Regime", data.get("context", {}).get("regime"), "Ranking haircut source") + v15_card("Breadth", data.get("context", {}).get("breadth_score"), "Ranking haircut source") + "</div>"
+    body += "<div class='actions'><a class='button' href='/v16/ranking?mode=daily'>Daily</a><a class='button' href='/v16/ranking?mode=intraday&limit=5'>Intraday</a><a class='button' href='/v16/ranking?mode=swing&limit=5'>Swing</a></div>"
+    body += "<div class='section'><h2>Regime-Adjusted Opportunity Ranking</h2><div class='section-body'>" + v15_table(rows, [("symbol","Symbol"),("decision","Decision"),("quality_score","Quality 0-100"),("raw_quality","Raw"),("regime_penalty","Regime Penalty"),("strategy_modifier","History Mod"),("regime_filter_notes","Notes"),("strategy","Strategy"),("relative_strength_pct","RS")], "No ranking data") + "</div></div>"
+    return body
+
+
+def v16_leaderboard_body():
+    data = v16_strategy_leaderboard(request.args.get("horizon", "5d"))
+    body = "<div class='section'><h2>Historical Strategy Leaderboard</h2><div class='section-body'>" + v15_table(data.get("historical_leaderboard", []), [("strategy","Strategy"),("signals_evaluated","Signals"),("win_rate_pct","Win Rate"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss"),("profit_factor","PF"),("expectancy_pct","Expectancy")], "No closed outcomes yet. This remains empty until journal trades are evaluated.") + "</div></div>"
+    body += "<div class='section'><h2>Live Strategy Distribution</h2><div class='section-body'>" + v15_table(data.get("live_strategy_distribution", []), [("strategy","Strategy"),("live_setups","Live Setups"),("avg_quality","Avg Quality"),("call_watch","CALL"),("put_watch","PUT"),("wait","WAIT")], "No live distribution") + "</div></div>"
+    return body
+
+
+def v16_portfolio_body():
+    heat = v15_safe_call(lambda: v131_portfolio_heat(), {}) if "v15_safe_call" in globals() else {}
+    body = v16_portfolio_heat_card()
+    body += "<div class='section'><h2>Raw Portfolio Heat</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(heat, ensure_ascii=False, indent=2)[:6000]) + "</div></div></div>"
+    return body
+
+
+def v16_snapshot():
+    return {
+        "version": V16_VERSION,
+        "time": now_text(),
+        "performance": v16_performance_snapshot(),
+        "market_context": v16_market_context(),
+        "ranking_daily": v16_opportunity_ranking(20, "daily"),
+        "ranking_intraday": v16_opportunity_ranking(5, "intraday"),
+        "ranking_swing": v16_opportunity_ranking(5, "swing"),
+        "strategy_leaderboard": v16_strategy_leaderboard(),
+        "portfolio_heat": v15_safe_call(lambda: v131_portfolio_heat(), {}) if "v15_safe_call" in globals() else {},
+        "quality_controls": ["Quality clamp 0-100", "Regime/breadth haircut", "Historical strategy modifier", "Portfolio heat panel", "Market internals card"]
+    }
+
+
+def v16_layout(title, body, active="dashboard", refresh=False):
+    # Reuse V15 CSS/HTML primitives but present V16 navigation and branding.
+    refresh_tag = "<meta http-equiv='refresh' content='180'>" if refresh else ""
+    nav = [
+        ("Dashboard", "/v16/dashboard", "dashboard"),
+        ("Ranking", "/v16/ranking", "ranking"),
+        ("Leaderboard", "/v16/leaderboard", "leaderboard"),
+        ("Internals", "/v16/internals", "internals"),
+        ("Portfolio", "/v16/portfolio", "portfolio"),
+        ("JSON", "/v16/api/snapshot", "json"),
+    ]
+    links = "".join(f"<a class='nav-link {'active' if active == key else ''}' href='{href}'>{label}</a>" for label, href, key in nav)
+    # Use v15_layout source style by adapting minimal shell.
+    html = v15_layout(title, body, active="", refresh=refresh).get_data(as_text=True)
+    html = html.replace("<div class=\"logo\">V15</div>", "<div class=\"logo\">V16</div>")
+    html = html.replace("Research Dashboard Terminal", "Institutional Research Terminal")
+    html = html.replace(v15_escape(V15_VERSION), v15_escape(V16_VERSION))
+    # Replace nav section between <div class=\"nav\"> and </div> after header brand.
+    html = re.sub(r"<div class=\"nav\">.*?</div>\s*</div>\s*<div class=\"container\">", f"<div class=\"nav\">{links}</div>\n</div>\n<div class=\"container\">", html, count=1, flags=re.S)
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/v16/status", methods=["GET"])
+def v16_status_route():
+    return jsonify({
+        "version": V16_VERSION,
+        "enabled": True,
+        "adds": ["Historical Analytics Dashboard", "Real Strategy Leaderboard", "Market Internals Card", "Portfolio Heat Card", "Quality Clamp 0-100", "Regime Filter Score Haircut"],
+        "routes": ["/v16", "/v16/dashboard", "/v16/ranking", "/v16/leaderboard", "/v16/internals", "/v16/portfolio", "/v16/api/snapshot"],
+        "quality_rule": "Ranking quality is clamped to 0-100 after regime/breadth/strategy modifiers."
+    })
+
+
+@app.route("/v16", methods=["GET"])
+def v16_terminal_route():
+    return v16_layout("V16 Institutional Research Terminal", v16_dashboard_body(), active="dashboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/dashboard", methods=["GET"])
+def v16_dashboard_route():
+    return v16_layout("V16 Dashboard", v16_dashboard_body(), active="dashboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/ranking", methods=["GET"])
+def v16_ranking_route():
+    return v16_layout("V16 Regime-Adjusted Ranking", v16_ranking_body(), active="ranking", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/leaderboard", methods=["GET"])
+def v16_leaderboard_route():
+    return v16_layout("V16 Strategy Leaderboard", v16_leaderboard_body(), active="leaderboard", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/internals", methods=["GET"])
+def v16_internals_route():
+    body = "<div class='section'><h2>Market Internals Card</h2><div class='section-body'>" + v16_market_internals_cards() + "</div></div>"
+    body += "<div class='section'><h2>Raw Internals</h2><div class='section-body'><div class='code'>" + v15_escape(json.dumps(v16_market_context(), ensure_ascii=False, indent=2)[:8000]) + "</div></div></div>"
+    return v16_layout("V16 Market Internals", body, active="internals", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/portfolio", methods=["GET"])
+def v16_portfolio_route():
+    return v16_layout("V16 Portfolio Heat", v16_portfolio_body(), active="portfolio", refresh=request.args.get("refresh") == "1")
+
+
+@app.route("/v16/api/snapshot", methods=["GET"])
+def v16_api_snapshot_route():
+    return jsonify(v16_snapshot())
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
