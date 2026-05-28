@@ -9747,6 +9747,415 @@ def v19_api_snapshot_route():
 
 
 
+# ============================================================
+# V20 RESEARCH + PORTFOLIO + EXECUTION + OUTCOME ENGINE
+# ============================================================
+V20_VERSION = "V20 Research + Portfolio + Execution + Outcome Engine Free 100%"
+V20_MIN_EDGE_SAMPLE = int(os.getenv("V20_MIN_EDGE_SAMPLE", "30"))
+V20_DEFAULT_ACCOUNT_SIZE = float(os.getenv("V20_ACCOUNT_SIZE", "100000"))
+V20_MAX_RISK_PER_TRADE_PCT = float(os.getenv("V20_MAX_RISK_PER_TRADE_PCT", "1.0"))
+V20_MAX_SETUP_PROB_NO_SAMPLE = float(os.getenv("V20_MAX_PROB_NO_SAMPLE", "70"))
+
+
+def v20_clamp(x, lo=0, hi=100):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return lo
+
+
+def v20_grade(score):
+    s = v20_clamp(score)
+    if s >= 92: return "A+"
+    if s >= 85: return "A"
+    if s >= 78: return "B+"
+    if s >= 70: return "B"
+    if s >= 60: return "C+"
+    if s >= 50: return "C"
+    return "D"
+
+
+def v20_html_escape(x):
+    return (str(x) if x is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+
+def v20_hist_edge(strategy=None, symbol=None):
+    """True historical edge from V19 closed trade journal. Falls back to insufficient sample, not fake probability."""
+    out = v19_strategy_stats() if "v19_strategy_stats" in globals() else {"overall":{}, "strategies":[]}
+    strategies = out.get("strategies", []) or []
+    overall = out.get("overall", {}) or {}
+    pick = None
+    if strategy:
+        for s in strategies:
+            if str(s.get("strategy","")).upper() == str(strategy).upper():
+                pick = s; break
+    if not pick:
+        pick = overall
+    trades = int(pick.get("trades") or 0)
+    reliable = trades >= V20_MIN_EDGE_SAMPLE
+    return {
+        "scope": "strategy" if strategy and pick is not overall else "overall",
+        "strategy": strategy,
+        "symbol": symbol,
+        "trades": trades,
+        "wins": pick.get("wins", 0),
+        "losses": pick.get("losses", 0),
+        "win_rate": pick.get("win_rate", 0),
+        "avg_win_pct": pick.get("avg_win_pct", 0),
+        "avg_loss_pct": pick.get("avg_loss_pct", 0),
+        "profit_factor": pick.get("profit_factor", 0),
+        "expectancy_pct": pick.get("expectancy_pct", 0),
+        "reliable": reliable,
+        "sample_warning": "OK" if reliable else f"Insufficient closed trades. Need at least {V20_MIN_EDGE_SAMPLE} closed outcomes before treating this as statistical edge."
+    }
+
+
+def v20_risk_reward(entry, stop, target, side="LONG"):
+    entry = safe_float(entry); stop = safe_float(stop); target = safe_float(target)
+    if not entry or stop is None or target is None:
+        return {"rr": None, "risk": None, "reward": None, "quality": "UNKNOWN"}
+    side = str(side or "LONG").upper()
+    if side in {"PUT", "SHORT", "SELL"}:
+        risk = max(0, stop - entry)
+        reward = max(0, entry - target)
+    else:
+        risk = max(0, entry - stop)
+        reward = max(0, target - entry)
+    rr = reward / risk if risk else None
+    if rr is None: q="UNKNOWN"
+    elif rr >= 2.0: q="GOOD"
+    elif rr >= 1.5: q="ACCEPTABLE"
+    elif rr >= 1.0: q="WEAK"
+    else: q="POOR"
+    return {"rr": round(rr,2) if rr is not None else None, "risk": round(risk,4), "reward": round(reward,4), "quality": q}
+
+
+def v20_symbol_analysis(symbol):
+    asset = normalize_asset(symbol)
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    return asset, quote, analysis
+
+
+def v20_signal_quality(symbol):
+    """Institutional style single-symbol trade quality review: score, grade, real edge, R:R, penalties."""
+    asset, quote, a = v20_symbol_analysis(symbol)
+    score = safe_float(a.get("score"), 50)
+    strategy = "MOMENTUM" if score >= 70 or score <= 35 else "CORE_TREND"
+    side = "CALL" if score >= 70 else ("PUT" if score <= 35 else "WAIT")
+    reasons, penalties, bonuses = [], [], []
+
+    rsi = safe_float(a.get("rsi"))
+    if side == "CALL" and rsi is not None:
+        if rsi >= 80:
+            penalties.append({"name":"Extreme overbought", "points":15, "why":"RSI >= 80; late-cycle chase risk"})
+        elif rsi >= 75:
+            penalties.append({"name":"Overbought", "points":10, "why":"RSI >= 75; wait for pullback"})
+        elif rsi >= 70:
+            penalties.append({"name":"Mild overbought", "points":5, "why":"RSI >= 70; reduce size"})
+    if side == "PUT" and rsi is not None:
+        if rsi <= 20:
+            penalties.append({"name":"Extreme oversold", "points":15, "why":"RSI <= 20; rebound risk"})
+        elif rsi <= 25:
+            penalties.append({"name":"Oversold", "points":10, "why":"RSI <= 25; avoid chasing downside"})
+        elif rsi <= 30:
+            penalties.append({"name":"Mild oversold", "points":5, "why":"RSI <= 30; wait for rebound sell"})
+
+    regime = str(a.get("regime") or "UNKNOWN")
+    if side == "CALL" and "RANGE" in regime:
+        penalties.append({"name":"Range regime", "points":5, "why":"Bullish setup but market regime is range/low volatility"})
+    if side == "CALL" and "DOWNTREND" in regime:
+        penalties.append({"name":"Regime conflict", "points":18, "why":"CALL idea conflicts with downtrend regime"})
+    if side == "PUT" and "UPTREND" in regime:
+        penalties.append({"name":"Regime conflict", "points":18, "why":"PUT idea conflicts with uptrend regime"})
+
+    breadth = v18_breadth_engine() if "v18_breadth_engine" in globals() else {}
+    breadth_score = safe_float(breadth.get("breadth_score"), 50)
+    if side == "CALL" and breadth_score < 45:
+        penalties.append({"name":"Weak breadth", "points":8, "why":"Market participation is weak for long setup"})
+    if side == "PUT" and breadth_score > 60:
+        penalties.append({"name":"Strong breadth", "points":8, "why":"Market participation is strong against short setup"})
+    if side == "CALL" and breadth_score >= 60:
+        bonuses.append({"name":"Breadth support", "points":5, "why":"Market breadth supports long bias"})
+    if side == "PUT" and breadth_score <= 40:
+        bonuses.append({"name":"Breadth support", "points":5, "why":"Market breadth supports short bias"})
+
+    price = safe_float(a.get("price"))
+    atr = safe_float(a.get("atr")) or (price*0.02 if price else None)
+    if price and atr:
+        if side == "CALL":
+            entry = price - atr*0.30
+            stop = price - atr*1.50
+            target = price + atr*2.00
+        elif side == "PUT":
+            entry = price + atr*0.30
+            stop = price + atr*1.50
+            target = price - atr*2.00
+        else:
+            entry = price; stop = None; target = None
+    else:
+        entry = stop = target = None
+    rr = v20_risk_reward(entry, stop, target, side)
+    if rr.get("rr") is not None:
+        if rr["rr"] < 1.0:
+            penalties.append({"name":"Poor R:R", "points":12, "why":"Reward/risk below 1.0R"})
+        elif rr["rr"] < 1.5:
+            penalties.append({"name":"Weak R:R", "points":6, "why":"Reward/risk below preferred 1.5R"})
+        elif rr["rr"] >= 2.0:
+            bonuses.append({"name":"Good R:R", "points":5, "why":"Reward/risk >= 2R"})
+
+    edge = v20_hist_edge(strategy=strategy, symbol=asset.get("symbol"))
+    hist_mod = 0
+    if edge.get("reliable"):
+        exp = safe_float(edge.get("expectancy_pct"), 0)
+        pf = safe_float(edge.get("profit_factor"), 0)
+        wr = safe_float(edge.get("win_rate"), 0)
+        hist_mod += max(-12, min(12, exp*2.0))
+        if pf >= 1.5: hist_mod += 6
+        elif pf < 1 and edge.get("trades",0) >= V20_MIN_EDGE_SAMPLE: hist_mod -= 8
+        if wr >= 60: hist_mod += 3
+        elif wr < 45: hist_mod -= 3
+    else:
+        penalties.append({"name":"No statistical edge yet", "points":3, "why":"Closed-trade sample is still too small; cap displayed probability"})
+
+    penalty_points = sum(safe_float(p.get("points"),0) for p in penalties)
+    bonus_points = sum(safe_float(b.get("points"),0) for b in bonuses)
+    final_score = v20_clamp(score - penalty_points + bonus_points + hist_mod)
+    grade = v20_grade(final_score)
+    synthetic_prob = max(35, min(82, 50 + (final_score-50)*0.45))
+    if not edge.get("reliable"):
+        synthetic_prob = min(synthetic_prob, V20_MAX_SETUP_PROB_NO_SAMPLE)
+    if edge.get("reliable"):
+        probability_type = "historical-adjusted"
+        displayed_probability = round((safe_float(edge.get("win_rate"),50)*0.55 + synthetic_prob*0.45),2)
+    else:
+        probability_type = "model-confidence-capped-not-real-probability"
+        displayed_probability = round(synthetic_prob,2)
+
+    size_pct = 0
+    if side != "WAIT":
+        if final_score >= 90: size_pct = 75
+        elif final_score >= 82: size_pct = 55
+        elif final_score >= 72: size_pct = 35
+        elif final_score >= 60: size_pct = 20
+        else: size_pct = 0
+        if any("overbought" in p.get("name","").lower() or "oversold" in p.get("name","").lower() for p in penalties):
+            size_pct = min(size_pct, 40)
+        if rr.get("rr") is not None and rr.get("rr") < 1.5:
+            size_pct = min(size_pct, 35)
+    action = "WAIT" if side == "WAIT" or final_score < 60 else ("PULLBACK_BUY" if side=="CALL" and rsi and rsi>=70 else ("REBOUND_SELL" if side=="PUT" and rsi and rsi<=30 else side))
+
+    return {
+        "version": V20_VERSION,
+        "symbol": asset.get("display"),
+        "asset_type": asset.get("asset_type"),
+        "side": side,
+        "action": action,
+        "strategy": strategy,
+        "price": price,
+        "base_score": round(score,2),
+        "final_score": round(final_score,2),
+        "setup_grade": grade,
+        "displayed_probability_pct": displayed_probability,
+        "probability_type": probability_type,
+        "historical_edge": edge,
+        "risk_reward": rr,
+        "suggested_size_pct_of_normal": size_pct,
+        "analysis": {"regime": regime, "rsi": rsi, "atr": atr, "trend_alignment": a.get("alignment"), "reasons": a.get("reasons",[])},
+        "breadth": {"score": breadth_score, "regime": breadth.get("breadth_regime") or breadth.get("regime")},
+        "penalties": penalties,
+        "bonuses": bonuses,
+        "history_modifier": round(hist_mod,2),
+        "trade_plan": {"entry": round(entry,4) if entry else None, "stop": round(stop,4) if stop else None, "target": round(target,4) if target else None},
+        "institutional_note": "This is research support. Probability is capped until enough closed outcomes exist in the journal."
+    }
+
+
+def v20_quality_rows(limit=20, mode="daily"):
+    base = v18_ranking(max(int(limit),20), mode) if "v18_ranking" in globals() else {"top":[]}
+    rows=[]
+    for r in base.get("top",[]):
+        sym = r.get("symbol") or r.get("display")
+        if not sym: continue
+        try:
+            q = v20_signal_quality(sym)
+            row = dict(r)
+            row.update({
+                "v20_score": q.get("final_score"),
+                "setup_grade": q.get("setup_grade"),
+                "action": q.get("action"),
+                "probability_type": q.get("probability_type"),
+                "displayed_probability_pct": q.get("displayed_probability_pct"),
+                "edge_trades": q.get("historical_edge",{}).get("trades"),
+                "expectancy_pct": q.get("historical_edge",{}).get("expectancy_pct"),
+                "profit_factor": q.get("historical_edge",{}).get("profit_factor"),
+                "rr": q.get("risk_reward",{}).get("rr"),
+                "size_pct": q.get("suggested_size_pct_of_normal"),
+                "penalty_count": len(q.get("penalties",[])),
+                "decision": q.get("action")
+            })
+            rows.append(row)
+        except Exception as e:
+            row=dict(r); row["v20_error"]=str(e)[:160]; rows.append(row)
+    rows.sort(key=lambda x: safe_float(x.get("v20_score"),0), reverse=True)
+    return {"version": V20_VERSION, "mode": mode, "time": now_text(), "top": rows[:int(limit)], "source": "v18 ranking + v20 institutional signal quality formula"}
+
+
+def v20_execution_plan(symbol):
+    q = v20_signal_quality(symbol)
+    tp = q.get("trade_plan",{})
+    rr = q.get("risk_reward",{})
+    edge = q.get("historical_edge",{})
+    return {
+        "symbol": q.get("symbol"),
+        "action": q.get("action"),
+        "grade": q.get("setup_grade"),
+        "entry": tp.get("entry"),
+        "stop": tp.get("stop"),
+        "target": tp.get("target"),
+        "rr": rr.get("rr"),
+        "suggested_size_pct_of_normal": q.get("suggested_size_pct_of_normal"),
+        "journal_url_example": f"/v19/journal/open/{q.get('symbol')}?side={q.get('side')}&entry={tp.get('entry')}&strategy={q.get('strategy')}&qty=1&stop={tp.get('stop')}&target={tp.get('target')}",
+        "edge": edge,
+        "note": "Use journal URL after actual execution, not just because a signal appears."
+    }
+
+
+def v20_strategy_leaderboard():
+    stats = v19_strategy_stats() if "v19_strategy_stats" in globals() else {"overall":{}, "strategies":[]}
+    live = v20_quality_rows(30,"daily").get("top",[])
+    live_by = {}
+    for r in live:
+        s = str(r.get("strategy") or "UNKNOWN")
+        d = live_by.setdefault(s, {"strategy":s,"live_setups":0,"avg_v20_score":0,"grades":{}})
+        d["live_setups"] += 1
+        d["avg_v20_score"] += safe_float(r.get("v20_score"),0)
+        g = r.get("setup_grade") or "NA"
+        d["grades"][g]=d["grades"].get(g,0)+1
+    for d in live_by.values():
+        d["avg_v20_score"] = round(d["avg_v20_score"]/max(1,d["live_setups"]),2)
+    return {"version": V20_VERSION, "closed_performance": stats, "live_distribution": sorted(live_by.values(), key=lambda x:x["avg_v20_score"], reverse=True)}
+
+
+def v20_snapshot():
+    return {
+        "version": V20_VERSION,
+        "time": now_text(),
+        "dashboard": {
+            "top_setups": v20_quality_rows(10,"daily"),
+            "strategy_leaderboard": v20_strategy_leaderboard(),
+            "journal": v19_snapshot() if "v19_snapshot" in globals() else {},
+            "portfolio": v18_portfolio_exposure() if "v18_portfolio_exposure" in globals() else {},
+            "risk": v18_monte_carlo(runs=10000) if "v18_monte_carlo" in globals() else {},
+            "internals": v18_breadth_engine() if "v18_breadth_engine" in globals() else {}
+        }
+    }
+
+
+def v20_table(rows, cols, empty="No data"):
+    if not rows:
+        return f"<div class='empty'>{empty}</div>"
+    th = "".join(f"<th>{v20_html_escape(c[0])}</th>" for c in cols)
+    body=[]
+    for r in rows:
+        tds=[]
+        for title,key in cols:
+            val = r.get(key,"")
+            cls=""
+            if key in {"action","decision"}:
+                sval=str(val).upper()
+                cls="badge green" if "CALL" in sval or "BUY" in sval else ("badge red" if "PUT" in sval or "SELL" in sval else "badge yellow")
+                val=f"<span class='{cls}'>{v20_html_escape(val)}</span>"
+            else:
+                val=v20_html_escape(val)
+            tds.append(f"<td>{val}</td>")
+        body.append("<tr>"+"".join(tds)+"</tr>")
+    return f"<table><thead><tr>{th}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def v20_css():
+    return """
+    <style>
+    body{margin:0;background:#111827;color:#e5e7eb;font-family:Inter,Arial,sans-serif}.wrap{max-width:1180px;margin:auto;padding:24px}
+    .nav a{color:#dbeafe;text-decoration:none;margin-right:12px;padding:8px 12px;border-radius:14px;background:#1f2937}.nav a.active{background:#2563eb}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:#1f2937;border:1px solid #374151;border-radius:18px;padding:18px;box-shadow:0 8px 24px rgba(0,0,0,.22)}
+    h1{font-size:28px;margin:8px 0}h2{font-size:19px;margin:0 0 12px}.muted{color:#9ca3af;font-size:13px}.big{font-size:28px;font-weight:800}.section{margin-top:18px}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #374151;padding:8px;text-align:left}th{color:#93c5fd}.badge{display:inline-block;padding:4px 8px;border-radius:999px;font-weight:700}.green{background:#064e3b;color:#bbf7d0}.red{background:#7f1d1d;color:#fecaca}.yellow{background:#713f12;color:#fde68a}.empty{border:1px dashed #4b5563;border-radius:14px;padding:14px;color:#9ca3af}pre{white-space:pre-wrap;background:#0b1220;border-radius:14px;padding:14px;overflow:auto}.two{display:grid;grid-template-columns:2fr 1fr;gap:14px}@media(max-width:900px){.grid,.two{grid-template-columns:1fr}}
+    </style>
+    """
+
+
+def v20_layout(title, body, active="dashboard"):
+    links=[("Dashboard","/v20/dashboard","dashboard"),("Ranking","/v20/ranking","ranking"),("Leaderboard","/v20/leaderboard","leaderboard"),("Journal","/v19/journal","journal"),("Equity","/v19/equity","equity"),("JSON","/v20/api/snapshot","json")]
+    nav=" ".join(f"<a class='{ 'active' if k==active else ''}' href='{u}'>{n}</a>" for n,u,k in links)
+    return Response(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>{v20_css()}<title>{v20_html_escape(title)}</title></head><body><div class='wrap'><div class='nav'>{nav}</div><h1>{v20_html_escape(title)}</h1><div class='muted'>{V20_VERSION} • {now_text()}</div>{body}<div class='muted section'>Free data stack. Research support only. Not investment advice.</div></div></body></html>", mimetype="text/html")
+
+
+def v20_dashboard_body():
+    rank = v20_quality_rows(12,"daily")
+    rows = rank.get("top",[])
+    stats = v19_strategy_stats() if "v19_strategy_stats" in globals() else {"overall":{}}
+    overall = stats.get("overall",{})
+    best = rows[0] if rows else {}
+    cards = f"""
+    <div class='grid section'>
+      <div class='card'><div class='muted'>Win Rate</div><div class='big'>{overall.get('win_rate',0)}%</div><div class='muted'>Closed trades: {overall.get('trades',0)}</div></div>
+      <div class='card'><div class='muted'>Profit Factor</div><div class='big'>{overall.get('profit_factor',0)}</div><div class='muted'>From real closed journal</div></div>
+      <div class='card'><div class='muted'>Expectancy</div><div class='big'>{overall.get('expectancy_pct',0)}%</div><div class='muted'>Actual outcome database</div></div>
+      <div class='card'><div class='muted'>Best Current Setup</div><div class='big'>{v20_html_escape(best.get('symbol','N/A'))}</div><div class='muted'>Grade {v20_html_escape(best.get('setup_grade','N/A'))} • Score {best.get('v20_score','N/A')}</div></div>
+    </div>"""
+    table = v20_table(rows, [("Symbol","symbol"),("Action","action"),("Grade","setup_grade"),("V20","v20_score"),("Prob","displayed_probability_pct"),("R:R","rr"),("Size%","size_pct"),("Trades","edge_trades"),("PF","profit_factor"),("Exp%","expectancy_pct")])
+    return cards + f"<div class='section two'><div class='card'><h2>Top Institutional Setups</h2>{table}</div><div class='card'><h2>Probability Policy</h2><p>V20 caps model probability until the closed journal has enough samples. This prevents synthetic 80–90% probabilities from being mistaken for real statistical edge.</p><pre>{v20_html_escape(json.dumps({'min_edge_sample':V20_MIN_EDGE_SAMPLE,'max_prob_without_sample':V20_MAX_SETUP_PROB_NO_SAMPLE}, indent=2))}</pre></div></div>"
+
+
+def v20_ranking_body():
+    mode = request.args.get("mode","daily")
+    rank = v20_quality_rows(20,mode)
+    table = v20_table(rank.get("top",[]), [("Symbol","symbol"),("Action","action"),("Grade","setup_grade"),("V20 Score","v20_score"),("Base","quality_score"),("Prob%","displayed_probability_pct"),("Prob Type","probability_type"),("R:R","rr"),("Size%","size_pct"),("Strategy","strategy")])
+    return f"<div class='section card'><h2>V20 Institutional Quality Ranking</h2><p class='muted'>Mode: {v20_html_escape(mode)}</p>{table}</div>"
+
+
+def v20_leaderboard_body():
+    lb = v20_strategy_leaderboard()
+    perf = lb.get("closed_performance",{})
+    live = lb.get("live_distribution",[])
+    perf_table = v20_table(perf.get("strategies",[]), [("Strategy","strategy"),("Trades","trades"),("Win%","win_rate"),("Avg Win","avg_win_pct"),("Avg Loss","avg_loss_pct"),("PF","profit_factor"),("Expectancy","expectancy_pct")], "No closed strategy outcomes yet")
+    live_table = v20_table(live, [("Strategy","strategy"),("Live Setups","live_setups"),("Avg V20","avg_v20_score")], "No live setups")
+    return f"<div class='section two'><div class='card'><h2>True Strategy Performance</h2>{perf_table}</div><div class='card'><h2>Live Strategy Distribution</h2>{live_table}</div></div>"
+
+
+@app.route("/v20/status", methods=["GET"])
+def v20_status_route():
+    return jsonify({"version": V20_VERSION, "enabled": True, "modules":["Signal Quality Formula", "Historical Edge", "Setup Grade", "Real Trade Quality", "Execution Plan", "Outcome-aware Ranking"], "routes":["/v20", "/v20/dashboard", "/v20/ranking", "/v20/quality/<symbol>", "/v20/execution/<symbol>", "/v20/edge", "/v20/leaderboard", "/v20/api/snapshot"]})
+
+@app.route("/v20", methods=["GET"])
+@app.route("/v20/dashboard", methods=["GET"])
+def v20_dashboard_route():
+    return v20_layout("V20 Institutional Signal Quality Terminal", v20_dashboard_body(), "dashboard")
+
+@app.route("/v20/ranking", methods=["GET"])
+def v20_ranking_route():
+    return v20_layout("V20 Outcome-Aware Ranking", v20_ranking_body(), "ranking")
+
+@app.route("/v20/leaderboard", methods=["GET"])
+def v20_leaderboard_route():
+    return v20_layout("V20 True Strategy Leaderboard", v20_leaderboard_body(), "leaderboard")
+
+@app.route("/v20/quality/<symbol>", methods=["GET"])
+def v20_quality_route(symbol):
+    return jsonify(v20_signal_quality(symbol))
+
+@app.route("/v20/execution/<symbol>", methods=["GET"])
+def v20_execution_route(symbol):
+    return jsonify(v20_execution_plan(symbol))
+
+@app.route("/v20/edge", methods=["GET"])
+def v20_edge_route():
+    return jsonify(v20_hist_edge(strategy=request.args.get("strategy"), symbol=request.args.get("symbol")))
+
+@app.route("/v20/api/snapshot", methods=["GET"])
+def v20_snapshot_route():
+    return jsonify(v20_snapshot())
+
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
