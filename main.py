@@ -10575,14 +10575,6 @@ def v21_equity_route():
 def v21_snapshot_route():
     return jsonify(v21_dashboard_snapshot())
 
-
-
-if __name__ == "__main__":
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        threading.Thread(target=auto_alert_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=PORT)
-
-
 # ============================================================
 # V21.5 AUTO JOURNAL + OUTCOME DATABASE + STRATEGY PERFORMANCE DB
 # ============================================================
@@ -10977,3 +10969,9 @@ def v215_auto_journal_route():
 @app.route("/v21-5/api/snapshot", methods=["GET"])
 def v215_snapshot_route():
     return jsonify(v215_snapshot())
+
+
+if __name__ == "__main__":
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        threading.Thread(target=auto_alert_loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT)
