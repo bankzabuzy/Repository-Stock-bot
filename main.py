@@ -119,7 +119,7 @@ STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
 TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
@@ -3148,7 +3148,7 @@ def build_premarket_reminder():
 
     return f"""⏰ US Open Reminder 21:15
 
-ตลาด US ใกล้เปิดแล้ว
+
 เวลาไทย: {now_text()}
 
 🔥 Premarket Movers
