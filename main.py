@@ -101,8 +101,8 @@ AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
-US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
-US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "03:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
@@ -118,9 +118,9 @@ STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
-PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
 ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
-TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
     x.strip().upper()
@@ -168,7 +168,37 @@ GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAU
 US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
 
 CACHE = {}
+def is_us_market_open_th():
+    now = datetime.now(timezone(timedelta(hours=7)))
 
+    # เสาร์-อาทิตย์ ไม่ส่ง
+    if now.weekday() >= 5:
+        return False
+
+    current = now.hour * 60 + now.minute
+
+    start_h, start_m = map(int, US_SESSION_START_TH.split(":"))
+    end_h, end_m = map(int, US_SESSION_END_TH.split(":"))
+
+    start = start_h * 60 + start_m
+    end = end_h * 60 + end_m
+
+    # กรณีตลาดข้ามวัน เช่น 20:30 - 03:00
+    if start > end:
+        return current >= start or current <= end
+
+    return start <= current <= end
+
+
+def should_send_us_alert(symbol=None):
+    if not ENABLE_MARKET_HOURS_GUARD:
+        return True
+
+    if not is_us_market_open_th():
+        print("US market closed - skip alert")
+        return False
+
+    return True
 
 # ============================================================
 # DATABASE
