@@ -9246,6 +9246,506 @@ def v18_journal_log_route(symbol):
 def v18_api_snapshot_route():
     return jsonify(v18_snapshot())
 
+# ============================================================
+# V19 TRUE JOURNAL / OUTCOME / EQUITY / STRATEGY STATS LAYER
+# ============================================================
+V19_VERSION = "V19 True Journal + Outcome Database Free 100%"
+V19_HORIZONS = [1, 3, 5, 10, 20]
+
+
+def v19_init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v19_trade_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            symbol TEXT NOT NULL,
+            yf_symbol TEXT,
+            asset_type TEXT,
+            side TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL,
+            qty REAL DEFAULT 1,
+            score REAL,
+            regime TEXT,
+            stop_price REAL,
+            target_price REAL,
+            status TEXT DEFAULT 'OPEN',
+            pnl_pct REAL,
+            pnl_amount REAL,
+            r_multiple REAL,
+            holding_days REAL,
+            notes TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v19_trade_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER NOT NULL,
+            horizon_days INTEGER NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            strategy TEXT,
+            entry_price REAL,
+            mark_price REAL,
+            return_pct REAL,
+            outcome TEXT,
+            UNIQUE(trade_id, horizon_days)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v19_equity_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER UNIQUE,
+            timestamp TEXT NOT NULL,
+            equity REAL NOT NULL,
+            pnl_pct REAL,
+            drawdown_pct REAL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v19_trade_status ON v19_trade_journal(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v19_trade_strategy ON v19_trade_journal(strategy)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v19_outcomes_trade ON v19_trade_outcomes(trade_id)")
+    conn.commit()
+    conn.close()
+
+
+def v19_to_float(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(str(value).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v19_parse_dt(text):
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(text).split(".")[0], fmt)
+        except Exception:
+            pass
+    return None
+
+
+def v19_current_price(symbol):
+    asset = normalize_asset(resolve_delisted_symbol(symbol))
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    price = safe_float(quote.get("close") or quote.get("price"))
+    if not price and closes:
+        price = closes[-1]
+    return price, asset
+
+
+def v19_side_return(side, entry, exit_price):
+    side = (side or "LONG").upper()
+    entry = v19_to_float(entry)
+    exit_price = v19_to_float(exit_price)
+    if not entry or not exit_price:
+        return None
+    if side in {"PUT", "SHORT", "SELL", "BEARISH"}:
+        return (entry - exit_price) / entry * 100.0
+    return (exit_price - entry) / entry * 100.0
+
+
+def v19_r_multiple(side, entry, exit_price, stop_price):
+    entry = v19_to_float(entry)
+    exit_price = v19_to_float(exit_price)
+    stop_price = v19_to_float(stop_price)
+    if not entry or not exit_price or not stop_price or entry == stop_price:
+        return None
+    side = (side or "LONG").upper()
+    if side in {"PUT", "SHORT", "SELL", "BEARISH"}:
+        risk = stop_price - entry
+        gain = entry - exit_price
+    else:
+        risk = entry - stop_price
+        gain = exit_price - entry
+    if risk <= 0:
+        return None
+    return gain / risk
+
+
+def v19_open_trade(symbol, side="LONG", strategy="MANUAL", entry=None, qty=1, score=None, regime=None, stop=None, target=None, notes=""):
+    v19_init_db()
+    symbol = resolve_delisted_symbol(symbol)
+    price, asset = v19_current_price(symbol) if entry in (None, "") else (v19_to_float(entry), normalize_asset(symbol))
+    if not price:
+        return {"ok": False, "error": f"No entry/live price available for {symbol}"}
+    side = (side or "LONG").upper()
+    strategy = (strategy or "MANUAL").upper()
+    qty = v19_to_float(qty, 1.0) or 1.0
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO v19_trade_journal
+        (opened_at, symbol, yf_symbol, asset_type, side, strategy, entry_price, qty, score, regime, stop_price, target_price, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+    """, (now_text(), asset.get("symbol", symbol), asset.get("yf_symbol"), asset.get("asset_type"), side, strategy, float(price), qty, v19_to_float(score), regime, v19_to_float(stop), v19_to_float(target), notes or ""))
+    trade_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return {"ok": True, "trade_id": trade_id, "symbol": asset.get("symbol", symbol), "side": side, "strategy": strategy, "entry_price": float(price), "qty": qty, "status": "OPEN"}
+
+
+def v19_close_trade(trade_id, exit_price=None, notes=""):
+    v19_init_db()
+    conn = db()
+    row = conn.execute("SELECT * FROM v19_trade_journal WHERE id=?", (trade_id,)).fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "error": "trade_id not found"}
+    if (row["status"] or "").upper() == "CLOSED":
+        conn.close()
+        return {"ok": True, "message": "already closed", "trade_id": trade_id}
+    if exit_price in (None, ""):
+        exit_price, _ = v19_current_price(row["symbol"])
+    exit_price = v19_to_float(exit_price)
+    if not exit_price:
+        conn.close()
+        return {"ok": False, "error": "No exit/live price available"}
+    pnl_pct = v19_side_return(row["side"], row["entry_price"], exit_price)
+    qty = v19_to_float(row["qty"], 1.0) or 1.0
+    entry = v19_to_float(row["entry_price"])
+    raw_diff = exit_price - entry
+    if str(row["side"]).upper() in {"PUT", "SHORT", "SELL", "BEARISH"}:
+        raw_diff = entry - exit_price
+    pnl_amount = raw_diff * qty
+    r_mult = v19_r_multiple(row["side"], entry, exit_price, row["stop_price"])
+    opened = v19_parse_dt(row["opened_at"])
+    holding = None
+    if opened:
+        holding = max(0.0, (datetime.now() - opened).total_seconds() / 86400.0)
+    closed_at = now_text()
+    conn.execute("""
+        UPDATE v19_trade_journal
+        SET closed_at=?, exit_price=?, status='CLOSED', pnl_pct=?, pnl_amount=?, r_multiple=?, holding_days=?, notes=COALESCE(notes,'') || ?
+        WHERE id=?
+    """, (closed_at, exit_price, pnl_pct, pnl_amount, r_mult, holding, (" | close: " + notes) if notes else "", trade_id))
+    conn.commit()
+    conn.close()
+    v19_rebuild_equity_curve()
+    return {"ok": True, "trade_id": trade_id, "exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_amount": pnl_amount, "r_multiple": r_mult, "status": "CLOSED"}
+
+
+def v19_trade_rows(status=None, limit=200):
+    v19_init_db()
+    conn = db()
+    if status:
+        rows = conn.execute("SELECT * FROM v19_trade_journal WHERE status=? ORDER BY id DESC LIMIT ?", (status.upper(), int(limit))).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM v19_trade_journal ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def v19_update_outcomes():
+    v19_init_db()
+    conn = db()
+    rows = conn.execute("SELECT * FROM v19_trade_journal WHERE status='OPEN' ORDER BY id ASC").fetchall()
+    inserted = 0
+    errors = []
+    for r in rows:
+        opened = v19_parse_dt(r["opened_at"])
+        if not opened:
+            continue
+        elapsed = (datetime.now() - opened).days
+        try:
+            mark, _ = v19_current_price(r["symbol"])
+        except Exception as e:
+            errors.append(f"{r['symbol']}: {e}")
+            continue
+        if not mark:
+            continue
+        for h in V19_HORIZONS:
+            if elapsed >= h:
+                ret = v19_side_return(r["side"], r["entry_price"], mark)
+                outcome = "WIN" if (ret or 0) > 0 else "LOSS" if (ret or 0) < 0 else "FLAT"
+                try:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO v19_trade_outcomes
+                        (trade_id, horizon_days, evaluated_at, symbol, side, strategy, entry_price, mark_price, return_pct, outcome)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (r["id"], h, now_text(), r["symbol"], r["side"], r["strategy"], r["entry_price"], mark, ret, outcome))
+                    inserted += 1
+                except Exception as e:
+                    errors.append(str(e))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "open_trades": len(rows), "outcomes_upserted": inserted, "errors": errors[:10], "horizons": V19_HORIZONS}
+
+
+def v19_closed_stats(rows):
+    returns = [v19_to_float(r.get("pnl_pct")) for r in rows if v19_to_float(r.get("pnl_pct")) is not None]
+    wins = [x for x in returns if x > 0]
+    losses = [x for x in returns if x < 0]
+    total = len(returns)
+    win_rate = len(wins) / total * 100 if total else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_win / gross_loss if gross_loss else (gross_win if gross_win else 0.0)
+    expectancy = (win_rate/100.0)*avg_win + (1-win_rate/100.0)*avg_loss if total else 0.0
+    return {"trades": total, "wins": len(wins), "losses": len(losses), "win_rate": round(win_rate,2), "avg_win_pct": round(avg_win,2), "avg_loss_pct": round(avg_loss,2), "profit_factor": round(profit_factor,2), "expectancy_pct": round(expectancy,2)}
+
+
+def v19_strategy_stats():
+    v19_init_db()
+    conn = db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM v19_trade_journal WHERE status='CLOSED' ORDER BY closed_at ASC").fetchall()]
+    conn.close()
+    by = {}
+    for r in rows:
+        by.setdefault((r.get("strategy") or "UNKNOWN"), []).append(r)
+    out = []
+    for strat, items in by.items():
+        s = v19_closed_stats(items)
+        s["strategy"] = strat
+        out.append(s)
+    out.sort(key=lambda x: (x.get("profit_factor",0), x.get("expectancy_pct",0), x.get("trades",0)), reverse=True)
+    overall = v19_closed_stats(rows)
+    return {"overall": overall, "strategies": out, "sample_warning": "Need at least 30 closed trades per strategy for statistical confidence" if overall["trades"] < 30 else "OK"}
+
+
+def v19_rebuild_equity_curve(starting=100.0):
+    v19_init_db()
+    conn = db()
+    rows = conn.execute("SELECT * FROM v19_trade_journal WHERE status='CLOSED' AND pnl_pct IS NOT NULL ORDER BY closed_at ASC, id ASC").fetchall()
+    conn.execute("DELETE FROM v19_equity_points")
+    equity = float(starting)
+    peak = equity
+    points = []
+    for r in rows:
+        pnl_pct = v19_to_float(r["pnl_pct"], 0.0) or 0.0
+        equity = equity * (1 + pnl_pct/100.0)
+        peak = max(peak, equity)
+        dd = ((equity - peak) / peak * 100.0) if peak else 0.0
+        conn.execute("INSERT OR REPLACE INTO v19_equity_points(trade_id, timestamp, equity, pnl_pct, drawdown_pct) VALUES (?, ?, ?, ?, ?)", (r["id"], r["closed_at"] or now_text(), equity, pnl_pct, dd))
+        points.append({"trade_id": r["id"], "timestamp": r["closed_at"], "equity": round(equity,2), "pnl_pct": round(pnl_pct,2), "drawdown_pct": round(dd,2)})
+    conn.commit()
+    conn.close()
+    return points
+
+
+def v19_equity_curve():
+    v19_init_db()
+    conn = db()
+    rows = conn.execute("SELECT * FROM v19_equity_points ORDER BY id ASC").fetchall()
+    conn.close()
+    points = [dict(r) for r in rows]
+    if not points:
+        points = v19_rebuild_equity_curve()
+    if points:
+        max_dd = min([v19_to_float(p.get("drawdown_pct"),0) for p in points])
+        latest = points[-1].get("equity")
+    else:
+        max_dd = 0.0
+        latest = 100.0
+    return {"starting_equity":100.0, "latest_equity":latest, "max_drawdown_pct":round(max_dd,2), "points":points[-100:]}
+
+
+def v19_backfill_from_v18():
+    v19_init_db()
+    conn = db()
+    # Import compatible v18 closed_trade_journal rows if present and not already in notes.
+    try:
+        rows = conn.execute("SELECT * FROM closed_trade_journal ORDER BY id ASC").fetchall()
+    except Exception:
+        rows = []
+    inserted = 0
+    for r in rows:
+        marker = f"v18_id:{r['id']}"
+        exists = conn.execute("SELECT id FROM v19_trade_journal WHERE notes LIKE ?", (f"%{marker}%",)).fetchone()
+        if exists:
+            continue
+        try:
+            conn.execute("""
+                INSERT INTO v19_trade_journal
+                (opened_at, closed_at, symbol, yf_symbol, asset_type, side, strategy, entry_price, exit_price, qty, score, regime, status, pnl_pct, pnl_amount, r_multiple, holding_days, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?, ?)
+            """, (r["opened_at"] or now_text(), r["closed_at"] or now_text(), r["symbol"], r["symbol"], "US_STOCK", r["side"], r["strategy"], r["entry_price"], r["exit_price"], r["qty"] or 1, r["score"], r["regime"], r["pnl_pct"], r["pnl_amount"], r["r_multiple"], r["holding_days"], marker))
+            inserted += 1
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    v19_rebuild_equity_curve()
+    return {"ok": True, "imported": inserted}
+
+
+def v19_auto_journal_from_ranking(limit=5):
+    # Optional helper: open watchlist trades from current ranking so the database can start collecting outcomes.
+    v19_init_db()
+    try:
+        rank = v18_ranking(limit=int(limit), mode="daily")
+    except Exception:
+        rank = []
+    opened = []
+    for item in rank:
+        decision = str(item.get("decision", "")).upper()
+        if decision not in {"CALL_WATCH", "PUT_WATCH"}:
+            continue
+        side = "CALL" if "CALL" in decision else "PUT"
+        sym = item.get("symbol")
+        # Avoid duplicate open trade for same symbol/strategy.
+        conn = db()
+        ex = conn.execute("SELECT id FROM v19_trade_journal WHERE symbol=? AND strategy=? AND status='OPEN'", (sym, item.get("strategy","AUTO"))).fetchone()
+        conn.close()
+        if ex:
+            continue
+        res = v19_open_trade(sym, side=side, strategy=item.get("strategy","AUTO"), entry=None, qty=1, score=item.get("institutional_score") or item.get("score"), regime=(v18_regime_map().get("regime") if "v18_regime_map" in globals() else None), notes="auto_from_v19_ranking")
+        opened.append(res)
+    return {"ok": True, "opened": opened, "source": "v18_ranking top daily"}
+
+
+def v19_escape(x):
+    return (str(x) if x is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+
+def v19_table(rows, cols):
+    if not rows:
+        return "<div class='empty'>No data yet</div>"
+    th = "".join(f"<th>{v19_escape(label)}</th>" for label, key in cols)
+    body = []
+    for r in rows:
+        tds = []
+        for label, key in cols:
+            val = r.get(key) if isinstance(r, dict) else getattr(r, key, "")
+            if isinstance(val, float):
+                val = round(val, 2)
+            tds.append(f"<td>{v19_escape(val)}</td>")
+        body.append("<tr>"+"".join(tds)+"</tr>")
+    return f"<table class='tbl'><thead><tr>{th}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def v19_layout(title, body, active="dashboard", refresh=False):
+    refresh_tag = "<meta http-equiv='refresh' content='180'>" if refresh else ""
+    nav = [("Dashboard","/v19/dashboard","dashboard"),("Journal","/v19/journal","journal"),("Leaderboard","/v19/leaderboard","leaderboard"),("Equity","/v19/equity","equity"),("Outcomes","/v19/outcomes","outcomes"),("JSON","/v19/api/snapshot","json")]
+    links = "".join([f"<a class='{ 'active' if key==active else '' }' href='{href}'>{label}</a>" for label, href, key in nav])
+    css = """
+    body{margin:0;background:#0b1020;color:#e5edf7;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1320px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:18px;align-items:center}.brand{display:flex;gap:12px;align-items:center}.logo{background:linear-gradient(135deg,#f59e0b,#2563eb);padding:10px;border-radius:12px;font-weight:800}.nav a{color:#b8c4d6;text-decoration:none;margin-left:8px;padding:8px 12px;border-radius:999px;background:#151c32}.nav a.active{background:#2563eb;color:white}.grid{display:grid;gap:14px;margin:16px 0}.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:repeat(3,1fr)}.grid-4{grid-template-columns:repeat(4,1fr)}.card,.section{background:#121a2e;border:1px solid #26334f;border-radius:16px;box-shadow:0 10px 30px #0004}.card{padding:18px}.card .label{font-size:12px;text-transform:uppercase;color:#94a3b8}.card .value{font-size:26px;font-weight:800;margin:8px 0}.card .sub{color:#9fb0c8;font-size:12px}.section h2{margin:0;padding:16px 18px;border-bottom:1px solid #26334f}.section-body{padding:14px 18px;overflow:auto}.tbl{width:100%;border-collapse:collapse}.tbl th{color:#a8bad3;text-transform:uppercase;font-size:12px}.tbl td,.tbl th{padding:8px;border-bottom:1px solid #26334f;text-align:left}.empty{padding:16px;color:#94a3b8;border:1px dashed #334155;border-radius:12px}.code{white-space:pre-wrap;background:#070b16;border:1px solid #1f2a44;border-radius:12px;padding:12px;color:#c7d2fe;font-size:12px}.button{display:inline-block;color:white;background:#1d4ed8;text-decoration:none;padding:10px 14px;border-radius:10px;margin:4px}@media(max-width:900px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.top{display:block}.nav{margin-top:12px}}
+    """
+    return f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>{refresh_tag}<title>{v19_escape(title)}</title><style>{css}</style></head><body><div class='wrap'><div class='top'><div class='brand'><div class='logo'>V19</div><div><h1>{v19_escape(title)}</h1><div style='color:#94a3b8'>{V19_VERSION} · {now_text()}</div></div></div><div class='nav'>{links}</div></div>{body}<p style='text-align:center;color:#718096;margin:34px 0'>True journal database. Research cockpit only. Not investment advice.</p></div></body></html>"
+
+
+def v19_dashboard_body():
+    stats = v19_strategy_stats()
+    eq = v19_equity_curve()
+    overall = stats.get("overall", {})
+    live = []
+    try:
+        live = v18_ranking(10,"daily")
+    except Exception:
+        live = []
+    cards = f"""
+    <div class='grid grid-4'>
+      <div class='card'><div class='label'>Closed Trades</div><div class='value'>{overall.get('trades',0)}</div><div class='sub'>Real journal only</div></div>
+      <div class='card'><div class='label'>Win Rate</div><div class='value'>{overall.get('win_rate',0)}%</div><div class='sub'>Closed outcomes</div></div>
+      <div class='card'><div class='label'>Profit Factor</div><div class='value'>{overall.get('profit_factor',0)}</div><div class='sub'>Gross win / gross loss</div></div>
+      <div class='card'><div class='label'>Expectancy</div><div class='value'>{overall.get('expectancy_pct',0)}%</div><div class='sub'>Per closed trade</div></div>
+    </div>
+    <div class='grid grid-3'>
+      <div class='card'><div class='label'>Latest Equity</div><div class='value'>{eq.get('latest_equity',100)}</div><div class='sub'>Starts at 100</div></div>
+      <div class='card'><div class='label'>Max Drawdown</div><div class='value'>{eq.get('max_drawdown_pct',0)}%</div><div class='sub'>From closed trades</div></div>
+      <div class='card'><div class='label'>Open Trades</div><div class='value'>{len(v19_trade_rows('OPEN',10000))}</div><div class='sub'>Outcome tracker source</div></div>
+    </div>
+    """
+    live_table = v19_table(live, [("Symbol","symbol"),("Decision","decision"),("Quality","quality"),("Inst","institutional_score"),("Strategy","strategy")])
+    return cards + f"<div class='grid grid-2'><div class='section'><h2>Strategy Performance Database</h2><div class='section-body'>{v19_table(stats.get('strategies',[]), [('Strategy','strategy'),('Trades','trades'),('Win %','win_rate'),('PF','profit_factor'),('Expectancy %','expectancy_pct'),('Avg Win %','avg_win_pct'),('Avg Loss %','avg_loss_pct')])}</div></div><div class='section'><h2>Live Ranking Source</h2><div class='section-body'>{live_table}<a class='button' href='/v19/auto-journal?limit=5'>Auto-open Top Signals</a><a class='button' href='/v19/update-outcomes'>Update Outcomes</a></div></div></div>"
+
+
+def v19_journal_body():
+    open_rows = v19_trade_rows('OPEN', 100)
+    closed_rows = v19_trade_rows('CLOSED', 100)
+    sample = "/v19/journal/open/NVDA?side=CALL&entry=212&strategy=MOMENTUM&qty=1&stop=205&target=225"
+    return f"<div class='section'><h2>How to Log a Trade</h2><div class='section-body'><div class='code'>Open: {sample}\nClose: /v19/journal/close/TRADE_ID?exit=225\nAuto outcome: /v19/update-outcomes</div></div></div><div class='grid grid-2'><div class='section'><h2>Open Trades</h2><div class='section-body'>{v19_table(open_rows, [('ID','id'),('Opened','opened_at'),('Symbol','symbol'),('Side','side'),('Strategy','strategy'),('Entry','entry_price'),('Score','score')])}</div></div><div class='section'><h2>Closed Trades</h2><div class='section-body'>{v19_table(closed_rows, [('ID','id'),('Closed','closed_at'),('Symbol','symbol'),('Side','side'),('Strategy','strategy'),('Entry','entry_price'),('Exit','exit_price'),('PnL %','pnl_pct'),('R','r_multiple')])}</div></div></div>"
+
+
+def v19_leaderboard_body():
+    stats = v19_strategy_stats()
+    return f"<div class='section'><h2>Strategy Stats from Real Closed Trades</h2><div class='section-body'>{v19_table(stats.get('strategies',[]), [('Strategy','strategy'),('Trades','trades'),('Wins','wins'),('Losses','losses'),('Win %','win_rate'),('PF','profit_factor'),('Expectancy %','expectancy_pct'),('Avg Win %','avg_win_pct'),('Avg Loss %','avg_loss_pct')])}<div class='code'>{json.dumps(stats, ensure_ascii=False, indent=2)}</div></div></div>"
+
+
+def v19_equity_body():
+    eq = v19_equity_curve()
+    pts = eq.get('points', [])
+    spark = " ".join([f"{p.get('equity')}" for p in pts[-20:]]) or "No equity curve yet"
+    return f"<div class='grid grid-3'><div class='card'><div class='label'>Latest Equity</div><div class='value'>{eq.get('latest_equity')}</div><div class='sub'>Base 100</div></div><div class='card'><div class='label'>Max Drawdown</div><div class='value'>{eq.get('max_drawdown_pct')}%</div><div class='sub'>Closed trades</div></div><div class='card'><div class='label'>Points</div><div class='value'>{len(pts)}</div><div class='sub'>Equity observations</div></div></div><div class='section'><h2>Equity Curve Latest Points</h2><div class='section-body'><div class='code'>{v19_escape(spark)}</div>{v19_table(pts[-50:], [('Trade','trade_id'),('Time','timestamp'),('Equity','equity'),('PnL %','pnl_pct'),('DD %','drawdown_pct')])}</div></div>"
+
+
+def v19_outcomes_body():
+    v19_init_db()
+    conn = db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM v19_trade_outcomes ORDER BY id DESC LIMIT 300").fetchall()]
+    conn.close()
+    return f"<div class='section'><h2>Outcome Database</h2><div class='section-body'><a class='button' href='/v19/update-outcomes'>Update Outcomes Now</a>{v19_table(rows, [('Trade','trade_id'),('Horizon','horizon_days'),('Symbol','symbol'),('Side','side'),('Strategy','strategy'),('Entry','entry_price'),('Mark','mark_price'),('Return %','return_pct'),('Outcome','outcome'),('Time','evaluated_at')])}</div></div>"
+
+
+def v19_snapshot():
+    return {"version": V19_VERSION, "time": now_text(), "journal": {"open": v19_trade_rows('OPEN',1000), "closed": v19_trade_rows('CLOSED',1000)}, "strategy_stats": v19_strategy_stats(), "equity_curve": v19_equity_curve()}
+
+
+@app.route("/v19/status", methods=["GET"])
+def v19_status_route():
+    v19_init_db()
+    return jsonify({"version": V19_VERSION, "enabled": True, "core": ["Journal Database", "Closed Trade Storage", "Outcome Tracking", "Equity Curve from real closed trades", "Expectancy from real closed trades", "Profit Factor from real closed trades", "Strategy Leaderboard from real closed trades"], "routes": ["/v19", "/v19/dashboard", "/v19/journal", "/v19/journal/open/<symbol>", "/v19/journal/close/<trade_id>", "/v19/update-outcomes", "/v19/leaderboard", "/v19/equity", "/v19/outcomes", "/v19/api/snapshot"]})
+
+@app.route("/v19", methods=["GET"])
+def v19_root_route():
+    return v19_layout("V19 True Journal Terminal", v19_dashboard_body(), "dashboard", request.args.get("refresh")=="1")
+
+@app.route("/v19/dashboard", methods=["GET"])
+def v19_dashboard_route():
+    return v19_layout("V19 True Performance Dashboard", v19_dashboard_body(), "dashboard", request.args.get("refresh")=="1")
+
+@app.route("/v19/journal", methods=["GET"])
+def v19_journal_route():
+    return v19_layout("V19 Trade Journal Database", v19_journal_body(), "journal", request.args.get("refresh")=="1")
+
+@app.route("/v19/journal/open/<symbol>", methods=["GET", "POST"])
+def v19_journal_open_route(symbol):
+    return jsonify(v19_open_trade(symbol, side=request.args.get("side","LONG"), strategy=request.args.get("strategy","MANUAL"), entry=request.args.get("entry"), qty=request.args.get("qty",1), score=request.args.get("score"), regime=request.args.get("regime"), stop=request.args.get("stop"), target=request.args.get("target"), notes=request.args.get("notes","")))
+
+@app.route("/v19/journal/close/<int:trade_id>", methods=["GET", "POST"])
+def v19_journal_close_route(trade_id):
+    return jsonify(v19_close_trade(trade_id, exit_price=request.args.get("exit"), notes=request.args.get("notes","")))
+
+@app.route("/v19/update-outcomes", methods=["GET", "POST"])
+def v19_update_outcomes_route():
+    return jsonify(v19_update_outcomes())
+
+@app.route("/v19/backfill-v18", methods=["GET", "POST"])
+def v19_backfill_v18_route():
+    return jsonify(v19_backfill_from_v18())
+
+@app.route("/v19/auto-journal", methods=["GET", "POST"])
+def v19_auto_journal_route():
+    return jsonify(v19_auto_journal_from_ranking(limit=request.args.get("limit",5)))
+
+@app.route("/v19/leaderboard", methods=["GET"])
+def v19_leaderboard_route():
+    return v19_layout("V19 Strategy Leaderboard from Real Outcomes", v19_leaderboard_body(), "leaderboard", request.args.get("refresh")=="1")
+
+@app.route("/v19/equity", methods=["GET"])
+def v19_equity_route():
+    return v19_layout("V19 Equity Curve from Closed Trades", v19_equity_body(), "equity", request.args.get("refresh")=="1")
+
+@app.route("/v19/outcomes", methods=["GET"])
+def v19_outcomes_route():
+    return v19_layout("V19 Outcome Database", v19_outcomes_body(), "outcomes", request.args.get("refresh")=="1")
+
+@app.route("/v19/api/snapshot", methods=["GET"])
+def v19_api_snapshot_route():
+    return jsonify(v19_snapshot())
+
+
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
