@@ -8649,6 +8649,604 @@ def v17_api_snapshot_route():
     return jsonify(v17_snapshot())
 
 
+# ============================================================
+# V18 TRUE HEDGE-FUND STYLE RESEARCH TERMINAL FREE 100%
+# Adds: Closed Trade Journal, Strategy Performance DB, True Expectancy,
+# Profit Factor, Equity Curve, Breadth Engine, Sector Rotation, Regime Map,
+# Correlation Clusters, Portfolio Concentration, Exposure Analytics,
+# Monte Carlo 10,000 Runs, Risk of Ruin, Dynamic Kelly.
+# ============================================================
+V18_VERSION = "V18 Hedge-Fund Style Research Terminal Free 100%"
+V18_DEFAULT_HORIZON = os.getenv("V18_DEFAULT_HORIZON", "5d")
+V18_CLUSTER_THRESHOLD = float(os.getenv("V18_CLUSTER_THRESHOLD", "0.65"))
+V18_MC_RUNS = int(os.getenv("V18_MC_RUNS", "10000"))
+V18_MIN_SAMPLE = int(os.getenv("V18_MIN_SAMPLE", "20"))
+
+
+def v18_safe(fn, default=None):
+    try:
+        return fn()
+    except Exception as e:
+        return default if default is not None else {"error": str(e)}
+
+
+def v18_clamp(x, lo=0, hi=100):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return lo
+
+
+def v18_num(x, n=2):
+    try:
+        return f"{float(x):,.{n}f}"
+    except Exception:
+        return "N/A"
+
+
+def v18_pct(x, n=2):
+    try:
+        return f"{float(x):,.{n}f}%"
+    except Exception:
+        return "N/A"
+
+
+def v18_json(x, limit=9000):
+    return v15_escape(json.dumps(x, ensure_ascii=False, indent=2)[:limit]) if "v15_escape" in globals() else json.dumps(x, ensure_ascii=False)[:limit]
+
+
+def v18_ensure_db():
+    """True closed trade journal. This supplements the older V14 trade_journal.
+    It allows manually closed trades and strategy analytics independent of auto signals.
+    """
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS closed_trade_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_at TEXT,
+                closed_at TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT,
+                strategy TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                qty REAL,
+                score REAL,
+                regime TEXT,
+                notes TEXT,
+                pnl_pct REAL,
+                r_multiple REAL,
+                holding_days REAL,
+                mae_pct REAL,
+                mfe_pct REAL,
+                source TEXT DEFAULT 'manual'
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_closed_trade_strategy ON closed_trade_journal(strategy)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_closed_trade_symbol ON closed_trade_journal(symbol)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_closed_trade_closed_at ON closed_trade_journal(closed_at)")
+        conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        print("v18_ensure_db error:", e)
+        return False
+
+
+def v18_log_closed_trade(symbol, side="CALL", strategy="MOMENTUM", entry=None, exit=None, qty=1, score=None, regime=None, notes="", opened_at=None, closed_at=None):
+    v18_ensure_db()
+    symbol = resolve_delisted_symbol(symbol).replace(".BK", "").upper()
+    side = str(side or "CALL").upper()
+    strategy = str(strategy or "MOMENTUM").upper()
+    entry = safe_float(entry)
+    exitp = safe_float(exit)
+    qty = safe_float(qty, 1)
+    if not symbol or entry is None or exitp is None or entry <= 0:
+        return {"ok": False, "error": "symbol, entry, exit are required"}
+    direction = -1 if side in {"PUT", "SHORT", "SELL"} else 1
+    pnl_pct = (exitp - entry) / entry * 100.0 * direction
+    # Simple 1R approximation for manual closed trades if stop is unknown.
+    r_multiple = pnl_pct / max(1.0, abs(pnl_pct)) if pnl_pct else 0.0
+    opened_at = opened_at or now_text()
+    closed_at = closed_at or now_text()
+    try:
+        conn = db()
+        conn.execute("""
+            INSERT INTO closed_trade_journal
+            (opened_at, closed_at, symbol, side, strategy, entry_price, exit_price, qty, score, regime, notes, pnl_pct, r_multiple, holding_days, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (opened_at, closed_at, symbol, side, strategy, entry, exitp, qty, safe_float(score), regime, notes, pnl_pct, r_multiple, 0.0, "manual"))
+        conn.commit(); conn.close()
+        return {"ok": True, "symbol": symbol, "side": side, "strategy": strategy, "pnl_pct": round(pnl_pct, 3), "r_multiple": round(r_multiple, 3)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def v18_closed_trade_rows(limit=10000):
+    v18_ensure_db()
+    rows = []
+    # 1) manual closed trades
+    try:
+        conn = db()
+        data = conn.execute("SELECT * FROM closed_trade_journal ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        conn.close()
+        for r in data:
+            d = dict(r)
+            d["pnl"] = safe_float(d.get("pnl_pct"), 0)
+            d["source"] = d.get("source") or "manual"
+            rows.append(d)
+    except Exception:
+        pass
+    # 2) older V14 auto-journal closed outcomes
+    try:
+        if "v14_update_outcomes" in globals():
+            v14_update_outcomes()
+        if "v14_get_journal_rows" in globals():
+            v14rows = v14_get_journal_rows(limit=limit)
+            for r in v14rows:
+                d = dict(r)
+                ret = safe_float(d.get(f"return_{V18_DEFAULT_HORIZON}"), None)
+                if ret is None:
+                    continue
+                pnl = v17_pnl_for_row(d, V18_DEFAULT_HORIZON) if "v17_pnl_for_row" in globals() else ret
+                rows.append({
+                    "id": "v14_" + str(d.get("id")),
+                    "opened_at": d.get("created_at"),
+                    "closed_at": d.get("updated_at") or now_text(),
+                    "symbol": d.get("symbol"),
+                    "side": d.get("side"),
+                    "strategy": d.get("strategy") or "UNKNOWN",
+                    "entry_price": d.get("entry_price"),
+                    "exit_price": d.get(f"price_{V18_DEFAULT_HORIZON}"),
+                    "score": d.get("score"),
+                    "regime": d.get("regime"),
+                    "pnl_pct": pnl,
+                    "pnl": pnl,
+                    "r_multiple": safe_float(pnl, 0) / 2.0,
+                    "source": "v14_auto",
+                })
+    except Exception:
+        pass
+    return rows[:int(limit)]
+
+
+def v18_performance_metrics(rows=None):
+    rows = rows if rows is not None else v18_closed_trade_rows()
+    pnls = [safe_float(r.get("pnl" if r.get("pnl") is not None else "pnl_pct"), None) for r in rows]
+    pnls = [p for p in pnls if p is not None]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    total = len(pnls)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    win_rate = len(wins) / total * 100 if total else 0
+    avg_win = gross_win / len(wins) if wins else 0
+    avg_loss = sum(losses) / len(losses) if losses else 0
+    pf = gross_win / gross_loss if gross_loss else (999 if gross_win > 0 else 0)
+    expectancy = (win_rate/100.0 * avg_win) - ((1-win_rate/100.0) * abs(avg_loss)) if total else 0
+    r_values = [safe_float(r.get("r_multiple"), None) for r in rows]
+    r_values = [r for r in r_values if r is not None]
+    return {
+        "trades": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": round(win_rate, 2),
+        "avg_win_pct": round(avg_win, 3),
+        "avg_loss_pct": round(avg_loss, 3),
+        "profit_factor": round(pf, 3) if pf != 999 else 999,
+        "true_expectancy_pct": round(expectancy, 3),
+        "avg_r": round(sum(r_values)/len(r_values), 3) if r_values else 0,
+        "sample_quality": "LOW" if total < V18_MIN_SAMPLE else "OK",
+        "sample_warning": f"Need at least {V18_MIN_SAMPLE} closed outcomes" if total < V18_MIN_SAMPLE else "",
+    }
+
+
+def v18_strategy_performance_db():
+    rows = v18_closed_trade_rows()
+    groups = {}
+    for r in rows:
+        st = str(r.get("strategy") or "UNKNOWN").upper()
+        groups.setdefault(st, []).append(r)
+    perf = []
+    for st, gr in groups.items():
+        m = v18_performance_metrics(gr)
+        perf.append({"strategy": st, **m})
+    perf.sort(key=lambda x: (safe_float(x.get("true_expectancy_pct"), 0), safe_float(x.get("profit_factor"), 0), x.get("trades", 0)), reverse=True)
+    return {"version": V18_VERSION, "overall": v18_performance_metrics(rows), "strategies": perf}
+
+
+def v18_equity_curve(starting=100.0):
+    rows = v18_closed_trade_rows()
+    # approximate sort by id/opened_at string if no clean timestamp
+    rows = list(reversed(rows))
+    equity = float(starting)
+    peak = equity
+    points = []
+    max_dd = 0.0
+    for i, r in enumerate(rows, 1):
+        pnl = safe_float(r.get("pnl" if r.get("pnl") is not None else "pnl_pct"), 0)
+        equity *= (1 + pnl/100.0)
+        peak = max(peak, equity)
+        dd = (equity - peak)/peak*100 if peak else 0
+        max_dd = min(max_dd, dd)
+        points.append({"n": i, "symbol": r.get("symbol"), "strategy": r.get("strategy"), "pnl_pct": round(pnl,3), "equity": round(equity,3), "drawdown_pct": round(dd,3)})
+    return {"starting_equity": starting, "ending_equity": round(equity,3), "total_return_pct": round((equity-starting)/starting*100,3), "max_drawdown_pct": round(max_dd,3), "points": points[-300:]}
+
+
+def v18_drawdown_analytics():
+    curve = v18_equity_curve()
+    pts = curve.get("points", [])
+    dds = [safe_float(p.get("drawdown_pct"), 0) for p in pts]
+    return {"max_drawdown_pct": curve.get("max_drawdown_pct"), "current_drawdown_pct": round(dds[-1],3) if dds else 0, "worst_10_drawdowns": sorted(dds)[:10], "equity_curve_points": len(pts)}
+
+
+def v18_breadth_engine():
+    ctx = v17_market_context() if "v17_market_context" in globals() else {}
+    b = ctx.get("breadth") or ctx.get("internals", {}).get("breadth") or ctx.get("internals", {}).get("market_breadth") or {}
+    if not isinstance(b, dict): b = {}
+    items = b.get("items") or ctx.get("items") or []
+    adv = b.get("advancers")
+    dec = b.get("decliners")
+    if adv is None and isinstance(items, list):
+        adv = sum(1 for x in items if safe_float(x.get("change_pct"), 0) > 0)
+        dec = sum(1 for x in items if safe_float(x.get("change_pct"), 0) < 0)
+    total = max(1, (adv or 0) + (dec or 0))
+    above50 = b.get("above_ema50_pct")
+    above200 = b.get("above_ema200_pct")
+    if above50 is None and isinstance(items, list) and items:
+        above50 = sum(1 for x in items if x.get("above_ema50")) / len(items) * 100
+    if above200 is None and isinstance(items, list) and items:
+        above200 = sum(1 for x in items if x.get("above_ema200")) / len(items) * 100
+    nh = b.get("new_highs") or b.get("new_20d_highs") or 0
+    nl = b.get("new_lows") or b.get("new_20d_lows") or 0
+    score = 50
+    score += ((adv or 0) - (dec or 0)) / total * 25
+    score += (safe_float(above50, 50) - 50) * 0.25
+    score += (safe_float(above200, 50) - 50) * 0.15
+    score += (safe_float(nh,0) - safe_float(nl,0)) * 0.5
+    score = v18_clamp(score)
+    regime = "BULLISH_BREADTH" if score >= 62 else "BEARISH_BREADTH" if score <= 42 else "MIXED_BREADTH"
+    return {"breadth_score": round(score,2), "breadth_regime": regime, "advancers": adv or 0, "decliners": dec or 0, "advance_decline_ratio": round((adv or 0)/max(1,(dec or 0)),2), "above_ema50_pct": round(safe_float(above50,0),2), "above_ema200_pct": round(safe_float(above200,0),2), "new_highs": nh, "new_lows": nl, "sample_size": len(items) if isinstance(items, list) else 0, "raw": b}
+
+
+V18_REGIME_MAP = {
+    "RISK_ON": {"MOMENTUM": 1.08, "CORE_TREND": 1.05, "BREAKOUT": 1.06, "MEAN_REVERSION": 0.95, "PUT": 0.72},
+    "RISK_OFF": {"MOMENTUM": 0.72, "CORE_TREND": 0.82, "BREAKOUT": 0.70, "MEAN_REVERSION": 1.04, "PUT": 1.12},
+    "NEUTRAL": {"MOMENTUM": 0.95, "CORE_TREND": 1.00, "BREAKOUT": 0.92, "MEAN_REVERSION": 1.00, "PUT": 0.95},
+}
+
+
+def v18_regime_map():
+    ctx = v17_market_context() if "v17_market_context" in globals() else {}
+    regime = str(ctx.get("regime") or "NEUTRAL").upper()
+    if "RISK_ON" in regime: key = "RISK_ON"
+    elif "RISK_OFF" in regime: key = "RISK_OFF"
+    else: key = "NEUTRAL"
+    breadth = v18_breadth_engine()
+    return {"regime": key, "risk_score": ctx.get("risk_score"), "breadth_score": breadth.get("breadth_score"), "multipliers": V18_REGIME_MAP[key], "notes": "Multiplicative strategy map; stronger than simple additive penalties."}
+
+
+def v18_sector_rotation():
+    data = v17_sector_rotation() if "v17_sector_rotation" in globals() else {}
+    rows = data.get("top_sectors") or []
+    # fallback ETF sector map if older sector route returned empty
+    if not rows:
+        symbols = {"XLK_TECH":"XLK", "SMH_SEMIS":"SMH", "XLF_FINANCIALS":"XLF", "XLV_HEALTHCARE":"XLV", "XLI_INDUSTRIALS":"XLI", "XLE_ENERGY":"XLE", "XLY_CONSUMER_DISC":"XLY", "XLP_CONSUMER_STAPLES":"XLP", "XLU_UTILITIES":"XLU", "IWM_SMALLCAP":"IWM", "RSP_EQUAL_WEIGHT":"RSP"}
+        bench_ret = 0
+        try:
+            sp = yf.Ticker("SPY").history(period="1mo", interval="1d")
+            if not sp.empty:
+                bench_ret = (float(sp["Close"].iloc[-1])-float(sp["Close"].iloc[0]))/float(sp["Close"].iloc[0])*100
+        except Exception: pass
+        for sector, sym in symbols.items():
+            ret = None
+            try:
+                d = yf.Ticker(sym).history(period="1mo", interval="1d")
+                if not d.empty:
+                    ret = (float(d["Close"].iloc[-1])-float(d["Close"].iloc[0]))/float(d["Close"].iloc[0])*100
+            except Exception: pass
+            rows.append({"sector": sector, "symbol": sym, "return_pct": round(ret or 0,2), "benchmark_return_pct": round(bench_ret,2), "relative_strength_pct": round((ret or 0)-bench_ret,2), "score": round(50+((ret or 0)-bench_ret)*3,2)})
+    rows = [dict(x) for x in rows]
+    rows.sort(key=lambda x: safe_float(x.get("relative_strength_pct", x.get("score", 0)), 0), reverse=True)
+    return {"top_sectors": rows[:12], "strongest": rows[:3], "weakest": rows[-3:], "raw": data}
+
+
+def v18_correlation_clusters(symbols=None, threshold=None):
+    threshold = safe_float(threshold, V18_CLUSTER_THRESHOLD)
+    corr = v17_correlation_engine(symbols) if "v17_correlation_engine" in globals() else {}
+    matrix = corr.get("correlation_matrix") or corr.get("matrix") or {}
+    syms = corr.get("symbols") or list(matrix.keys())
+    # build graph from abs(correlation) >= threshold excluding self
+    graph = {s:set() for s in syms}
+    for a in syms:
+        row = matrix.get(a, {}) if isinstance(matrix, dict) else {}
+        for b, val in row.items():
+            if a != b and abs(safe_float(val, 0)) >= threshold:
+                graph.setdefault(a,set()).add(b); graph.setdefault(b,set()).add(a)
+    seen=set(); clusters=[]
+    for s in syms:
+        if s in seen: continue
+        stack=[s]; comp=[]; seen.add(s)
+        while stack:
+            x=stack.pop(); comp.append(x)
+            for y in graph.get(x,set()):
+                if y not in seen:
+                    seen.add(y); stack.append(y)
+        if len(comp)>1:
+            clusters.append({"cluster": comp, "size": len(comp), "risk_bucket": "CORRELATED_BUCKET"})
+    return {"threshold": threshold, "symbols": syms, "clusters": clusters, "correlation": corr}
+
+
+V18_EXPOSURE_MAP = {
+    "NVDA":["TECH","AI","SEMIS","MEGA_CAP"], "AMD":["TECH","AI","SEMIS"], "AVGO":["TECH","SEMIS","MEGA_CAP"], "SMCI":["TECH","AI","SEMIS"], "MU":["TECH","SEMIS"], "ARM":["TECH","SEMIS"],
+    "QQQ":["ETF","TECH","MEGA_CAP"], "SPY":["ETF","BROAD_MARKET"], "IWM":["ETF","SMALL_CAP"],
+    "AAPL":["TECH","MEGA_CAP"], "MSFT":["TECH","AI","MEGA_CAP"], "GOOGL":["TECH","AI","MEGA_CAP"], "META":["TECH","AI","MEGA_CAP"], "AMZN":["TECH","CONSUMER","MEGA_CAP"],
+    "TSLA":["EV","HIGH_BETA"], "MSTR":["CRYPTO_PROXY","HIGH_BETA"], "COIN":["CRYPTO_PROXY","HIGH_BETA"],
+}
+
+
+def v18_portfolio_exposure():
+    positions = v17_portfolio_positions() if "v17_portfolio_positions" in globals() else []
+    if not positions:
+        return {"configured": False, "message": "Set PORTFOLIO_POSITIONS=NVDA:10,TSLA:5,QQQ:20"}
+    total = sum(safe_float(p.get("weight_pct"),0) for p in positions) or 1
+    expo={}
+    for p in positions:
+        sym = str(p.get("symbol") or "").upper()
+        w = safe_float(p.get("weight_pct"),0)/total*100
+        tags = V18_EXPOSURE_MAP.get(sym) or [V17_SECTOR_MAP.get(sym,"OTHER") if "V17_SECTOR_MAP" in globals() else "OTHER"]
+        for t in tags:
+            expo[t]=expo.get(t,0)+w
+    top = sorted(expo.items(), key=lambda kv: kv[1], reverse=True)
+    heat = max([v for _,v in top], default=0) + max(0, len([v for _,v in top if v>25])-1)*8
+    warnings=[]
+    for k,v in top:
+        if v>=50: warnings.append(f"High {k} exposure {round(v,1)}%")
+    clusters = v18_correlation_clusters([p.get("symbol") for p in positions]).get("clusters", [])
+    if clusters: warnings.append(f"{len(clusters)} correlation cluster(s) detected")
+    return {"configured": True, "positions": positions, "exposure": {k:round(v,2) for k,v in top}, "top_exposure": {"theme": top[0][0] if top else None, "weight_pct": round(top[0][1],2) if top else 0}, "portfolio_heat": round(v18_clamp(heat),2), "risk_level": "HIGH" if heat>=70 else "MEDIUM" if heat>=45 else "LOW", "correlation_clusters": clusters, "warnings": warnings}
+
+
+def v18_dynamic_kelly(strategy=None):
+    rows = v18_closed_trade_rows()
+    if strategy:
+        rows = [r for r in rows if str(r.get("strategy") or "").upper()==str(strategy).upper()]
+    m = v18_performance_metrics(rows)
+    p = safe_float(m.get("win_rate_pct"),0)/100
+    aw = abs(safe_float(m.get("avg_win_pct"),0)); al = abs(safe_float(m.get("avg_loss_pct"),0))
+    b = aw/al if al else 0
+    if m.get("trades",0) < V18_MIN_SAMPLE or b<=0:
+        k=0; note="Insufficient sample; use min-risk sizing."
+    else:
+        k = p - (1-p)/b
+        note="Use fractional Kelly only; cap by portfolio heat and regime."
+    # Regime and portfolio haircuts
+    reg = v18_regime_map().get("regime")
+    heat = v18_portfolio_exposure().get("portfolio_heat", 0) if v18_portfolio_exposure().get("configured") else 0
+    haircut = 1.0
+    if reg == "RISK_OFF": haircut *= 0.65
+    if heat >= 70: haircut *= 0.5
+    elif heat >= 45: haircut *= 0.75
+    full = max(0, k*haircut)
+    return {"strategy": strategy or "ALL", "metrics": m, "kelly_full": round(full,4), "half_kelly": round(min(0.10, full/2),4), "quarter_kelly": round(min(0.05, full/4),4), "haircut": round(haircut,2), "note": note}
+
+
+def v18_monte_carlo(runs=None, steps=50, ruin_level=70):
+    import random
+    runs = int(runs or V18_MC_RUNS)
+    rows = v18_closed_trade_rows()
+    rets = [safe_float(r.get("pnl" if r.get("pnl") is not None else "pnl_pct"), None) for r in rows]
+    rets = [r for r in rets if r is not None]
+    if len(rets) < 5:
+        rets = [0.8, -0.6, 1.1, -0.9, 0.5, -0.4, 1.3, -0.7, 0.6, -0.5]
+        note = "Fallback synthetic sample. Collect closed journal outcomes for real MC."
+    else:
+        note = "Bootstrap from closed trade outcomes."
+    finals=[]; maxdds=[]; ruins=0
+    for _ in range(runs):
+        eq=100.0; peak=100.0; maxdd=0.0
+        for _ in range(int(steps)):
+            r=random.choice(rets)
+            eq *= (1+r/100.0)
+            peak=max(peak,eq); dd=(eq-peak)/peak*100 if peak else 0
+            maxdd=min(maxdd,dd)
+        finals.append(eq); maxdds.append(maxdd)
+        if eq <= ruin_level: ruins += 1
+    finals.sort(); maxdds.sort()
+    def q(arr, pct):
+        idx=max(0,min(len(arr)-1,int((len(arr)-1)*pct)))
+        return round(arr[idx],3)
+    return {"runs": runs, "steps": steps, "sample_size": len(rets), "note": note, "ending_equity": {"p10": q(finals,.10), "p25": q(finals,.25), "p50": q(finals,.50), "p75": q(finals,.75), "p90": q(finals,.90)}, "max_drawdown": {"p10": q(maxdds,.10), "p50": q(maxdds,.50), "p90": q(maxdds,.90)}, "risk_of_ruin_pct": round(ruins/runs*100,3), "ruin_level": ruin_level}
+
+
+def v18_institutional_composite(row, context=None):
+    context = context or {}
+    q = v18_clamp(row.get("quality_score", row.get("score", 50)))
+    rs = v18_clamp(50 + safe_float(row.get("relative_strength_pct"),0)/2)
+    breadth = safe_float(context.get("breadth",{}).get("breadth_score"), 50)
+    strategy = str(row.get("strategy") or "CORE_TREND").upper()
+    decision = str(row.get("decision") or "").upper()
+    regmap = v18_regime_map()
+    regime = regmap.get("regime")
+    multipliers = regmap.get("multipliers", {})
+    mf = multipliers.get("PUT" if "PUT" in decision else strategy, multipliers.get(strategy, 1.0))
+    hist = v18_dynamic_kelly(strategy).get("metrics", {})
+    pf = safe_float(hist.get("profit_factor"), 0)
+    exp = safe_float(hist.get("true_expectancy_pct"), 0)
+    hist_factor = 1.0
+    if hist.get("trades",0) >= V18_MIN_SAMPLE:
+        hist_factor += min(0.20, max(-0.20, exp/10.0))
+        if pf < 1: hist_factor -= 0.10
+        elif pf >= 1.5: hist_factor += 0.08
+    breadth_factor = 0.85 + breadth/100*0.30
+    score = (q*0.55 + rs*0.25 + breadth*0.20) * mf * hist_factor * breadth_factor
+    return round(v18_clamp(score),2), {"regime": regime, "regime_factor": round(mf,2), "history_factor": round(hist_factor,2), "breadth_factor": round(breadth_factor,2)}
+
+
+def v18_ranking(limit=20, mode="daily"):
+    base = v17_opportunity_ranking(max(limit,40), mode) if "v17_opportunity_ranking" in globals() else {"top":[]}
+    breadth = v18_breadth_engine()
+    rows=[]
+    for r in base.get("top",[]):
+        row=dict(r)
+        score, factors = v18_institutional_composite(row, {"breadth": breadth})
+        row["v18_composite_score"] = score
+        row["v18_factors"] = factors
+        q = score
+        old = str(row.get("decision") or "").upper()
+        if q >= 80 and "PUT" not in old: row["decision"]="CALL_WATCH"
+        elif q <= 30: row["decision"]="PUT_WATCH"
+        elif "PUT" in old and q <= 48: row["decision"]="PUT_WATCH"
+        else: row["decision"]="WAIT"
+        rows.append(row)
+    rows.sort(key=lambda x:safe_float(x.get("v18_composite_score"),0), reverse=True)
+    return {"version": V18_VERSION, "mode": mode, "breadth": breadth, "regime_map": v18_regime_map(), "top": rows[:int(limit)]}
+
+
+def v18_snapshot():
+    return {"version": V18_VERSION, "time": now_text(), "closed_trade_journal": {"count": len(v18_closed_trade_rows(20000)), "latest": v18_closed_trade_rows(10)}, "strategy_performance": v18_strategy_performance_db(), "equity_curve": v18_equity_curve(), "drawdown": v18_drawdown_analytics(), "breadth_engine": v18_breadth_engine(), "sector_rotation": v18_sector_rotation(), "regime_map": v18_regime_map(), "ranking": v18_ranking(20,"daily"), "correlation_clusters": v18_correlation_clusters(), "portfolio_exposure": v18_portfolio_exposure(), "kelly_dynamic": v18_dynamic_kelly(), "monte_carlo_10000": v18_monte_carlo(runs=V18_MC_RUNS)}
+
+
+def v18_card(label, value, sub=""):
+    return v15_card(label, value, sub) if "v15_card" in globals() else f"<div><b>{label}</b><br>{value}<br>{sub}</div>"
+
+
+def v18_table(rows, cols, empty="No data"):
+    return v15_table(rows, cols, empty) if "v15_table" in globals() else "<pre>"+v18_json(rows)+"</pre>"
+
+
+def v18_bars(dist):
+    if "v17_bars_from_distribution" in globals(): return v17_bars_from_distribution(dist)
+    return "<pre>"+v18_json(dist)+"</pre>"
+
+
+def v18_dashboard_body():
+    perf = v18_strategy_performance_db()
+    overall = perf.get("overall", {})
+    eq = v18_equity_curve()
+    mc = v18_monte_carlo(runs=10000)
+    ranking = v18_ranking(20,"daily")
+    body = "<div class='grid grid-4'>"
+    body += v18_card("Win Rate", v18_pct(overall.get("win_rate_pct")), f"Closed trades: {overall.get('trades',0)}")
+    body += v18_card("Profit Factor", v18_num(overall.get("profit_factor")), "True closed outcomes")
+    body += v18_card("True Expectancy", v18_pct(overall.get("true_expectancy_pct")), overall.get("sample_warning",""))
+    body += v18_card("Risk of Ruin", v18_pct(mc.get("risk_of_ruin_pct")), "MC 10,000")
+    body += "</div>"
+    body += "<div class='grid grid-2'>"
+    body += "<div class='section'><h2>V18 Institutional Composite Ranking</h2><div class='section-body'>" + v18_table(ranking.get("top", [])[:20], [("symbol","Symbol"),("decision","Decision"),("v18_composite_score","V18 Score"),("quality_score","Quality"),("institutional_score","Inst"),("strategy","Strategy")], "No ranking") + "</div></div>"
+    body += "<div class='section'><h2>True Strategy Performance</h2><div class='section-body'>" + v18_table(perf.get("strategies", [])[:10], [("strategy","Strategy"),("trades","Trades"),("win_rate_pct","Win%"),("profit_factor","PF"),("true_expectancy_pct","Exp"),("avg_r","Avg R")], "No closed outcomes yet") + "</div></div>"
+    body += "</div>"
+    body += "<div class='grid grid-3'>" + v18_card("Equity", eq.get("ending_equity"), f"Max DD {eq.get('max_drawdown_pct')}%") + v18_card("Breadth", v18_breadth_engine().get("breadth_score"), v18_breadth_engine().get("breadth_regime")) + v18_card("Portfolio Heat", v18_portfolio_exposure().get("portfolio_heat", "N/A"), v18_portfolio_exposure().get("risk_level", "Not configured")) + "</div>"
+    return body
+
+
+def v18_ranking_body():
+    mode = request.args.get("mode", "daily") if "request" in globals() else "daily"
+    data = v18_ranking(30, mode)
+    body = "<div class='grid grid-4'>" + v18_card("Mode", mode, "daily / intraday / swing") + v18_card("Regime", data.get("regime_map",{}).get("regime"), "Multiplicative map") + v18_card("Breadth", data.get("breadth",{}).get("breadth_score"), data.get("breadth",{}).get("breadth_regime")) + v18_card("Top", data.get("top", [{}])[0].get("symbol") if data.get("top") else "N/A", "Highest V18 composite") + "</div>"
+    body += "<div class='actions'><a class='button' href='/v18/ranking?mode=daily'>Daily</a><a class='button' href='/v18/ranking?mode=intraday'>Intraday</a><a class='button' href='/v18/ranking?mode=swing'>Swing</a></div>"
+    body += "<div class='section'><h2>V18 Regime × Breadth × History Composite Ranking</h2><div class='section-body'>" + v18_table(data.get("top", []), [("symbol","Symbol"),("decision","Decision"),("v18_composite_score","V18"),("quality_score","Quality"),("raw_quality","Raw"),("regime_penalty","Old Penalty"),("strategy","Strategy"),("relative_strength_pct","RS")], "No ranking") + "</div></div>"
+    return body
+
+
+def v18_leaderboard_body():
+    data = v18_strategy_performance_db()
+    live = v17_strategy_leaderboard().get("live_strategy_distribution", []) if "v17_strategy_leaderboard" in globals() else []
+    body = "<div class='section'><h2>Closed Trade Strategy Performance DB</h2><div class='section-body'>" + v18_table(data.get("strategies", []), [("strategy","Strategy"),("trades","Trades"),("win_rate_pct","Win%"),("avg_win_pct","Avg Win"),("avg_loss_pct","Avg Loss"),("profit_factor","PF"),("true_expectancy_pct","Expectancy"),("avg_r","Avg R")], "No closed outcomes yet. Use /v18/journal/log to add closed trades, or let V14 outcomes close over time.") + "</div></div>"
+    body += "<div class='section'><h2>Live Strategy Distribution</h2><div class='section-body'>" + v18_table(live, [("strategy","Strategy"),("live_setups","Live"),("avg_quality","Avg Quality"),("call","Call"),("put","Put"),("wait","Wait")], "No live setups") + "</div></div>"
+    return body
+
+
+def v18_risk_body():
+    k = v18_dynamic_kelly()
+    mc = v18_monte_carlo(runs=10000)
+    eq = v18_equity_curve()
+    dd = v18_drawdown_analytics()
+    body = "<div class='grid grid-4'>" + v18_card("Kelly Full", k.get("kelly_full"), k.get("note")) + v18_card("Half Kelly", k.get("half_kelly"), "Capped") + v18_card("MC P50", mc.get("ending_equity",{}).get("p50"), "10,000 runs") + v18_card("Max DD", v18_pct(dd.get("max_drawdown_pct")), f"Equity {eq.get('ending_equity')}") + "</div>"
+    body += "<div class='section'><h2>Equity Curve Latest Points</h2><div class='section-body'>" + v18_table(eq.get("points", [])[-30:], [("n","#"),("symbol","Symbol"),("strategy","Strategy"),("pnl_pct","PnL%"),("equity","Equity"),("drawdown_pct","DD%")], "No equity curve yet") + "</div></div>"
+    body += "<div class='section'><h2>Monte Carlo 10,000 + Risk of Ruin</h2><div class='section-body'><div class='code'>" + v18_json(mc, 5000) + "</div></div></div>"
+    return body
+
+
+def v18_internals_body():
+    b = v18_breadth_engine(); sector = v18_sector_rotation(); reg = v18_regime_map()
+    body = "<div class='grid grid-4'>" + v18_card("Regime", reg.get("regime"), "Strategy multipliers active") + v18_card("Breadth", b.get("breadth_score"), b.get("breadth_regime")) + v18_card("Adv / Dec", f"{b.get('advancers')} / {b.get('decliners')}", f"Ratio {b.get('advance_decline_ratio')}") + v18_card("Above EMA50", v18_pct(b.get("above_ema50_pct")), f"EMA200 {v18_pct(b.get('above_ema200_pct'))}") + "</div>"
+    body += "<div class='section'><h2>Sector Rotation</h2><div class='section-body'>" + v18_table(sector.get("top_sectors", []), [("sector","Sector"),("symbol","Symbol"),("relative_strength_pct","RS"),("return_pct","Return"),("score","Score")], "No sector data") + "</div></div>"
+    body += "<div class='section'><h2>Regime Map</h2><div class='section-body'><div class='code'>" + v18_json(reg, 3000) + "</div></div></div>"
+    return body
+
+
+def v18_portfolio_body():
+    expo = v18_portfolio_exposure(); clusters = v18_correlation_clusters()
+    body = "<div class='grid grid-3'>" + v18_card("Portfolio Heat", expo.get("portfolio_heat", "Not configured"), expo.get("risk_level", expo.get("message", ""))) + v18_card("Top Exposure", (expo.get("top_exposure") or {}).get("theme","N/A"), f"{(expo.get('top_exposure') or {}).get('weight_pct','')}%") + v18_card("Clusters", len(expo.get("correlation_clusters", [])), "Correlation buckets") + "</div>"
+    body += "<div class='section'><h2>Exposure Analytics</h2><div class='section-body'><div class='code'>" + v18_json(expo, 7000) + "</div></div></div>"
+    body += "<div class='section'><h2>Correlation Clusters</h2><div class='section-body'><div class='code'>" + v18_json(clusters, 9000) + "</div></div></div>"
+    return body
+
+
+def v18_journal_body():
+    rows = v18_closed_trade_rows(100)
+    body = "<div class='actions'><a class='button' href='/v18/journal/log/NVDA?side=CALL&entry=100&exit=105&strategy=MOMENTUM'>Test Closed Trade</a><a class='button' href='/v18/api/snapshot'>Snapshot JSON</a></div>"
+    body += "<div class='section'><h2>Closed Trade Journal</h2><div class='section-body'>" + v18_table(rows[:50], [("symbol","Symbol"),("side","Side"),("strategy","Strategy"),("entry_price","Entry"),("exit_price","Exit"),("pnl_pct","PnL%"),("r_multiple","R"),("source","Source")], "No closed trades yet") + "</div></div>"
+    return body
+
+
+def v18_layout(title, body, active="dashboard", refresh=False):
+    refresh_tag = "<meta http-equiv='refresh' content='180'>" if refresh else ""
+    nav = [("Dashboard","/v18/dashboard","dashboard"),("Ranking","/v18/ranking","ranking"),("Leaderboard","/v18/leaderboard","leaderboard"),("Risk","/v18/risk","risk"),("Internals","/v18/internals","internals"),("Portfolio","/v18/portfolio","portfolio"),("Journal","/v18/journal","journal"),("JSON","/v18/api/snapshot","json")]
+    links = "".join([f"<a class='{ 'active' if key==active else '' }' href='{href}'>{label}</a>" for label, href, key in nav])
+    css = """
+    body{margin:0;background:#0b1020;color:#e5edf7;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:24px}.top{display:flex;justify-content:space-between;gap:18px;align-items:center}.brand{display:flex;gap:12px;align-items:center}.logo{background:linear-gradient(135deg,#22c55e,#2563eb);padding:10px;border-radius:12px;font-weight:800}.nav a{color:#b8c4d6;text-decoration:none;margin-left:8px;padding:8px 12px;border-radius:999px;background:#151c32}.nav a.active{background:#2563eb;color:white}.grid{display:grid;gap:14px;margin:16px 0}.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:repeat(3,1fr)}.grid-4{grid-template-columns:repeat(4,1fr)}.card,.section{background:#121a2e;border:1px solid #26334f;border-radius:16px;box-shadow:0 10px 30px #0004}.card{padding:18px}.card .label{font-size:12px;text-transform:uppercase;color:#94a3b8}.card .value{font-size:26px;font-weight:800;margin:8px 0}.card .sub{color:#9fb0c8;font-size:12px}.section h2{margin:0;padding:16px 18px;border-bottom:1px solid #26334f}.section-body{padding:14px 18px;overflow:auto}.tbl{width:100%;border-collapse:collapse}.tbl th{color:#a8bad3;text-transform:uppercase;font-size:12px}.tbl td,.tbl th{padding:9px;border-bottom:1px solid #26334f;text-align:left}.pill{display:inline-block;padding:5px 9px;border-radius:999px;background:#273757}.pill.green{background:#14532d;color:#bbf7d0}.pill.red{background:#7f1d1d;color:#fecaca}.pill.yellow{background:#713f12;color:#fde68a}.code{white-space:pre-wrap;background:#070b16;border:1px solid #1f2a44;border-radius:12px;padding:12px;color:#c7d2fe;font-size:12px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.button{display:inline-block;color:white;background:#1d4ed8;text-decoration:none;padding:10px 14px;border-radius:10px}@media(max-width:900px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}.top{display:block}.nav{margin-top:12px}}
+    """
+    return f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>{refresh_tag}<title>{v15_escape(title)}</title><style>{css}</style></head><body><div class='wrap'><div class='top'><div class='brand'><div class='logo'>V18</div><div><h1>{v15_escape(title)}</h1><div style='color:#94a3b8'>{V18_VERSION} · {now_text()}</div></div></div><div class='nav'>{links}</div></div>{body}<p style='text-align:center;color:#718096;margin:34px 0'>Free data stack. Research cockpit only. Not investment advice.</p></div></body></html>"
+
+
+@app.route("/v18/status", methods=["GET"])
+def v18_status_route():
+    return jsonify({"version": V18_VERSION, "enabled": True, "priorities": {"p1":["Closed Trade Journal","Strategy Performance Database","True Expectancy","Profit Factor","Equity Curve"], "p2":["Breadth Engine","Sector Rotation","Regime Map"], "p3":["Correlation Cluster","Portfolio Concentration","Exposure Analytics"], "p4":["Monte Carlo 10000 Runs","Risk Of Ruin","Kelly Dynamic"]}, "routes": ["/v18", "/v18/dashboard", "/v18/ranking", "/v18/leaderboard", "/v18/risk", "/v18/internals", "/v18/portfolio", "/v18/journal", "/v18/api/snapshot"]})
+
+@app.route("/v18", methods=["GET"])
+def v18_root_route():
+    return v18_layout("V18 Hedge-Fund Research Terminal", v18_dashboard_body(), active="dashboard", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/dashboard", methods=["GET"])
+def v18_dashboard_route():
+    return v18_layout("V18 Dashboard", v18_dashboard_body(), active="dashboard", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/ranking", methods=["GET"])
+def v18_ranking_route():
+    return v18_layout("V18 Institutional Composite Ranking", v18_ranking_body(), active="ranking", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/leaderboard", methods=["GET"])
+def v18_leaderboard_route():
+    return v18_layout("V18 Strategy Performance DB", v18_leaderboard_body(), active="leaderboard", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/risk", methods=["GET"])
+def v18_risk_route():
+    return v18_layout("V18 Risk: Kelly + Monte Carlo + Drawdown", v18_risk_body(), active="risk", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/internals", methods=["GET"])
+def v18_internals_route():
+    return v18_layout("V18 Breadth + Sector + Regime Map", v18_internals_body(), active="internals", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/portfolio", methods=["GET"])
+def v18_portfolio_route():
+    return v18_layout("V18 Portfolio Exposure + Correlation Clusters", v18_portfolio_body(), active="portfolio", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/journal", methods=["GET"])
+def v18_journal_route():
+    return v18_layout("V18 Closed Trade Journal", v18_journal_body(), active="journal", refresh=request.args.get("refresh")=="1")
+
+@app.route("/v18/journal/log/<symbol>", methods=["GET", "POST"])
+def v18_journal_log_route(symbol):
+    return jsonify(v18_log_closed_trade(symbol, side=request.args.get("side","CALL"), strategy=request.args.get("strategy","MOMENTUM"), entry=request.args.get("entry"), exit=request.args.get("exit"), qty=request.args.get("qty",1), score=request.args.get("score"), regime=request.args.get("regime"), notes=request.args.get("notes","")))
+
+@app.route("/v18/api/snapshot", methods=["GET"])
+def v18_api_snapshot_route():
+    return jsonify(v18_snapshot())
+
+
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
