@@ -7,7 +7,7 @@ import base64
 import hashlib
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone, timezone, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
@@ -86,7 +86,7 @@ TH_MARKET_MORNING_END = os.getenv("TH_MARKET_MORNING_END", "12:30")
 TH_MARKET_AFTERNOON_START = os.getenv("TH_MARKET_AFTERNOON_START", "14:30")
 TH_MARKET_AFTERNOON_END = os.getenv("TH_MARKET_AFTERNOON_END", "16:45")
 US_PREMARKET_START_TH = os.getenv("US_PREMARKET_START_TH", "15:00")
-US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "true").lower() == "true"
+US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "false").lower() == "true"
 US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
 US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:30")
 SYMBOL_COOLDOWN_MINUTES = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "240"))
@@ -101,8 +101,9 @@ AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
-US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
-US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
+# V13 bugfix: keep US regular session aligned with current DST Thai time. Do not override 20:30 with 21:30.
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "03:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
@@ -118,9 +119,9 @@ STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
-PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
-TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
     x.strip().upper()
@@ -160,7 +161,7 @@ THAI_SYMBOLS = {
     "ANAN", "NOBLE", "QH", "PSH", "LPN", "SENA", "AWC", "ERW",
     "BA", "AAV", "NEX", "BYD", "TTA", "PSL", "RCL", "STA", "STGT",
     "NER", "CPF", "GFPT", "BTG", "TFG", "XO", "PRM", "III", "JAS",
-    "MONO", "THCOM", "INTUCH", "TLI", "BLA", "TIPH", "BAM", "CHAYO",
+    "MONO", "THCOM", "ADVANC", "TLI", "BLA", "TIPH", "BAM", "CHAYO",
     "ASK", "KGI", "MST", "CGH", "TQM", "MENA", "SNNP", "PLUS"
 }
 
@@ -168,6 +169,22 @@ GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAU
 US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
 
 CACHE = {}
+
+# ============================================================
+# DELISTED / MERGED SYMBOL FIXES
+# ============================================================
+# INTUCH was removed/merged from the active Thai market universe.
+# The bot should not keep scanning INTUCH.BK because Yahoo Finance often returns no data.
+# User commands for INTUCH are redirected to ADVANC as the closest active telecom proxy.
+DELISTED_SYMBOL_ALIASES = {
+    "INTUCH": "ADVANC",
+    "INTUCH.BK": "ADVANC.BK",
+    "INTUCH.SET": "ADVANC.SET",
+}
+
+def resolve_delisted_symbol(symbol):
+    key = str(symbol or "").strip().upper()
+    return DELISTED_SYMBOL_ALIASES.get(key, key)
 
 
 # ============================================================
@@ -224,6 +241,12 @@ def save_signal(symbol, asset_type, price, score, bias, signal_type, regime, pro
         )
         conn.commit()
         conn.close()
+        # V13 Signal Quality Layer: audit every emitted signal for future win-rate evaluation.
+        try:
+            if "save_signal_audit" in globals():
+                save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
+        except Exception as audit_error:
+            print("save_signal_audit error:", audit_error)
     except Exception as e:
         print("save_signal error:", e)
 
@@ -406,6 +429,12 @@ def yahoo_bk_exists(symbol):
 def normalize_asset(user_text):
     raw = (user_text or "").strip()
     key = raw.upper().replace(" ", "")
+
+    # Redirect delisted/merged symbols before asset classification.
+    # Example: INTUCH or INTUCH.BK -> ADVANC / ADVANC.BK
+    if key in DELISTED_SYMBOL_ALIASES:
+        key = DELISTED_SYMBOL_ALIASES[key].replace(".SET", ".BK")
+        raw = key
 
     if raw in GOLD_WORDS or key in GOLD_WORDS:
         return {
@@ -2822,7 +2851,7 @@ THAI_MARKET_LEADER_WATCHLISTS = {
     "THAI_BANK_FINANCE": ["KBANK", "BBL", "SCB", "KTB", "TTB", "TISCO", "KKP", "KTC", "MTC", "SAWAD", "TIDLOR"],
     "THAI_ENERGY_POWER": ["PTT", "PTTEP", "TOP", "BCP", "SPRC", "IRPC", "OR", "GPSC", "GULF", "BGRIM", "EGCO", "RATCH", "EA"],
     "THAI_COMMERCE_CONSUMER": ["CPALL", "CRC", "HMPRO", "COM7", "CPAXT", "DOHOME", "GLOBAL", "CBG", "OSP"],
-    "THAI_TELECOM_DIGITAL": ["ADVANC", "TRUE", "DIF", "INTUCH"],
+    "THAI_TELECOM_DIGITAL": ["ADVANC", "TRUE", "DIF"],
     "THAI_TRANSPORT_TOURISM": ["AOT", "BTS", "BEM", "BA", "MINT", "CENTEL", "ERW"],
     "THAI_ELECTRONICS_EXPORT": ["DELTA", "HANA", "KCE", "CCET", "SVI"],
     "THAI_HEALTHCARE": ["BDMS", "BH", "CHG", "BCH", "PR9"],
@@ -2874,7 +2903,11 @@ def dedupe_keep_order(items):
 
 
 def classify_watchlist_symbol(symbol):
-    key = str(symbol).strip().upper()
+    key = resolve_delisted_symbol(symbol)
+    if key.endswith(".BK"):
+        key = key.replace(".BK", "")
+    if key.endswith(".SET"):
+        key = key.replace(".SET", "")
     if not key:
         return None
     if key in GOLD_WORDS or key in GOLD_WATCHLIST:
@@ -2905,6 +2938,7 @@ def build_v8_scan_watchlist():
         if ENABLE_MARKET_LEADER_WATCHLIST:
             base.extend(MARKET_LEADER_US_WATCHLIST)
             base.extend(MARKET_LEADER_TH_WATCHLIST)
+        base = [resolve_delisted_symbol(x).replace(".BK", "").replace(".SET", "") for x in base]
         return dedupe_keep_order(base)
 
     # Backward compatible mode from old WATCHLIST, but with safer classification.
@@ -5684,9 +5718,1054 @@ def v11_options_flow_route(symbol):
 def v11_dashboard_route():
     return jsonify(v11_performance_dashboard())
 
+
+
+# ============================================================
+# V12 INSTITUTIONAL RESEARCH GRADE - FREE 100%
+# ============================================================
+V12_ENABLED = os.getenv("V12_ENABLED", "true").lower() == "true"
+V12_DASHBOARD_UNIVERSE = env_list("V12_DASHBOARD_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,AMZN,GOOGL,AVGO,PLTR,QQQ,SPY,IWM,SMH,XLF,XLE,XLK,TLT,HYG,GLD,USO")
+V12_MONTE_CARLO_RUNS = int(os.getenv("V12_MONTE_CARLO_RUNS", "1000"))
+V12_MONTE_CARLO_DAYS = int(os.getenv("V12_MONTE_CARLO_DAYS", "20"))
+V12_VAR_LEVEL = float(os.getenv("V12_VAR_LEVEL", "0.05"))
+V12_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("V12_MAX_CORRELATED_EXPOSURE_PCT", "45"))
+V12_MAX_SINGLE_THEME_PCT = float(os.getenv("V12_MAX_SINGLE_THEME_PCT", "40"))
+
+V12_THEME_MAP = {
+    "NVDA":"AI_SEMICON", "AMD":"AI_SEMICON", "AVGO":"AI_SEMICON", "SMCI":"AI_SEMICON", "SMH":"SEMICON_ETF", "TSM":"AI_SEMICON",
+    "AAPL":"MEGA_CAP_TECH", "MSFT":"MEGA_CAP_TECH", "META":"MEGA_CAP_TECH", "GOOGL":"MEGA_CAP_TECH", "GOOG":"MEGA_CAP_TECH", "AMZN":"MEGA_CAP_TECH",
+    "QQQ":"NASDAQ_BETA", "TQQQ":"NASDAQ_BETA", "SQQQ":"NASDAQ_BETA", "SPY":"SP500_BETA", "IWM":"SMALL_CAP_BETA",
+    "TSLA":"EV_HIGH_BETA", "PLTR":"AI_SOFTWARE", "SNOW":"AI_SOFTWARE", "CRWD":"CYBER_SOFTWARE", "NET":"CYBER_SOFTWARE",
+    "JPM":"FINANCIALS", "BAC":"FINANCIALS", "XLF":"FINANCIALS", "XOM":"ENERGY", "CVX":"ENERGY", "XLE":"ENERGY", "USO":"OIL",
+    "TLT":"BONDS_DURATION", "HYG":"CREDIT_RISK", "GLD":"GOLD_DEFENSIVE", "GOLD":"GOLD_DEFENSIVE",
+    "ADVANC":"THAI_TELECOM", "TRUE":"THAI_TELECOM", "SCB":"THAI_BANK", "KBANK":"THAI_BANK", "BBL":"THAI_BANK", "AOT":"THAI_TOURISM", "PTT":"THAI_ENERGY"
+}
+
+def v12_yf_symbol(symbol):
+    s = resolve_delisted_symbol(symbol).upper().strip()
+    if s in GOLD_WORDS or s == "GOLD":
+        return "GC=F"
+    if s.endswith(".BK") or s.endswith(".SET"):
+        return s.replace(".SET", ".BK")
+    if s in THAI_SYMBOLS or s in TH_WATCHLIST or s in TIER_C_WATCHLIST:
+        return f"{s}.BK"
+    return s
+
+def v12_theme(symbol):
+    s = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    return V12_THEME_MAP.get(s, "OTHER")
+
+def v12_download_prices(symbols, period="1y"):
+    out = {}
+    for s in symbols:
+        yf_sym = v12_yf_symbol(s)
+        try:
+            df = yf.Ticker(yf_sym).history(period=period, interval="1d", auto_adjust=True)
+            if df is not None and not df.empty and "Close" in df.columns:
+                out[s] = df["Close"].dropna()
+        except Exception:
+            continue
+    return out
+
+def v12_last_return(symbol, days=20):
+    try:
+        ser = v12_download_prices([symbol], period="6mo").get(symbol)
+        if ser is None or len(ser) < days + 2:
+            return None
+        return float((ser.iloc[-1] / ser.iloc[-days-1] - 1) * 100)
+    except Exception:
+        return None
+
+def v12_macro_regime_research_grade():
+    probes = {
+        "SPY":"SPY", "QQQ":"QQQ", "IWM":"IWM", "VIX":"^VIX", "US10Y":"^TNX",
+        "DOLLAR":"DX-Y.NYB", "TLT":"TLT", "HYG":"HYG", "GOLD":"GLD", "OIL":"USO",
+        "SEMICON":"SMH", "TECH":"XLK", "FINANCIALS":"XLF", "ENERGY":"XLE"
+    }
+    score = 50
+    signals = []
+    data = {}
+    for name, sym in probes.items():
+        try:
+            ser = yf.Ticker(sym).history(period="6mo", interval="1d", auto_adjust=True)["Close"].dropna()
+            if len(ser) < 60:
+                continue
+            last = float(ser.iloc[-1])
+            ma20 = float(ser.tail(20).mean())
+            ma50 = float(ser.tail(50).mean())
+            chg20 = float((ser.iloc[-1] / ser.iloc[-21] - 1) * 100) if len(ser) > 21 else None
+            data[name] = {"symbol": sym, "last": round(last, 4), "above_ma20": last > ma20, "above_ma50": last > ma50, "chg20_pct": round(chg20, 2) if chg20 is not None else None}
+        except Exception as e:
+            data[name] = {"symbol": sym, "error": str(e)[:120]}
+
+    def add(cond, pts, reason):
+        nonlocal score
+        if cond:
+            score += pts
+            signals.append(reason)
+
+    add(data.get("SPY", {}).get("above_ma50"), 8, "SPY above 50D = equity risk-on")
+    add(data.get("QQQ", {}).get("above_ma50"), 8, "QQQ above 50D = growth leadership")
+    add(data.get("IWM", {}).get("above_ma50"), 5, "IWM above 50D = broader risk appetite")
+    add(data.get("VIX", {}).get("last", 99) < 18, 9, "VIX below 18 = low stress")
+    add(data.get("VIX", {}).get("last", 0) > 25, -15, "VIX above 25 = stress regime")
+    add(data.get("HYG", {}).get("above_ma50"), 8, "HYG above 50D = credit risk-on")
+    add(data.get("TLT", {}).get("chg20_pct", 0) < -3, -5, "TLT weak = rate pressure")
+    add(data.get("US10Y", {}).get("chg20_pct", 0) > 8, -6, "10Y yield rising quickly = duration headwind")
+    add(data.get("DOLLAR", {}).get("chg20_pct", 0) > 3, -5, "Dollar rising = liquidity headwind")
+    add(data.get("SEMICON", {}).get("above_ma50"), 7, "Semiconductor leadership positive for AI/tech beta")
+    add(data.get("FINANCIALS", {}).get("above_ma50"), 4, "Financials above 50D supports cyclicals")
+    add(data.get("ENERGY", {}).get("chg20_pct", 0) > 5, -3, "Energy spike can pressure inflation expectations")
+    add(data.get("GOLD", {}).get("chg20_pct", 0) > 6 and not data.get("SPY", {}).get("above_ma50"), -5, "Gold outperforming while equities weak = defensive stress")
+
+    score = max(0, min(100, int(score)))
+    if score >= 75:
+        regime = "RISK_ON_INSTITUTIONAL"
+    elif score >= 60:
+        regime = "CONSTRUCTIVE_MIXED"
+    elif score >= 40:
+        regime = "NEUTRAL_DEFENSIVE"
+    else:
+        regime = "RISK_OFF_INSTITUTIONAL"
+    return {"version":"V12 Institutional Research Grade", "time": now_text(), "macro_score": score, "macro_regime": regime, "signals": signals, "market_inputs": data, "instruction": "Favor long setups with pullback entries" if score >= 70 else "Reduce size and require confirmation" if score < 50 else "Selective trades only"}
+
+def v12_correlation_exposure_engine():
+    positions = v11_parse_portfolio_env()
+    total = sum(float(p.get("value", 0)) for p in positions) or 1.0
+    exposure_by_theme = {}
+    rows = []
+    for p in positions:
+        sym = resolve_delisted_symbol(p.get("symbol", "")).replace(".BK", "").replace(".SET", "")
+        val = float(p.get("value", 0))
+        theme = v12_theme(sym)
+        exposure_by_theme[theme] = exposure_by_theme.get(theme, 0) + val
+        rows.append({"symbol": sym, "value": round(val, 2), "weight_pct": round(val / total * 100, 2), "theme": theme})
+    theme_pct = {k: round(v / total * 100, 2) for k, v in exposure_by_theme.items()}
+    max_theme = max(theme_pct.values()) if theme_pct else 0
+    # Correlation proxy from historical returns for provided positions.
+    corr_matrix = {}
+    symbols = [r["symbol"] for r in rows][:12]
+    prices = v12_download_prices(symbols, period="1y") if symbols else {}
+    returns = {}
+    for s, ser in prices.items():
+        try:
+            returns[s] = ser.pct_change().dropna().tail(120)
+        except Exception:
+            pass
+    if len(returns) >= 2:
+        keys = list(returns.keys())
+        for a in keys:
+            corr_matrix[a] = {}
+            for b in keys:
+                try:
+                    joined = __import__('pandas').concat([returns[a], returns[b]], axis=1).dropna()
+                    corr = float(joined.iloc[:,0].corr(joined.iloc[:,1])) if len(joined) > 10 else None
+                    corr_matrix[a][b] = round(corr, 2) if corr is not None else None
+                except Exception:
+                    corr_matrix[a][b] = None
+    warnings = []
+    if max_theme > V12_MAX_SINGLE_THEME_PCT:
+        warnings.append(f"Theme concentration {max_theme}% exceeds {V12_MAX_SINGLE_THEME_PCT}%")
+    high_corr_pairs = []
+    for a, inner in corr_matrix.items():
+        for b, c in inner.items():
+            if a < b and c is not None and c >= 0.75:
+                high_corr_pairs.append({"pair": f"{a}/{b}", "corr": c})
+    if high_corr_pairs:
+        warnings.append("High correlation cluster detected")
+    return {"version":"V12 Correlation & Exposure Engine", "positions": rows, "theme_exposure_pct": theme_pct, "max_theme_pct": max_theme, "correlation_matrix": corr_matrix, "high_corr_pairs": high_corr_pairs[:20], "warnings": warnings, "status": "OK" if not warnings else "REVIEW_REQUIRED", "note": "Set V11_PORTFOLIO_POSITIONS in Railway Variables for real portfolio exposure."}
+
+def v12_monte_carlo_risk(symbol="SPY", days=None, runs=None):
+    sym = resolve_delisted_symbol(symbol).upper()
+    days = int(days or V12_MONTE_CARLO_DAYS)
+    runs = int(runs or V12_MONTE_CARLO_RUNS)
+    try:
+        import random, statistics
+        ser = v12_download_prices([sym], period="2y").get(sym)
+        if ser is None or len(ser) < 80:
+            return {"symbol": sym, "error": "not enough historical data"}
+        rets = [float(x) for x in ser.pct_change().dropna().tail(252).values if x == x]
+        last = float(ser.iloc[-1])
+        finals = []
+        max_dds = []
+        for _ in range(max(100, min(runs, 5000))):
+            price = last
+            peak = price
+            max_dd = 0.0
+            for _d in range(days):
+                r = random.choice(rets)
+                price *= (1 + r)
+                peak = max(peak, price)
+                dd = (price / peak - 1)
+                max_dd = min(max_dd, dd)
+            finals.append((price / last - 1) * 100)
+            max_dds.append(max_dd * 100)
+        finals_sorted = sorted(finals)
+        idx = max(0, min(len(finals_sorted)-1, int(len(finals_sorted) * V12_VAR_LEVEL)))
+        prob_loss = sum(1 for x in finals if x < 0) / len(finals) * 100
+        prob_loss_5 = sum(1 for x in finals if x <= -5) / len(finals) * 100
+        return {"version":"V12 Monte Carlo Risk", "symbol": sym, "last_price": round(last, 4), "horizon_days": days, "runs": len(finals), "expected_return_pct": round(statistics.mean(finals), 2), "median_return_pct": round(statistics.median(finals), 2), "var_5pct_return_pct": round(finals_sorted[idx], 2), "worst_sim_return_pct": round(min(finals), 2), "best_sim_return_pct": round(max(finals), 2), "probability_loss_pct": round(prob_loss, 2), "probability_loss_gt_5pct": round(prob_loss_5, 2), "avg_max_drawdown_pct": round(statistics.mean(max_dds), 2), "note": "Bootstrap simulation from historical daily returns; not a prediction."}
+    except Exception as e:
+        return {"symbol": sym, "error": str(e)}
+
+def v12_attribution_engine(symbol):
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    ex = v10_explainable_score(sym)
+    flow = v11_option_flow_unusual(sym) if classify_watchlist_symbol(sym) == "US_STOCK" else {"bias":"N/A", "summary":{}}
+    hist = v11_historical_signal_winrate(sym)
+    macro = v12_macro_regime_research_grade()
+    components = ex.get("components", []) or []
+    buckets = {"trend":0, "momentum":0, "volatility":0, "options_flow":0, "breadth_macro":0, "historical_edge":0}
+    for c in components:
+        fac = str(c.get("factor", "")).lower()
+        pts = int(c.get("points", 0) or 0)
+        if "trend" in fac or "ema" in fac:
+            buckets["trend"] += pts
+        elif "momentum" in fac or "rsi" in fac or "macd" in fac:
+            buckets["momentum"] += pts
+        elif "vol" in fac or "atr" in fac:
+            buckets["volatility"] += pts
+        else:
+            buckets["momentum"] += pts
+    if flow.get("summary", {}).get("count", 0):
+        buckets["options_flow"] = min(15, int(flow.get("summary", {}).get("count", 0)))
+    if macro.get("macro_score", 50) >= 70:
+        buckets["breadth_macro"] = 12
+    elif macro.get("macro_score", 50) <= 40:
+        buckets["breadth_macro"] = -12
+    if isinstance(hist.get("win_rate_pct"), (int,float)):
+        buckets["historical_edge"] = int((hist.get("win_rate_pct") - 50) / 2)
+    total_attr = sum(buckets.values())
+    return {"version":"V12 Attribution Engine", "symbol": sym, "decision": ex.get("decision"), "final_score": ex.get("final_score"), "attribution_points": buckets, "attribution_total": total_attr, "option_flow_bias": flow.get("bias"), "historical_win_rate_pct": hist.get("win_rate_pct"), "macro_regime": macro.get("macro_regime"), "interpretation": "Strong multi-factor alignment" if total_attr >= 40 else "Mixed signal; require confirmation" if total_attr >= 15 else "Weak/low-conviction setup"}
+
+def v12_executive_dashboard():
+    universe = V12_DASHBOARD_UNIVERSE[:24]
+    macro = v12_macro_regime_research_grade()
+    exposure = v12_correlation_exposure_engine()
+    breadth = v10_true_market_breadth(universe)
+    watch = []
+    risks = []
+    for s in universe[:16]:
+        try:
+            att = v12_attribution_engine(s)
+            mc = v12_monte_carlo_risk(s, days=10, runs=300)
+            row = {"symbol": resolve_delisted_symbol(s), "decision": att.get("decision"), "score": att.get("final_score"), "attribution_total": att.get("attribution_total"), "historical_win_rate_pct": att.get("historical_win_rate_pct"), "mc_var_5pct_10d": mc.get("var_5pct_return_pct"), "mc_prob_loss_pct": mc.get("probability_loss_pct")}
+            watch.append(row)
+            if isinstance(mc.get("var_5pct_return_pct"), (int,float)) and mc.get("var_5pct_return_pct") <= -8:
+                risks.append({"symbol": s, "risk": "High 10D VaR", "value": mc.get("var_5pct_return_pct")})
+        except Exception as e:
+            watch.append({"symbol": s, "error": str(e)[:120]})
+    watch = sorted(watch, key=lambda x: x.get("score") if isinstance(x.get("score"), (int,float)) else -1, reverse=True)
+    return {"version":"V12 Institutional Research Grade Free 100%", "time": now_text(), "executive_summary": {"macro_regime": macro.get("macro_regime"), "macro_score": macro.get("macro_score"), "breadth_regime": breadth.get("breadth_regime"), "portfolio_status": exposure.get("status"), "key_risks": risks[:8]}, "top_opportunities": watch[:10], "macro": macro, "breadth": breadth, "portfolio_exposure": exposure, "note": "Research-grade decision support using free data only; validate with broker/official data before trading."}
+
+def v12_research_snapshot(symbol):
+    sym = resolve_delisted_symbol(symbol)
+    return {"version":"V12 Institutional Research Grade Free 100%", "symbol": sym, "v11_snapshot": v11_institutional_snapshot(sym), "macro_regime": v12_macro_regime_research_grade(), "correlation_exposure": v12_correlation_exposure_engine(), "monte_carlo": v12_monte_carlo_risk(sym), "attribution": v12_attribution_engine(sym), "trade_note": "Use as research support only; not investment advice."}
+
+@app.route("/v12-status", methods=["GET"])
+def v12_status_route():
+    return jsonify({"version":"V12 Institutional Research Grade Free 100%", "enabled": V12_ENABLED, "intuch_fix":"INTUCH/INTUCH.BK is redirected to ADVANC/ADVANC.BK and removed from market-leader watchlist", "axes":["Multi-Asset Macro Regime: VIX, Yield, Dollar, Bonds, Credit, Gold, Oil, Sectors", "Correlation & Exposure Engine", "Monte Carlo Risk Engine", "Attribution Engine", "Executive Dashboard"], "routes":["/v12/<symbol>", "/v12/dashboard", "/v12/macro", "/v12/exposure", "/v12/monte-carlo/<symbol>", "/v12/attribution/<symbol>", "/v12/intuch-fix"]})
+
+@app.route("/v12/<symbol>", methods=["GET"])
+def v12_snapshot_route(symbol):
+    return jsonify(v12_research_snapshot(symbol))
+
+@app.route("/v12/dashboard", methods=["GET"])
+def v12_dashboard_route():
+    return jsonify(v12_executive_dashboard())
+
+@app.route("/v12/macro", methods=["GET"])
+def v12_macro_route():
+    return jsonify(v12_macro_regime_research_grade())
+
+@app.route("/v12/exposure", methods=["GET"])
+def v12_exposure_route():
+    return jsonify(v12_correlation_exposure_engine())
+
+@app.route("/v12/monte-carlo/<symbol>", methods=["GET"])
+def v12_monte_carlo_route(symbol):
+    return jsonify(v12_monte_carlo_risk(symbol, request.args.get("days"), request.args.get("runs")))
+
+@app.route("/v12/attribution/<symbol>", methods=["GET"])
+def v12_attribution_route(symbol):
+    return jsonify(v12_attribution_engine(symbol))
+
+@app.route("/v12/intuch-fix", methods=["GET"])
+def v12_intuch_fix_route():
+    return jsonify({"status":"fixed", "mapping": DELISTED_SYMBOL_ALIASES, "INTUCH_normalized": normalize_asset("INTUCH"), "INTUCH_BK_normalized": normalize_asset("INTUCH.BK"), "note":"INTUCH is redirected to ADVANC to avoid Yahoo Finance no-data errors."})
+
+
+# ============================================================
+# V12.1 INSTITUTIONAL INTERNALS PACK - FREE 100%
+# Market Internals, Expected Move, Liquidity Score, Opportunity Ranking
+# ============================================================
+V121_ENABLED = os.getenv("V121_ENABLED", "true").lower() == "true"
+V121_RANK_UNIVERSE = env_list(
+    "V121_RANK_UNIVERSE",
+    os.getenv("V12_DASHBOARD_UNIVERSE", os.getenv("US_WATCHLIST", "NVDA,AAPL,TSLA,AMD,QQQ,SPY,META,MSFT,PLTR,AVGO,AMZN,GOOGL,COIN,MSTR,SMCI,ARM,CRWD,NET,DDOG,SHOP"))
+)
+V121_MAX_RANK_SYMBOLS = int(os.getenv("V121_MAX_RANK_SYMBOLS", "30"))
+V121_MIN_OPTION_VOLUME = int(os.getenv("V121_MIN_OPTION_VOLUME", "20"))
+V121_MAX_OPTION_SPREAD_PCT = float(os.getenv("V121_MAX_OPTION_SPREAD_PCT", "18"))
+
+
+def _safe_float(x, default=None):
+    try:
+        if x is None:
+            return default
+        v = float(x)
+        if v != v:
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _pct_change_from_history(symbol, period="5d"):
+    try:
+        t = yf.Ticker(symbol)
+        hist = t.history(period=period, interval="1d", auto_adjust=False)
+        if hist is None or len(hist) < 2:
+            return None
+        last = _safe_float(hist["Close"].iloc[-1])
+        prev = _safe_float(hist["Close"].iloc[-2])
+        if not last or not prev:
+            return None
+        return (last / prev - 1) * 100
+    except Exception:
+        return None
+
+
+def v121_market_internals():
+    """Free-data market internals proxy. Uses yfinance-supported indices/ETFs plus V10 breadth fallback.
+    Real $ADD/$TICK/$TRIN feeds are usually paid; this is a transparent proxy, not a paid tape feed.
+    """
+    proxies = {
+        "SPY": "S&P 500 ETF proxy",
+        "QQQ": "Nasdaq 100 ETF proxy",
+        "IWM": "Russell 2000 ETF proxy",
+        "DIA": "Dow ETF proxy",
+        "^VIX": "VIX volatility index",
+        "HYG": "High-yield credit ETF proxy",
+        "TLT": "Long-duration treasury ETF proxy",
+        "UUP": "US Dollar ETF proxy"
+    }
+    moves = {}
+    for sym, label in proxies.items():
+        moves[sym] = {"label": label, "pct_change": _pct_change_from_history(sym)}
+    universe = V121_RANK_UNIVERSE[:max(10, min(60, len(V121_RANK_UNIVERSE)))]
+    try:
+        breadth = v10_true_market_breadth(universe)
+    except Exception as e:
+        breadth = {"error": str(e)}
+    score = 50
+    reasons = []
+    def add(points, reason):
+        nonlocal score
+        score += points
+        reasons.append({"points": points, "reason": reason})
+    spy = moves.get("SPY", {}).get("pct_change")
+    qqq = moves.get("QQQ", {}).get("pct_change")
+    iwm = moves.get("IWM", {}).get("pct_change")
+    vix = moves.get("^VIX", {}).get("pct_change")
+    hyg = moves.get("HYG", {}).get("pct_change")
+    tlt = moves.get("TLT", {}).get("pct_change")
+    if spy is not None:
+        add(10 if spy > 0.35 else -10 if spy < -0.35 else 0, f"SPY daily move {spy:.2f}%")
+    if qqq is not None:
+        add(10 if qqq > 0.45 else -10 if qqq < -0.45 else 0, f"QQQ daily move {qqq:.2f}%")
+    if iwm is not None:
+        add(6 if iwm > 0.35 else -6 if iwm < -0.35 else 0, f"IWM small-cap move {iwm:.2f}%")
+    if vix is not None:
+        add(10 if vix < -2 else -12 if vix > 3 else 0, f"VIX move {vix:.2f}%")
+    if hyg is not None:
+        add(7 if hyg > 0.15 else -7 if hyg < -0.15 else 0, f"HYG credit-risk proxy {hyg:.2f}%")
+    if tlt is not None and spy is not None:
+        add(3 if (spy > 0 and tlt <= 0.5) else -3 if (spy < 0 and tlt > 0.5) else 0, f"TLT duration proxy {tlt:.2f}%")
+    if isinstance(breadth, dict):
+        bscore = breadth.get("breadth_score")
+        if isinstance(bscore, (int, float)):
+            add(12 if bscore >= 65 else -12 if bscore <= 40 else 0, f"Breadth score {bscore}")
+    score = max(0, min(100, int(score)))
+    if score >= 75:
+        regime = "INTERNALS_RISK_ON"
+    elif score <= 35:
+        regime = "INTERNALS_RISK_OFF"
+    else:
+        regime = "INTERNALS_MIXED"
+    return {"version":"V12.1 Market Internals Free Proxy", "time":now_text(), "internals_score":score, "internals_regime":regime, "proxy_moves":moves, "breadth":breadth, "score_breakdown":reasons, "important_note":"Free proxy only. Real $ADD/$TICK/$TRIN usually require paid/live market data feeds."}
+
+
+def _nearest_atm_option_row(symbol, expiry=None):
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    tk = yf.Ticker(sym)
+    hist = tk.history(period="5d", interval="1d", auto_adjust=False)
+    if hist is None or hist.empty:
+        return {"symbol": sym, "error": "no underlying price"}
+    price = _safe_float(hist["Close"].iloc[-1])
+    expirations = list(getattr(tk, "options", []) or [])
+    if not expirations:
+        return {"symbol": sym, "underlying_price": price, "error": "no option expirations from yfinance"}
+    exp = expiry if expiry in expirations else expirations[0]
+    chain = tk.option_chain(exp)
+    calls = chain.calls.copy()
+    puts = chain.puts.copy()
+    if calls is None or puts is None or calls.empty or puts.empty:
+        return {"symbol": sym, "underlying_price": price, "expiration": exp, "error": "empty option chain"}
+    calls["dist"] = (calls["strike"] - price).abs()
+    puts["dist"] = (puts["strike"] - price).abs()
+    call = calls.sort_values("dist").iloc[0].to_dict()
+    put = puts.sort_values("dist").iloc[0].to_dict()
+    return {"symbol": sym, "underlying_price": price, "expiration": exp, "call": call, "put": put, "expirations_available": expirations[:8]}
+
+
+def v121_expected_move_engine(symbol, expiry=None):
+    data = _nearest_atm_option_row(symbol, expiry)
+    if data.get("error"):
+        return {"version":"V12.1 Expected Move Engine", **data}
+    price = data.get("underlying_price")
+    call = data.get("call", {})
+    put = data.get("put", {})
+    call_mid = None
+    put_mid = None
+    for row, name in [(call, "call"), (put, "put")]:
+        bid = _safe_float(row.get("bid"), 0) or 0
+        ask = _safe_float(row.get("ask"), 0) or 0
+        last = _safe_float(row.get("lastPrice"), 0) or 0
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+        if name == "call":
+            call_mid = mid
+        else:
+            put_mid = mid
+    straddle = (call_mid or 0) + (put_mid or 0)
+    expected_pct = (straddle / price * 100) if price and straddle else None
+    return {"version":"V12.1 Expected Move Engine", "symbol":data.get("symbol"), "underlying_price":round(price, 4), "expiration":data.get("expiration"), "atm_call":{"contractSymbol":call.get("contractSymbol"), "strike":_safe_float(call.get("strike")), "bid":_safe_float(call.get("bid")), "ask":_safe_float(call.get("ask")), "lastPrice":_safe_float(call.get("lastPrice")), "volume":_safe_float(call.get("volume")), "openInterest":_safe_float(call.get("openInterest")), "impliedVolatility":_safe_float(call.get("impliedVolatility"))}, "atm_put":{"contractSymbol":put.get("contractSymbol"), "strike":_safe_float(put.get("strike")), "bid":_safe_float(put.get("bid")), "ask":_safe_float(put.get("ask")), "lastPrice":_safe_float(put.get("lastPrice")), "volume":_safe_float(put.get("volume")), "openInterest":_safe_float(put.get("openInterest")), "impliedVolatility":_safe_float(put.get("impliedVolatility"))}, "expected_move_abs":round(straddle, 4) if straddle else None, "expected_move_pct":round(expected_pct, 2) if expected_pct is not None else None, "expected_range":{"low":round(price - straddle, 2) if straddle else None, "high":round(price + straddle, 2) if straddle else None}, "method":"ATM call mid + ATM put mid for nearest/selected expiry. Free yfinance data may be delayed/incomplete."}
+
+
+def v121_liquidity_score(symbol, expiry=None):
+    data = _nearest_atm_option_row(symbol, expiry)
+    if data.get("error"):
+        return {"version":"V12.1 Liquidity Score", **data}
+    rows = [("call", data.get("call", {})), ("put", data.get("put", {}))]
+    details = []
+    score = 50
+    for side, row in rows:
+        bid = _safe_float(row.get("bid"), 0) or 0
+        ask = _safe_float(row.get("ask"), 0) or 0
+        last = _safe_float(row.get("lastPrice"), 0) or 0
+        vol = _safe_float(row.get("volume"), 0) or 0
+        oi = _safe_float(row.get("openInterest"), 0) or 0
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+        spread_pct = ((ask - bid) / mid * 100) if bid > 0 and ask > 0 and mid > 0 else None
+        pts = 0
+        if spread_pct is not None:
+            pts += 18 if spread_pct <= 5 else 10 if spread_pct <= 10 else 3 if spread_pct <= V121_MAX_OPTION_SPREAD_PCT else -12
+        else:
+            pts -= 8
+        pts += 12 if vol >= 1000 else 8 if vol >= 300 else 4 if vol >= V121_MIN_OPTION_VOLUME else -6
+        pts += 12 if oi >= 3000 else 8 if oi >= 1000 else 4 if oi >= 200 else -4
+        score += pts / 2
+        details.append({"side":side, "contractSymbol":row.get("contractSymbol"), "strike":_safe_float(row.get("strike")), "bid":bid, "ask":ask, "mid":round(mid, 4) if mid else None, "spread_pct":round(spread_pct, 2) if spread_pct is not None else None, "volume":vol, "openInterest":oi, "points":round(pts, 2)})
+    score = int(max(0, min(100, score)))
+    grade = "A" if score >= 82 else "B" if score >= 68 else "C" if score >= 50 else "D"
+    return {"version":"V12.1 Liquidity Score", "symbol":data.get("symbol"), "underlying_price":round(data.get("underlying_price"), 4), "expiration":data.get("expiration"), "liquidity_score":score, "liquidity_grade":grade, "details":details, "interpretation":"Tradable liquidity" if score >= 68 else "Use caution; spreads/volume may be weak" if score >= 50 else "Avoid or use limit orders only; liquidity is poor", "note":"Scored from ATM option spread, volume, and open interest using free yfinance chain."}
+
+
+def v121_opportunity_ranking(limit=None):
+    try:
+        n = int(limit or request.args.get("limit", 20)) if 'request' in globals() else int(limit or 20)
+    except Exception:
+        n = 20
+    n = max(5, min(n, 50))
+    universe = V121_RANK_UNIVERSE[:max(n, min(V121_MAX_RANK_SYMBOLS, len(V121_RANK_UNIVERSE)))]
+    internals = v121_market_internals()
+    call_rows = []
+    put_rows = []
+    errors = []
+    for sym in universe:
+        try:
+            s = resolve_delisted_symbol(sym).upper().replace(".BK", "").replace(".SET", "")
+            if classify_watchlist_symbol(s) != "US_STOCK":
+                continue
+            ex = v10_explainable_score(s)
+            liq = v121_liquidity_score(s)
+            em = v121_expected_move_engine(s)
+            attr = v12_attribution_engine(s)
+            final_score = ex.get("final_score") if isinstance(ex.get("final_score"), (int, float)) else ex.get("score", 50)
+            liq_score = liq.get("liquidity_score") if isinstance(liq.get("liquidity_score"), (int, float)) else 40
+            attr_total = attr.get("attribution_total") if isinstance(attr.get("attribution_total"), (int, float)) else 0
+            internals_score = internals.get("internals_score") if isinstance(internals.get("internals_score"), (int, float)) else 50
+            expected_pct = em.get("expected_move_pct") if isinstance(em.get("expected_move_pct"), (int, float)) else None
+            call_score = int(max(0, min(100, final_score * 0.45 + liq_score * 0.20 + max(0, attr_total) * 0.20 + internals_score * 0.15)))
+            put_score = int(max(0, min(100, (100 - final_score) * 0.45 + liq_score * 0.20 + max(0, -attr_total) * 0.20 + (100 - internals_score) * 0.15)))
+            base = {"symbol":s, "signal_score":final_score, "liquidity_grade":liq.get("liquidity_grade"), "liquidity_score":liq_score, "expected_move_pct":expected_pct, "attribution_total":attr_total, "internals_score":internals_score, "decision":ex.get("decision"), "why":[f"signal={final_score}", f"liquidity={liq_score}/{liq.get('liquidity_grade')}", f"attribution={attr_total}", f"internals={internals_score}"]}
+            call_rows.append({**base, "rank_score":call_score, "side":"CALL"})
+            put_rows.append({**base, "rank_score":put_score, "side":"PUT"})
+        except Exception as e:
+            errors.append({"symbol": sym, "error": str(e)[:160]})
+    call_rows = sorted(call_rows, key=lambda x: x.get("rank_score", 0), reverse=True)[:n]
+    put_rows = sorted(put_rows, key=lambda x: x.get("rank_score", 0), reverse=True)[:n]
+    return {"version":"V12.1 Opportunity Ranking", "time":now_text(), "market_internals":{"regime":internals.get("internals_regime"), "score":internals.get("internals_score")}, "top_call_watchlist":call_rows, "top_put_watchlist":put_rows, "errors":errors[:10], "method":"Ranks free-data setups using explainable score, liquidity, attribution, expected move context, and market internals. Research support only."}
+
+
+def v121_dashboard():
+    internals = v121_market_internals()
+    ranking = v121_opportunity_ranking(limit=10)
+    return {"version":"V12.1 Institutional Internals Pack Free 100%", "time":now_text(), "executive_summary":{"internals_regime":internals.get("internals_regime"), "internals_score":internals.get("internals_score"), "best_call":(ranking.get("top_call_watchlist") or [{}])[0], "best_put":(ranking.get("top_put_watchlist") or [{}])[0]}, "market_internals":internals, "opportunity_ranking":ranking, "routes":["/v12-1/status", "/v12-1/dashboard", "/v12-1/internals", "/v12-1/expected-move/<symbol>", "/v12-1/liquidity/<symbol>", "/v12-1/ranking"]}
+
+
+@app.route("/v12-1/status", methods=["GET"])
+def v121_status_route():
+    return jsonify({"version":"V12.1 Institutional Internals Pack Free 100%", "enabled":V121_ENABLED, "modules":["Market Internals Free Proxy", "Expected Move Engine", "Liquidity Score", "Opportunity Ranking"], "routes":["/v12-1/dashboard", "/v12-1/internals", "/v12-1/expected-move/<symbol>", "/v12-1/liquidity/<symbol>", "/v12-1/ranking"], "note":"Uses free yfinance/proxy data. Real $ADD/$TICK/$TRIN and professional option flow usually require paid feeds."})
+
+@app.route("/v12-1/dashboard", methods=["GET"])
+def v121_dashboard_route():
+    return jsonify(v121_dashboard())
+
+@app.route("/v12-1/internals", methods=["GET"])
+def v121_internals_route():
+    return jsonify(v121_market_internals())
+
+@app.route("/v12-1/expected-move/<symbol>", methods=["GET"])
+def v121_expected_move_route(symbol):
+    return jsonify(v121_expected_move_engine(symbol, request.args.get("expiry")))
+
+@app.route("/v12-1/liquidity/<symbol>", methods=["GET"])
+def v121_liquidity_route(symbol):
+    return jsonify(v121_liquidity_score(symbol, request.args.get("expiry")))
+
+@app.route("/v12-1/ranking", methods=["GET"])
+def v121_ranking_route():
+    return jsonify(v121_opportunity_ranking(request.args.get("limit")))
+
+
+
+# ============================================================
+# V13 SIGNAL QUALITY LAYER - FREE 100%
+# Purpose: convert the bot from a scanner into a measurable research engine.
+# Adds: signal audit, historical win-rate, false signal detector, adaptive scoring,
+# multi-timeframe consensus, relative strength ranking, strategy leaderboard, dashboard.
+# ============================================================
+V13_ENABLED = os.getenv("V13_ENABLED", "true").lower() == "true"
+V13_SIGNAL_HORIZONS = [int(x) for x in os.getenv("V13_SIGNAL_HORIZONS", "1,3,5,10").split(",") if str(x).strip().isdigit()]
+V13_DEFAULT_UNIVERSE = env_list("V13_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,GOOGL,AMZN,QQQ,SPY,PLTR,AVGO,SMCI,MU,ARM,COIN,MSTR,RKLB,AAOI,IREN,CRWD,SNOW,NET,DDOG,HOOD")
+V13_RS_BENCHMARK = os.getenv("V13_RS_BENCHMARK", "QQQ")
+V13_MIN_CLOSED_FOR_STATS = int(os.getenv("V13_MIN_CLOSED_FOR_STATS", "20"))
+
+
+def v13_init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v13_signal_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc TEXT NOT NULL,
+            created_at_th TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            asset_type TEXT,
+            side TEXT,
+            strategy TEXT,
+            entry_price REAL,
+            score INTEGER,
+            adaptive_score INTEGER,
+            probability INTEGER,
+            bias TEXT,
+            regime TEXT,
+            breadth_regime TEXT,
+            mtf_consensus TEXT,
+            rs_score REAL,
+            quality_score INTEGER,
+            false_risk_score INTEGER,
+            explanation_json TEXT,
+            result_json TEXT,
+            status TEXT DEFAULT 'OPEN',
+            evaluated_at_utc TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_symbol ON v13_signal_audit(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_created ON v13_signal_audit(created_at_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_side ON v13_signal_audit(side)")
+    conn.commit()
+    conn.close()
+
+
+def v13_side_from_signal(signal_type, score=None, bias=None):
+    text = f"{signal_type or ''} {bias or ''}".upper()
+    if "CALL" in text or "BUY" in text or "BULL" in text:
+        return "CALL"
+    if "PUT" in text or "SELL" in text or "BEAR" in text:
+        return "PUT"
+    try:
+        sc = int(score)
+        if sc >= 75:
+            return "CALL"
+        if sc <= 35:
+            return "PUT"
+    except Exception:
+        pass
+    return "WAIT"
+
+
+def v13_detect_strategy(report, side, score=None):
+    text = str(report or "").upper()
+    if "VWAP" in text:
+        return "VWAP_RECLAIM" if side == "CALL" else "VWAP_REJECT"
+    if "PULLBACK" in text or "ย่อ" in text:
+        return "PULLBACK"
+    if "BREAKOUT" in text or "เบรก" in text:
+        return "BREAKOUT"
+    if "OPTIONS" in text or "OPTION" in text:
+        return "OPTIONS_HYBRID"
+    if score is not None and score >= 88:
+        return "HIGH_MOMENTUM"
+    if score is not None and score <= 15:
+        return "HIGH_BEARISH_MOMENTUM"
+    return "CORE_SIGNAL"
+
+
+def v13_safe_breadth_summary():
+    try:
+        if "v10_true_market_breadth" in globals():
+            b = v10_true_market_breadth()
+            return b.get("breadth_regime") or b.get("regime") or "UNKNOWN"
+    except Exception:
+        pass
+    try:
+        if "v121_market_internals" in globals():
+            i = v121_market_internals()
+            return i.get("internals_regime") or "UNKNOWN"
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+def v13_relative_strength_score(symbol, benchmark=None, period="6mo"):
+    benchmark = benchmark or V13_RS_BENCHMARK
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    try:
+        s1 = v12_yf_symbol(sym) if "v12_yf_symbol" in globals() else normalize_asset(sym)["yf_symbol"]
+        s2 = v12_yf_symbol(benchmark) if "v12_yf_symbol" in globals() else benchmark
+        data = yf.download([s1, s2], period=period, interval="1d", progress=False, auto_adjust=True, threads=False)
+        if data is None or data.empty:
+            return None
+        close = data["Close"] if "Close" in data else data
+        c1 = close[s1].dropna() if s1 in close else close.iloc[:, 0].dropna()
+        c2 = close[s2].dropna() if s2 in close else close.iloc[:, -1].dropna()
+        if len(c1) < 30 or len(c2) < 30:
+            return None
+        r1_20 = c1.iloc[-1] / c1.iloc[-20] - 1
+        r2_20 = c2.iloc[-1] / c2.iloc[-20] - 1
+        r1_60 = c1.iloc[-1] / c1.iloc[-60] - 1 if len(c1) >= 60 else r1_20
+        r2_60 = c2.iloc[-1] / c2.iloc[-60] - 1 if len(c2) >= 60 else r2_20
+        raw = ((r1_20 - r2_20) * 0.6 + (r1_60 - r2_60) * 0.4) * 100
+        return round(max(0, min(100, 50 + raw * 5)), 2)
+    except Exception:
+        return None
+
+
+def v13_mtf_consensus(symbol):
+    try:
+        asset = normalize_asset(symbol)
+        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+        analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+        alignment = analysis.get("alignment") or "N/A"
+        states = analysis.get("mtf_states") or []
+        bulls = sum(1 for _, s in states if str(s).upper() == "BULLISH")
+        bears = sum(1 for _, s in states if str(s).upper() == "BEARISH")
+        total = len(states)
+        pct = round(max(bulls, bears) / total * 100, 2) if total else 0
+        direction = "BULLISH" if bulls > bears else "BEARISH" if bears > bulls else "MIXED"
+        return {"alignment": alignment, "states": states, "direction": direction, "consensus_pct": pct}
+    except Exception as e:
+        return {"alignment": "N/A", "states": [], "direction": "UNKNOWN", "consensus_pct": 0, "error": str(e)[:120]}
+
+
+def v13_adaptive_score(symbol, base_score, side, regime=None, breadth=None, rs_score=None, mtf=None):
+    try:
+        score = int(base_score or 50)
+    except Exception:
+        score = 50
+    notes = []
+    reg = str(regime or "").upper()
+    br = str(breadth or "").upper()
+    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
+    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
+
+    if side == "CALL":
+        if "RISK_ON" in reg or "UPTREND" in reg:
+            score += 5; notes.append("Regime supports CALL")
+        if "RISK_OFF" in reg or "DOWNTREND" in reg:
+            score -= 8; notes.append("Regime fights CALL")
+        if "BEAR" in br:
+            score -= 6; notes.append("Breadth weak for CALL")
+        if direction == "BULLISH" and consensus >= 60:
+            score += 5; notes.append("MTF confirms CALL")
+        if direction == "BEARISH" and consensus >= 60:
+            score -= 7; notes.append("MTF rejects CALL")
+        if rs_score is not None:
+            if rs_score >= 65: score += 5; notes.append("Relative strength positive")
+            elif rs_score <= 40: score -= 5; notes.append("Relative strength weak")
+    elif side == "PUT":
+        if "RISK_OFF" in reg or "DOWNTREND" in reg:
+            score = 100 - max(0, 100 - score - 5); notes.append("Regime supports PUT")
+        if "RISK_ON" in reg or "UPTREND" in reg:
+            score += 6; notes.append("Risk-on market reduces PUT quality")
+        if direction == "BEARISH" and consensus >= 60:
+            score -= 5; notes.append("MTF confirms PUT")
+        if direction == "BULLISH" and consensus >= 60:
+            score += 7; notes.append("MTF rejects PUT")
+        if rs_score is not None and rs_score >= 65:
+            score += 5; notes.append("Strong RS makes PUT riskier")
+    return {"adaptive_score": int(max(0, min(100, score))), "notes": notes}
+
+
+def v13_false_signal_risk(side, regime=None, breadth=None, mtf=None, rs_score=None):
+    risk = 20
+    notes = []
+    reg = str(regime or "").upper()
+    br = str(breadth or "").upper()
+    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
+    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
+    if side == "CALL":
+        if "BEAR" in br or "RISK_OFF" in reg:
+            risk += 25; notes.append("CALL against weak breadth/regime")
+        if direction == "BEARISH" and consensus >= 60:
+            risk += 25; notes.append("CALL against MTF bearish consensus")
+        if rs_score is not None and rs_score < 40:
+            risk += 15; notes.append("CALL with weak relative strength")
+    elif side == "PUT":
+        if "BULL" in br or "RISK_ON" in reg:
+            risk += 20; notes.append("PUT against risk-on/bullish breadth")
+        if direction == "BULLISH" and consensus >= 60:
+            risk += 25; notes.append("PUT against MTF bullish consensus")
+        if rs_score is not None and rs_score > 65:
+            risk += 15; notes.append("PUT against strong relative strength")
+    else:
+        risk += 15; notes.append("WAIT/unclear side")
+    return {"false_risk_score": int(max(0, min(100, risk))), "notes": notes}
+
+
+def v13_signal_quality_score(adaptive_score, false_risk, side):
+    if side == "CALL":
+        base = adaptive_score
+    elif side == "PUT":
+        base = 100 - adaptive_score
+    else:
+        base = 40
+    return int(max(0, min(100, base * 0.75 + (100 - false_risk) * 0.25)))
+
+
+def save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
+    if not V13_ENABLED:
+        return False
+    side = v13_side_from_signal(signal_type, score, bias)
+    if side == "WAIT":
+        return False
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    mtf = v13_mtf_consensus(sym)
+    rs = v13_relative_strength_score(sym) if asset_type == "US_STOCK" else None
+    breadth = v13_safe_breadth_summary() if asset_type == "US_STOCK" else "N/A"
+    adaptive = v13_adaptive_score(sym, score, side, regime, breadth, rs, mtf)
+    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
+    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
+    strategy = v13_detect_strategy(report, side, score)
+    explanation = {
+        "signal_type": signal_type,
+        "adaptive_notes": adaptive["notes"],
+        "false_risk_notes": false_risk["notes"],
+        "report_excerpt": str(report or "")[:1000]
+    }
+    conn = db()
+    conn.execute("""
+        INSERT INTO v13_signal_audit(
+            created_at_utc, created_at_th, symbol, asset_type, side, strategy, entry_price,
+            score, adaptive_score, probability, bias, regime, breadth_regime, mtf_consensus,
+            rs_score, quality_score, false_risk_score, explanation_json, result_json, status
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        datetime.now(timezone.utc).isoformat(), now_text(), sym, asset_type, side, strategy,
+        safe_float(price), int(score or 50), adaptive["adaptive_score"], int(probability or 0), bias,
+        regime, breadth, json.dumps(mtf, ensure_ascii=False), rs, quality, false_risk["false_risk_score"],
+        json.dumps(explanation, ensure_ascii=False), json.dumps({}, ensure_ascii=False), "OPEN"
+    ))
+    conn.commit(); conn.close()
+    return True
+
+
+def v13_price_at_or_after(symbol, target_dt):
+    try:
+        yf_symbol = v12_yf_symbol(symbol) if "v12_yf_symbol" in globals() else normalize_asset(symbol)["yf_symbol"]
+        start = (target_dt - timedelta(days=5)).date().isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
+        data = yf.Ticker(yf_symbol).history(start=start, end=end, interval="1d", auto_adjust=False)
+        if data is None or data.empty:
+            return None, None
+        data = data.dropna()
+        for idx, row in data.iterrows():
+            idx_dt = idx.to_pydatetime()
+            if idx_dt.tzinfo is None:
+                idx_dt = idx_dt.replace(tzinfo=timezone.utc)
+            else:
+                idx_dt = idx_dt.astimezone(timezone.utc)
+            if idx_dt >= target_dt:
+                return float(row["Close"]), idx_dt.isoformat()
+        row = data.iloc[-1]
+        return float(row["Close"]), data.index[-1].to_pydatetime().isoformat()
+    except Exception:
+        return None, None
+
+
+def v13_update_audit_results(limit=200):
+    conn = db(); cur = conn.cursor()
+    rows = cur.execute("SELECT * FROM v13_signal_audit WHERE status!='CLOSED' ORDER BY id ASC LIMIT ?", (int(limit),)).fetchall()
+    updated = 0
+    now_utc = datetime.now(timezone.utc)
+    for r in rows:
+        try:
+            created = datetime.fromisoformat(str(r["created_at_utc"]).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            entry = safe_float(r["entry_price"])
+            if not entry:
+                continue
+            results = json.loads(r["result_json"] or "{}")
+            closed_all = True
+            for h in V13_SIGNAL_HORIZONS:
+                key = f"{h}d"
+                if key in results:
+                    continue
+                if now_utc < created + timedelta(days=h):
+                    closed_all = False
+                    continue
+                px, px_time = v13_price_at_or_after(r["symbol"], created + timedelta(days=h))
+                if px is None:
+                    closed_all = False
+                    continue
+                ret = (px / entry - 1) * 100
+                side = str(r["side"] or "").upper()
+                win = 1 if (side == "CALL" and ret > 0) or (side == "PUT" and ret < 0) else 0
+                results[key] = {"price": round(px, 4), "price_time": px_time, "return_pct": round(ret, 3), "win": win}
+            status = "CLOSED" if closed_all else "OPEN"
+            cur.execute("UPDATE v13_signal_audit SET result_json=?, status=?, evaluated_at_utc=? WHERE id=?", (json.dumps(results, ensure_ascii=False), status, now_utc.isoformat(), r["id"]))
+            updated += 1
+        except Exception as e:
+            print("v13_update_audit_results row error:", e)
+            continue
+    conn.commit(); conn.close()
+    return updated
+
+
+def v13_winrate_stats(symbol=None, horizon="5d"):
+    v13_update_audit_results()
+    conn = db(); cur = conn.cursor()
+    params = []
+    where = "WHERE side IN ('CALL','PUT')"
+    if symbol:
+        where += " AND symbol=?"; params.append(resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", ""))
+    rows = cur.execute(f"SELECT * FROM v13_signal_audit {where} ORDER BY id DESC LIMIT 2000", params).fetchall()
+    conn.close()
+    closed = []
+    for r in rows:
+        res = json.loads(r["result_json"] or "{}")
+        if horizon in res:
+            d = dict(r); d["horizon_result"] = res[horizon]; closed.append(d)
+    total = len(closed)
+    wins = sum(1 for r in closed if int(r["horizon_result"].get("win", 0)) == 1)
+    avg_ret = sum(float(r["horizon_result"].get("return_pct", 0)) for r in closed) / total if total else 0
+    by_side = {}
+    by_strategy = {}
+    for bucket_name, key in [("by_side", "side"), ("by_strategy", "strategy")]:
+        target = by_side if key == "side" else by_strategy
+        for r in closed:
+            k = r.get(key) or "UNKNOWN"
+            target.setdefault(k, []).append(r)
+        for k, arr in list(target.items()):
+            target[k] = {
+                "signals": len(arr),
+                "win_rate_pct": round(sum(1 for x in arr if int(x["horizon_result"].get("win", 0)) == 1) / len(arr) * 100, 2),
+                "avg_return_pct": round(sum(float(x["horizon_result"].get("return_pct", 0)) for x in arr) / len(arr), 3),
+                "avg_quality_score": round(sum(float(x["quality_score"] or 0) for x in arr) / len(arr), 2),
+            }
+    return {
+        "version": "V13 Historical Win Rate Engine",
+        "symbol": symbol.upper() if symbol else "ALL",
+        "horizon": horizon,
+        "closed_signals": total,
+        "win_rate_pct": round(wins / total * 100, 2) if total else 0,
+        "avg_return_pct": round(avg_ret, 3),
+        "by_side": by_side,
+        "by_strategy": by_strategy,
+        "sample_warning": "ต้องมี closed signals อย่างน้อยประมาณ %s รายการก่อนใช้สถิติตัดสินใจจริง" % V13_MIN_CLOSED_FOR_STATS,
+        "latest_closed": [{k: r[k] for k in ["id", "created_at_th", "symbol", "side", "strategy", "entry_price", "score", "adaptive_score", "quality_score", "false_risk_score"] if k in r} | {"result": r["horizon_result"]} for r in closed[:25]]
+    }
+
+
+def v13_false_signal_detector(horizon="5d"):
+    stats = v13_winrate_stats(None, horizon)
+    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit WHERE side IN ('CALL','PUT') ORDER BY id DESC LIMIT 2000").fetchall(); conn.close()
+    groups = {}
+    for r in rows:
+        res = json.loads(r["result_json"] or "{}")
+        if horizon not in res:
+            continue
+        key_parts = [str(r["side"]), str(r["strategy"]), str(r["regime"] or "UNKNOWN"), str(r["breadth_regime"] or "UNKNOWN")]
+        try:
+            mtf = json.loads(r["mtf_consensus"] or "{}")
+            key_parts.append(mtf.get("direction", "UNKNOWN"))
+        except Exception:
+            key_parts.append("UNKNOWN")
+        key = " | ".join(key_parts)
+        groups.setdefault(key, []).append(r)
+    rows_out = []
+    for key, arr in groups.items():
+        if len(arr) < 3:
+            continue
+        losses = sum(1 for x in arr if int(json.loads(x["result_json"] or "{}")[horizon].get("win", 0)) == 0)
+        loss_rate = losses / len(arr) * 100
+        avg_false_risk = sum(float(x["false_risk_score"] or 0) for x in arr) / len(arr)
+        rows_out.append({"pattern": key, "signals": len(arr), "loss_rate_pct": round(loss_rate, 2), "avg_false_risk_score": round(avg_false_risk, 2)})
+    rows_out = sorted(rows_out, key=lambda x: (x["loss_rate_pct"], x["signals"]), reverse=True)
+    return {"version": "V13 False Signal Detector", "horizon": horizon, "overall": {"closed_signals": stats["closed_signals"], "win_rate_pct": stats["win_rate_pct"]}, "high_risk_patterns": rows_out[:30], "rule": "patterns need at least 3 closed samples; treat early results as exploratory"}
+
+
+def v13_strategy_leaderboard(horizon="5d"):
+    stats = v13_winrate_stats(None, horizon)
+    rows = []
+    for strategy, v in stats.get("by_strategy", {}).items():
+        expectancy = v["avg_return_pct"] * (v["win_rate_pct"] / 100)
+        rows.append({"strategy": strategy, **v, "expectancy_score": round(expectancy, 3)})
+    rows = sorted(rows, key=lambda x: (x["expectancy_score"], x["win_rate_pct"], x["signals"]), reverse=True)
+    return {"version": "V13 Strategy Leaderboard", "horizon": horizon, "leaderboard": rows, "note": "จัดอันดับจากผลลัพธ์ที่ปิดแล้วใน signal_audit ไม่ใช่การคาดเดา"}
+
+
+def v13_rs_ranking(limit=None):
+    try:
+        n = max(5, min(50, int(limit or request.args.get("limit", 20))))
+    except Exception:
+        n = 20
+    out = []
+    for sym in V13_DEFAULT_UNIVERSE[:max(n, 20)]:
+        try:
+            s = resolve_delisted_symbol(sym).upper().replace(".BK", "").replace(".SET", "")
+            rs = v13_relative_strength_score(s)
+            if rs is None:
+                continue
+            out.append({"symbol": s, "benchmark": V13_RS_BENCHMARK, "rs_score": rs})
+        except Exception:
+            continue
+    out = sorted(out, key=lambda x: x["rs_score"], reverse=True)[:n]
+    return {"version": "V13 Relative Strength Ranking", "ranking": out}
+
+
+def v13_quality_snapshot(symbol):
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    ex = None
+    try:
+        ex = v10_explainable_score(sym) if "v10_explainable_score" in globals() else None
+    except Exception as e:
+        ex = {"error": str(e)[:160]}
+    base_score = ex.get("final_score") if isinstance(ex, dict) else 50
+    decision = ex.get("decision", "WAIT") if isinstance(ex, dict) else "WAIT"
+    side = "CALL" if "CALL" in decision else "PUT" if "PUT" in decision else v13_side_from_signal(decision, base_score)
+    regime = (ex.get("regime") or {}).get("label") if isinstance(ex, dict) and isinstance(ex.get("regime"), dict) else None
+    mtf = v13_mtf_consensus(sym)
+    rs = v13_relative_strength_score(sym)
+    breadth = v13_safe_breadth_summary()
+    adaptive = v13_adaptive_score(sym, base_score, side, regime, breadth, rs, mtf)
+    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
+    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
+    return {"version": "V13 Signal Quality Snapshot", "symbol": sym, "side": side, "base_explainable_score": base_score, "adaptive_score": adaptive, "false_signal_risk": false_risk, "signal_quality_score": quality, "mtf_consensus": mtf, "relative_strength_score": rs, "breadth_regime": breadth, "source_explainable_score": ex}
+
+
+def v13_dashboard():
+    horizon = request.args.get("horizon", "5d") if "request" in globals() else "5d"
+    winrate = v13_winrate_stats(None, horizon)
+    false_signals = v13_false_signal_detector(horizon)
+    leaderboard = v13_strategy_leaderboard(horizon)
+    rs = v13_rs_ranking(10)
+    return {
+        "version": "V13 Signal Quality Layer Free 100%",
+        "time": now_text(),
+        "executive_summary": {
+            "closed_signals": winrate.get("closed_signals"),
+            "win_rate_pct": winrate.get("win_rate_pct"),
+            "avg_return_pct": winrate.get("avg_return_pct"),
+            "best_strategy": (leaderboard.get("leaderboard") or [{}])[0],
+            "highest_false_signal_pattern": (false_signals.get("high_risk_patterns") or [{}])[0],
+            "top_relative_strength": (rs.get("ranking") or [{}])[:5]
+        },
+        "winrate": winrate,
+        "strategy_leaderboard": leaderboard,
+        "false_signal_detector": false_signals,
+        "relative_strength_ranking": rs,
+        "routes": ["/v13/status", "/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
+    }
+
+
+@app.route("/v13/status", methods=["GET"])
+def v13_status_route():
+    return jsonify({
+        "version": "V13 Signal Quality Layer Free 100%",
+        "enabled": V13_ENABLED,
+        "bugfixes": {
+            "us_session_start_th": US_SESSION_START_TH,
+            "us_session_end_th": US_SESSION_END_TH,
+            "us_allow_premarket_alerts": US_ALLOW_PREMARKET_ALERTS,
+            "premarket_reminder_enabled": ENABLE_PREMARKET_REMINDER,
+            "premarket_reminder_th": PREMARKET_REMINDER_TH,
+            "top5_daily_time_th": TOP5_DAILY_TIME_TH,
+            "intuch_alias": DELISTED_SYMBOL_ALIASES.get("INTUCH")
+        },
+        "modules": ["Signal Audit Engine", "Historical Win Rate Engine", "False Signal Detector", "Adaptive Scoring", "Multi-Timeframe Consensus", "Relative Strength Ranking", "Strategy Leaderboard", "Signal Quality Dashboard"],
+        "routes": ["/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
+    })
+
+
+@app.route("/v13/dashboard", methods=["GET"])
+def v13_dashboard_route():
+    return jsonify(v13_dashboard())
+
+
+@app.route("/v13/audit", methods=["GET"])
+def v13_audit_route():
+    v13_update_audit_results()
+    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit ORDER BY id DESC LIMIT 100").fetchall(); conn.close()
+    return jsonify({"version": "V13 Signal Audit Engine", "count": len(rows), "latest": [dict(r) for r in rows]})
+
+
+@app.route("/v13/winrate", methods=["GET"])
+def v13_winrate_route():
+    return jsonify(v13_winrate_stats(request.args.get("symbol"), request.args.get("horizon", "5d")))
+
+
+@app.route("/v13/false-signals", methods=["GET"])
+def v13_false_signals_route():
+    return jsonify(v13_false_signal_detector(request.args.get("horizon", "5d")))
+
+
+@app.route("/v13/adaptive/<symbol>", methods=["GET"])
+def v13_adaptive_route(symbol):
+    return jsonify(v13_quality_snapshot(symbol))
+
+
+@app.route("/v13/mtf/<symbol>", methods=["GET"])
+def v13_mtf_route(symbol):
+    return jsonify(v13_mtf_consensus(symbol))
+
+
+@app.route("/v13/rs-ranking", methods=["GET"])
+def v13_rs_ranking_route():
+    return jsonify(v13_rs_ranking(request.args.get("limit")))
+
+
+@app.route("/v13/leaderboard", methods=["GET"])
+def v13_leaderboard_route():
+    return jsonify(v13_strategy_leaderboard(request.args.get("horizon", "5d")))
+
 init_db()
 v10_init_db()
 v11_init_db()
+v13_init_db()
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
