@@ -1183,14 +1183,17 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     momentum_score = 0
     volume_score = 0
     volatility_score = 0
-
+    quality_flags = []
     reasons = []
 
+    bullish_structure = bool(price and ema6 and ema12 and price > ema6 > ema12)
+    bearish_structure = bool(price and ema6 and ema12 and price < ema6 < ema12)
+
     if price and ema6 and ema12:
-        if price > ema6 > ema12:
+        if bullish_structure:
             trend_score += 22
             reasons.append("ราคาอยู่เหนือ EMA6 และ EMA12")
-        elif price < ema6 < ema12:
+        elif bearish_structure:
             trend_score -= 22
             reasons.append("ราคาอยู่ใต้ EMA6 และ EMA12")
 
@@ -1209,9 +1212,11 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         elif rsi >= 72:
             momentum_score -= 10
             reasons.append("RSI สูง ระวังพักตัว")
+            quality_flags.append("OVERBOUGHT_CHASE_RISK")
         elif rsi <= 30:
-            momentum_score += 6
-            reasons.append("RSI ต่ำ มีโอกาสรีบาวด์")
+            momentum_score += 2
+            reasons.append("RSI ต่ำมาก ระวังรีบาวด์ ไม่ควรไล่ SELL/PUT")
+            quality_flags.append("OVERSOLD_REBOUND_RISK")
         elif rsi < 45:
             momentum_score -= 8
             reasons.append("RSI ต่ำกว่าโซนแข็งแรง")
@@ -1227,10 +1232,15 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     if rvol is not None:
         if rvol >= 1.5 and percent_change and percent_change > 0:
             volume_score += 10
-            reasons.append("Volume หนุนขาขึ้น")
+            reasons.append("Volume สูงและราคาปิดบวก หนุนแรงซื้อ")
         elif rvol >= 1.5 and percent_change and percent_change < 0:
-            volume_score -= 10
-            reasons.append("Volume หนุนแรงขาย")
+            if bullish_structure:
+                volume_score -= 4
+                reasons.append("Volume สูงแต่ราคาอ่อนตัว ระวังแรงขายระยะสั้น ไม่ใช่แรงซื้อยืนยัน")
+                quality_flags.append("BULLISH_WITH_SELL_VOLUME_CONFLICT")
+            else:
+                volume_score -= 10
+                reasons.append("Volume สูงและราคาปิดลบ หนุนแรงขาย")
 
     if atr and price:
         atr_pct = atr / price * 100
@@ -1239,6 +1249,7 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         elif atr_pct > 5:
             volatility_score -= 8
             reasons.append("ความผันผวนสูง คุมขนาดไม้")
+            quality_flags.append("HIGH_VOLATILITY_RISK")
 
     raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score
     score = max(0, min(100, int(raw_score)))
@@ -1267,6 +1278,7 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         "score": score, "bias": bias, "probability": probability,
         "support": support, "resistance": resistance, "stop_loss": stop_loss, "take_profit": take_profit,
         "reasons": reasons,
+        "quality_flags": quality_flags,
         "component_scores": {
             "trend": trend_score,
             "momentum": momentum_score,
@@ -1390,18 +1402,48 @@ def dividend_yield_text(value):
     if value is None:
         return "N/A"
     try:
-        # Yahoo often returns 0.0285 for 2.85%.
         val = float(value)
         if val <= 1:
             val *= 100
+        if val < 0 or val > 15:
+            return "N/A"
         return f"{val:.2f}%"
     except Exception:
         return "N/A"
 
 
+def normalized_dividend_yield_pct(price, fundamentals):
+    """Return a sane dividend yield percentage.
+    Priority: Yahoo dividendYield if plausible; fallback to dividendRate/current price.
+    Unrealistic yields are ignored to prevent outputs like QQQ Dividend Yield 42%.
+    """
+    try:
+        raw = safe_float(fundamentals.get("dividend_yield"))
+        if raw is not None:
+            pct = raw * 100 if raw <= 1 else raw
+            if 0 <= pct <= 15:
+                return pct
+    except Exception:
+        pass
+    try:
+        rate = safe_float(fundamentals.get("dividend_rate"))
+        if rate is not None and price and price > 0:
+            pct = rate / price * 100
+            if 0 <= pct <= 15:
+                return pct
+    except Exception:
+        pass
+    return None
+
+
+def dividend_yield_pct_text(pct):
+    return "N/A" if pct is None else f"{float(pct):.2f}%"
+
+
 def valuation_engine(asset, analysis, fundamentals):
     """Simple rule-based valuation using free data.
     This is not intrinsic valuation; it is relative/technical valuation.
+    V14.1 fixes dividend-yield unit errors and suppresses unrealistic Yahoo ETF yield glitches.
     """
     if asset["asset_type"] == "GOLD":
         return "", "N/A"
@@ -1411,14 +1453,13 @@ def valuation_engine(asset, analysis, fundamentals):
     rsi = analysis.get("rsi")
     pe = fundamentals.get("trailing_pe")
     fwd_pe = fundamentals.get("forward_pe")
-    div_yield = fundamentals.get("dividend_yield")
+    div_yield_pct = normalized_dividend_yield_pct(price, fundamentals)
     low52 = fundamentals.get("fifty_two_week_low")
     high52 = fundamentals.get("fifty_two_week_high")
 
     score = 0
     reasons = []
 
-    # 52W position
     if price and low52 and high52 and high52 > low52:
         pos = (price - low52) / (high52 - low52)
         if pos <= 0.25:
@@ -1430,7 +1471,6 @@ def valuation_engine(asset, analysis, fundamentals):
         else:
             reasons.append("ราคาอยู่กลางกรอบ 52 สัปดาห์")
 
-    # EMA50 distance
     if price and ema50:
         dist = (price - ema50) / ema50 * 100
         if dist >= 12:
@@ -1442,7 +1482,6 @@ def valuation_engine(asset, analysis, fundamentals):
         else:
             reasons.append("ราคาไม่ห่างจาก EMA50 มากเกินไป")
 
-    # RSI valuation pressure
     if rsi is not None:
         if rsi >= 72:
             score += 1
@@ -1451,7 +1490,6 @@ def valuation_engine(asset, analysis, fundamentals):
             score -= 1
             reasons.append("RSI ต่ำ มีโอกาสอยู่ในโซนถูกเชิงเทคนิค")
 
-    # PE rough filter
     use_pe = pe or fwd_pe
     if use_pe:
         if use_pe >= 45:
@@ -1466,15 +1504,15 @@ def valuation_engine(asset, analysis, fundamentals):
         else:
             reasons.append("P/E อยู่ในโซนกลาง")
 
-    # Dividend yield rough filter
-    if div_yield:
-        dy = div_yield * 100 if div_yield <= 1 else div_yield
-        if dy >= 5:
+    if div_yield_pct is not None:
+        if div_yield_pct >= 5:
             score -= 1
             reasons.append("Dividend Yield สูง น่าสนใจสำหรับสายปันผล")
-        elif dy < 1:
+        elif div_yield_pct < 1:
             score += 1
             reasons.append("Dividend Yield ต่ำ ไม่ได้ช่วยรองรับ valuation มากนัก")
+    else:
+        reasons.append("Dividend Yield ใช้ไม่ได้/ผิดหน่วย จึงตัดออกจากการประเมิน")
 
     if score <= -3:
         status = "ถูกน่าสนใจ"
@@ -1494,7 +1532,7 @@ def valuation_engine(asset, analysis, fundamentals):
 Market Cap: {human_market_cap(fundamentals.get('market_cap'), '฿' if asset['currency'] == 'THB' else '$')}
 P/E: {fmt_num(fundamentals.get('trailing_pe'))}
 Forward P/E: {fmt_num(fundamentals.get('forward_pe'))}
-Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'))}
+Dividend Yield: {dividend_yield_pct_text(div_yield_pct)}
 Dividend Rate: {fmt_num(fundamentals.get('dividend_rate'))}
 
 XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
@@ -1506,13 +1544,41 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
 52W High: {fmt_num(fundamentals.get('fifty_two_week_high'))}
 
 เหตุผล valuation:
-{chr(10).join("- " + r for r in reasons[:6]) if reasons else "- ข้อมูลพื้นฐานไม่พอสำหรับประเมินถูก/แพง"}"""
+{chr(10).join("- " + r for r in reasons[:7]) if reasons else "- ข้อมูลพื้นฐานไม่พอสำหรับประเมินถูก/แพง"}"""
 
     return text, status
 
 # ============================================================
 # OPTIONS HYBRID MAX FREE
 # ============================================================
+def option_strike_step(price):
+    if price is None:
+        return 1
+    if price >= 500:
+        return 5
+    if price >= 100:
+        return 2.5
+    if price >= 30:
+        return 1
+    return 0.5
+
+
+def ensure_spread_width(buy_strike, sell_strike, price, side="CALL"):
+    step = option_strike_step(price)
+    try:
+        buy = float(buy_strike)
+        sell = float(sell_strike)
+    except Exception:
+        return buy_strike, sell_strike
+    if str(side).upper() == "CALL":
+        if sell <= buy:
+            sell = buy + step
+    else:
+        if sell >= buy:
+            sell = buy - step
+    return round(buy, 2), round(sell, 2)
+
+
 def options_hybrid_engine(asset, analysis):
     if asset["asset_type"] != "US_STOCK":
         return ""
@@ -1524,23 +1590,31 @@ def options_hybrid_engine(asset, analysis):
 
     score = analysis["score"]
     prob = analysis["probability"]
+    regime = str(analysis.get("regime", "")).upper()
 
-    call_strike = round_strike(price + atr * 0.60)
-    call_sell = round_strike(price + atr * 1.70)
-    put_strike = round_strike(price - atr * 0.60)
-    put_sell = round_strike(price - atr * 1.70)
+    call_strike = round_strike(price + atr * 0.50)
+    call_sell = round_strike(price + atr * 2.00)
+    call_strike, call_sell = ensure_spread_width(call_strike, call_sell, price, "CALL")
 
-    entry_low = price - atr * 0.25
-    entry_high = price + atr * 0.15
-    tp1 = price + atr * 0.90
-    tp2 = price + atr * 1.80
-    sl = price - atr * 0.90
+    put_strike = round_strike(price - atr * 0.50)
+    put_sell = round_strike(price - atr * 2.00)
+    put_strike, put_sell = ensure_spread_width(put_strike, put_sell, price, "PUT")
 
-    put_entry_low = price - atr * 0.15
-    put_entry_high = price + atr * 0.25
-    put_tp1 = price - atr * 0.90
-    put_tp2 = price - atr * 1.80
-    put_sl = price + atr * 0.90
+    entry_low = price - atr * 0.35
+    entry_high = price + atr * 0.10
+    tp1 = price + atr * 1.00
+    tp2 = price + atr * 2.00
+    tp3 = price + atr * 3.00
+    sl = price - atr * 1.00
+
+    put_entry_low = price - atr * 0.10
+    put_entry_high = price + atr * 0.35
+    put_tp1 = price - atr * 1.00
+    put_tp2 = price - atr * 2.00
+    put_tp3 = price - atr * 3.00
+    put_sl = price + atr * 1.00
+
+    range_note = "\nหมายเหตุ Regime: ตลาดเป็น RANGE/LOW VOL จึงควรใช้ขนาดไม้ลดลงและเน้นย่อซื้อ/เด้งขาย ไม่ไล่ราคา" if ("RANGE" in regime or "LOW VOL" in regime) else ""
 
     if score >= 70:
         setup = f"""🧠 Options Hybrid Max Free
@@ -1551,6 +1625,7 @@ Probability ประมาณ: {prob}%
 Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 TP1: {fmt_num(tp1)}
 TP2: {fmt_num(tp2)}
+TP3: {fmt_num(tp3)}
 SL: {fmt_num(sl)}
 
 Spread Scanner:
@@ -1558,7 +1633,7 @@ Bull Call Spread
 Buy {fmt_num(call_strike, 2)}C
 Sell {fmt_num(call_sell, 2)}C
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+ข้อควรระวัง: ใช้ ATR + AI Score เป็น proxy หากต้องการสัญญาจริงให้ดู /v10/options หรือ /v12-1/liquidity เพิ่ม{range_note}"""
     elif score <= 35:
         setup = f"""🧠 Options Hybrid Max Free
 Setup: PUT / Bearish
@@ -1568,6 +1643,7 @@ Probability ประมาณ: {prob}%
 Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
 TP1: {fmt_num(put_tp1)}
 TP2: {fmt_num(put_tp2)}
+TP3: {fmt_num(put_tp3)}
 SL: {fmt_num(put_sl)}
 
 Spread Scanner:
@@ -1575,7 +1651,7 @@ Bear Put Spread
 Buy {fmt_num(put_strike, 2)}P
 Sell {fmt_num(put_sell, 2)}P
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+ข้อควรระวัง: ใช้ ATR + AI Score เป็น proxy หากต้องการสัญญาจริงให้ดู /v10/options หรือ /v12-1/liquidity เพิ่ม{range_note}"""
     else:
         setup = f"""🧠 Options Hybrid Max Free
 Setup: WAIT / Neutral
@@ -3352,46 +3428,42 @@ def next_friday_text():
 
 
 def suggested_options_contract(asset, analysis):
-    if asset.get("asset_type") != "US_STOCK":
+    if asset["asset_type"] != "US_STOCK":
         return ""
 
     price = analysis.get("price")
-    if not price:
+    atr = analysis.get("atr") or (price * 0.015 if price else None)
+    score = analysis.get("score", 50)
+    if not price or not atr:
         return ""
 
-    score = int(analysis.get("score", 50))
-    atr = analysis.get("atr") or price * 0.015
-    symbol = asset.get("symbol")
+    if score >= 70:
+        buy = round_strike(price + atr * 0.50)
+        sell = round_strike(price + atr * 2.00)
+        buy, sell = ensure_spread_width(buy, sell, price, "CALL")
+        tp1, tp2, tp3, sl = price + atr, price + atr * 2, price + atr * 3, price - atr
+        return f"""🧾 Options Contract Proxy
+Side: CALL
+Buy Strike: {fmt_num(buy, 2)}C
+Spread: Buy {fmt_num(buy, 2)}C / Sell {fmt_num(sell, 2)}C
+TP Underlying: {fmt_num(tp1)} / {fmt_num(tp2)} / {fmt_num(tp3)}
+Invalid/SL Underlying: {fmt_num(sl)}
+หมายเหตุ: เป็น Options Hybrid จากราคา/ATR/AI Score ไม่ใช่ราคา option จริง"""
 
-    if score <= STRONG_PUT_SCORE:
-        direction = "PUT"
-    elif score >= STRONG_CALL_SCORE:
-        direction = "CALL"
-    else:
-        direction = "CALL" if score >= 50 else "PUT"
+    if score <= 35:
+        buy = round_strike(price - atr * 0.50)
+        sell = round_strike(price - atr * 2.00)
+        buy, sell = ensure_spread_width(buy, sell, price, "PUT")
+        tp1, tp2, tp3, sl = price - atr, price - atr * 2, price - atr * 3, price + atr
+        return f"""🧾 Options Contract Proxy
+Side: PUT
+Buy Strike: {fmt_num(buy, 2)}P
+Spread: Buy {fmt_num(buy, 2)}P / Sell {fmt_num(sell, 2)}P
+TP Underlying: {fmt_num(tp1)} / {fmt_num(tp2)} / {fmt_num(tp3)}
+Invalid/SL Underlying: {fmt_num(sl)}
+หมายเหตุ: เป็น Options Hybrid จากราคา/ATR/AI Score ไม่ใช่ราคา option จริง"""
 
-    if direction == "CALL":
-        strike = round_strike(price + atr * 0.8)
-        side_word = "Suggested Call"
-        suffix = "C"
-    else:
-        strike = round_strike(price - atr * 0.8)
-        side_word = "Suggested Put"
-        suffix = "P"
-
-    risk = "Medium"
-    reward = "High" if abs(score - 50) >= 35 else "Medium"
-
-    return f"""🧩 Options Hybrid
-{side_word}
-
-{symbol} {fmt_num(strike, 0)}{suffix}
-Exp: {next_friday_text()}
-
-Risk: {risk}
-Reward: {reward}
-
-หมายเหตุ: เป็น Options Hybrid จากราคา/ATR/AI Score ไม่ใช่ option chain จริง"""
+    return "🧾 Options Contract Proxy\nSide: WAIT\nยังไม่มี edge มากพอสำหรับเลือก CALL/PUT"
 
 
 def compact_top5_message():
@@ -4320,12 +4392,16 @@ def build_timeframe_confirm_final(asset, analysis, side):
 
 
 def dynamic_position_size(asset, analysis, side):
-    confidence = adjusted_confidence(analysis, side) if "adjusted_confidence" in globals() else calculate_signal_confidence(analysis)
+    confidence = calculate_signal_confidence_v2(asset, analysis, side) if "calculate_signal_confidence_v2" in globals() else calculate_signal_confidence(analysis)
     trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else 5
     rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
     regime = str(analysis.get("regime", "")).upper()
+    rsi = safe_float(analysis.get("rsi"))
+    side_upper = str(side or "").upper()
 
     risk_points = 0
+    warnings = []
+
     if confidence >= 85:
         risk_points += 2
     elif confidence >= 72:
@@ -4343,12 +4419,22 @@ def dynamic_position_size(asset, analysis, side):
 
     if "RANGE" in regime or "LOW VOL" in regime:
         risk_points -= 1
+        warnings.append("Regime เป็น Range/Low Vol ลดขนาดไม้")
 
     tf4h, ok4h = timeframe_4h_confirm(asset, analysis, side)
     if ok4h:
         risk_points += 1
     else:
         risk_points -= 1
+
+    oversold_sell = side_upper in {"SELL", "PUT"} and rsi is not None and rsi <= 35
+    overbought_call = side_upper in {"BUY", "CALL"} and rsi is not None and rsi >= 72
+    if oversold_sell:
+        risk_points -= 3
+        warnings.append("RSI ต่ำ/oversold มีโอกาสรีบาวด์แรง ห้าม SELL/PUT ไล่ราคา")
+    if overbought_call:
+        risk_points -= 2
+        warnings.append("RSI สูง/overbought ระวังไล่ CALL/BUY ตอนปลายรอบ")
 
     if risk_points >= 5:
         level = "LOW"
@@ -4363,10 +4449,23 @@ def dynamic_position_size(asset, analysis, side):
         size = "ลดขนาดไม้ / รอ confirmation"
         percent = "20-30% ของขนาดไม้ปกติ"
 
+    if oversold_sell:
+        level = "HIGH"
+        percent = "25-50% ของขนาดไม้ปกติ"
+        size = "รอเด้งเข้าโซนขายเท่านั้น ไม่ขายไล่ราคา"
+    if overbought_call and level == "LOW":
+        level = "MEDIUM"
+        percent = "40-60% ของขนาดไม้ปกติ"
+        size = "รอย่อ/รอ breakout confirmation ไม่ไล่ราคา"
+
+    warn_text = ""
+    if warnings:
+        warn_text = "\nRisk Notes:\n" + "\n".join("- " + w for w in warnings[:4])
+
     return f"""⚖️ Dynamic Position Size
 Risk Level: {level}
 Suggested Size: {percent}
-Action: {size}"""
+Action: {size}{warn_text}"""
 
 
 def final_gate_extra(asset, analysis, sig):
@@ -7316,6 +7415,27 @@ v131_init_db()
 v14_init_db()
 v10_init_db()
 v11_init_db()
+
+
+
+# ============================================================
+# V14.1 SIGNAL LOGIC PATCH STATUS
+# ============================================================
+@app.route("/v14-1/status", methods=["GET"])
+def v141_status_route():
+    return jsonify({
+        "version": "V14.1 Signal Logic Fix Free 100%",
+        "enabled": True,
+        "fixes": [
+            "Dividend Yield sanity filter: suppress unrealistic ETF/unit glitches such as QQQ 42%",
+            "Bull/Bear spread strike width guard: prevents Buy 730C / Sell 730C zero-width spread",
+            "ATR-based TP1/TP2/TP3 widened to 1R/2R/3R proxy",
+            "Volume reason conflict fixed: high volume on red bar no longer says bullish confirmation",
+            "Oversold SELL/PUT protection: reduces size and forces wait-for-rebound sell logic",
+            "Range/Low Vol note added for options entries"
+        ],
+        "test_routes": ["/v14/status", "/v14/dashboard", "/v14-1/status", "/v10/options/NVDA", "/v13-1/ranking/daily"]
+    })
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
