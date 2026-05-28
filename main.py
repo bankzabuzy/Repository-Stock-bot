@@ -131,6 +131,7 @@ PREMARKET_COOLDOWN_KEY = "premarket_reminder"
 TOP5_COOLDOWN_KEY = "top5_daily"
 
 DB_PATH = os.getenv("DB_PATH", "signals.db")
+DB_WRITE_LOCK = threading.RLock()
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
@@ -190,90 +191,127 @@ def resolve_delisted_symbol(symbol):
 # DATABASE
 # ============================================================
 def db():
+    """
+    Central SQLite connection factory.
+
+    V21.6 Database Writer Fix:
+    - wait for SQLite locks instead of failing immediately
+    - allow access from Flask + background alert thread
+    - avoid running journal_mode=WAL on every connection
+    """
     conn = sqlite3.connect(
         DB_PATH,
-        timeout=30,
+        timeout=60,
         check_same_thread=False
     )
-
     conn.row_factory = sqlite3.Row
-
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-
+    try:
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
     return conn
 
-
 def init_db():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            asset_type TEXT,
-            price REAL,
-            score INTEGER,
-            bias TEXT,
-            signal_type TEXT,
-            regime TEXT,
-            probability INTEGER,
-            report TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS alert_state (
-            symbol TEXT PRIMARY KEY,
-            last_sent_ts REAL NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS alert_cooldown (
-            alert_key TEXT PRIMARY KEY,
-            last_sent_ts REAL NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
+    conn = None
+    try:
+        with DB_WRITE_LOCK:
+            conn = db()
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    asset_type TEXT,
+                    price REAL,
+                    score INTEGER,
+                    bias TEXT,
+                    signal_type TEXT,
+                    regime TEXT,
+                    probability INTEGER,
+                    report TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alert_state (
+                    symbol TEXT PRIMARY KEY,
+                    last_sent_ts REAL NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alert_cooldown (
+                    alert_key TEXT PRIMARY KEY,
+                    last_sent_ts REAL NOT NULL
+                )
+            """)
+            conn.commit()
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 def save_signal(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
+    conn = None
     try:
-        conn = db()
-        conn.execute(
-            """INSERT INTO signals
-               (created_at, symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (now_text(), symbol, asset_type, price, score, bias, signal_type, regime, probability, report[:4900]),
-        )
-        conn.commit()
-        conn.close()
+        with DB_WRITE_LOCK:
+            conn = db()
+            conn.execute(
+                """INSERT INTO signals
+                   (created_at, symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now_text(), symbol, asset_type, price, score, bias, signal_type, regime, probability, str(report or "")[:4900]),
+            )
+            conn.commit()
     except Exception as e:
         print("save_signal error:", e)
-
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 def get_last_alert_ts(symbol):
+    conn = None
     try:
         conn = db()
         row = conn.execute("SELECT last_sent_ts FROM alert_state WHERE symbol=?", (symbol,)).fetchone()
-        conn.close()
         return float(row["last_sent_ts"]) if row else 0.0
     except Exception:
         return 0.0
-
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 def set_last_alert_ts(symbol, ts):
+    conn = None
     try:
-        conn = db()
-        conn.execute(
-            "INSERT INTO alert_state(symbol, last_sent_ts) VALUES(?, ?) ON CONFLICT(symbol) DO UPDATE SET last_sent_ts=excluded.last_sent_ts",
-            (symbol, ts),
-        )
-        conn.commit()
-        conn.close()
+        with DB_WRITE_LOCK:
+            conn = db()
+            conn.execute(
+                "INSERT INTO alert_state(symbol, last_sent_ts) VALUES(?, ?) ON CONFLICT(symbol) DO UPDATE SET last_sent_ts=excluded.last_sent_ts",
+                (symbol, ts),
+            )
+            conn.commit()
     except Exception as e:
         print("set_last_alert_ts error:", e)
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
 
 
 # ============================================================
@@ -11028,6 +11066,21 @@ def v216_add_column_if_missing(cur, table, column, coltype):
         pass
 
 
+
+def v216_with_db_write(fn, *args, **kwargs):
+    last_error = None
+    for attempt in range(6):
+        try:
+            with DB_WRITE_LOCK:
+                return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            last_error = str(e)
+            if "locked" in last_error.lower():
+                time.sleep(0.4 * (attempt + 1))
+                continue
+            raise
+    raise sqlite3.OperationalError(f"database is locked after retry: {last_error}")
+
 def v216_init_db():
     conn = db()
     cur = conn.cursor()
@@ -11397,7 +11450,7 @@ def v216_rebuild_equity_curve():
 
 def v216_snapshot():
     v216_init_db()
-    v216_backfill_closed_outcomes()
+    v216_with_db_write(v216_backfill_closed_outcomes)
 
     conn = db()
     conn.row_factory = sqlite3.Row
@@ -11489,19 +11542,22 @@ def v216_status():
 @app.route("/v21-6/journal/open")
 def v216_route_open_trade():
     try:
-        trade_id = v216_open_trade(
-            symbol=request.args.get("symbol"),
-            side=request.args.get("side", "CALL"),
-            entry_price=request.args.get("entry"),
-            stop_price=request.args.get("stop"),
-            target_price=request.args.get("target"),
-            strategy=request.args.get("strategy", "MANUAL"),
-            qty=request.args.get("qty", V216_DEFAULT_QTY),
-            source=request.args.get("source", "manual"),
-            signal_score=request.args.get("score"),
-            probability=request.args.get("prob"),
-            notes=request.args.get("notes"),
-        )
+        def _do_open():
+            return v216_open_trade(
+                symbol=request.args.get("symbol"),
+                side=request.args.get("side", "CALL"),
+                entry_price=request.args.get("entry"),
+                stop_price=request.args.get("stop"),
+                target_price=request.args.get("target"),
+                strategy=request.args.get("strategy", "MANUAL"),
+                qty=request.args.get("qty", V216_DEFAULT_QTY),
+                source=request.args.get("source", "manual"),
+                signal_score=request.args.get("score"),
+                probability=request.args.get("prob"),
+                notes=request.args.get("notes"),
+            )
+
+        trade_id = v216_with_db_write(_do_open)
         return jsonify({
             "ok": True,
             "trade_id": trade_id,
@@ -11514,7 +11570,9 @@ def v216_route_open_trade():
 @app.route("/v21-6/journal/close/<int:trade_id>")
 def v216_route_close_trade(trade_id):
     try:
-        return jsonify(v216_close_trade(trade_id, request.args.get("exit"), request.args.get("notes")))
+        def _do_close():
+            return v216_close_trade(trade_id, request.args.get("exit"), request.args.get("notes"))
+        return jsonify(v216_with_db_write(_do_close))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -11522,7 +11580,7 @@ def v216_route_close_trade(trade_id):
 @app.route("/v21-6/backfill")
 def v216_route_backfill():
     try:
-        count = v216_backfill_closed_outcomes()
+        count = v216_with_db_write(v216_backfill_closed_outcomes)
         snap = v216_snapshot()
         return jsonify({
             "ok": True,
@@ -11709,4 +11767,4 @@ if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
 
-app.run(host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=PORT)
