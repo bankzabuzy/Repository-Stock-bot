@@ -10155,6 +10155,427 @@ def v20_edge_route():
 def v20_snapshot_route():
     return jsonify(v20_snapshot())
 
+# ============================================================
+# V21 CORE DATABASE LAYER - TRUE JOURNAL / CLOSED OUTCOMES
+# ============================================================
+V21_VERSION = "V21 Core Database Layer Free 100%"
+
+
+def v21_now_iso():
+    try:
+        return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def v21_init_db():
+    """Create the real trade journal database used by V21.
+    This is deliberately independent from signal-audit tables so closed outcomes are not mixed with theoretical signals.
+    """
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v21_trade_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            stop_price REAL,
+            target_price REAL,
+            qty REAL DEFAULT 1,
+            entry_time TEXT,
+            exit_price REAL,
+            exit_time TEXT,
+            pnl REAL,
+            pnl_pct REAL,
+            r_multiple REAL,
+            result TEXT,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            notes TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v21_trade_status ON v21_trade_journal(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v21_trade_symbol ON v21_trade_journal(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v21_trade_strategy ON v21_trade_journal(strategy)")
+    conn.commit()
+    conn.close()
+
+
+def v21_side_factor(side):
+    s = str(side or "").strip().upper()
+    if s in {"PUT", "SELL", "SHORT", "BEAR", "BEARISH"}:
+        return -1
+    return 1
+
+
+def v21_clean_strategy(strategy):
+    s = str(strategy or "MANUAL").strip().upper().replace(" ", "_")
+    return s or "MANUAL"
+
+
+def v21_calc_trade_metrics(side, entry, exit_price, stop=None, qty=1):
+    entry = safe_float(entry)
+    exit_price = safe_float(exit_price)
+    stop = safe_float(stop)
+    qty = safe_float(qty, 1) or 1
+    if entry is None or exit_price is None or entry <= 0:
+        return {"pnl": 0.0, "pnl_pct": 0.0, "r_multiple": 0.0, "result": "FLAT"}
+    factor = v21_side_factor(side)
+    pnl_per_share = (exit_price - entry) * factor
+    pnl = pnl_per_share * qty
+    pnl_pct = (pnl_per_share / entry) * 100
+    if stop is not None and stop > 0:
+        risk_per_share = abs(entry - stop)
+    else:
+        risk_per_share = max(entry * 0.02, 0.01)
+    r_multiple = pnl_per_share / risk_per_share if risk_per_share else 0.0
+    if r_multiple > 0:
+        result = "WIN"
+    elif r_multiple < 0:
+        result = "LOSS"
+    else:
+        result = "FLAT"
+    return {
+        "pnl": round(float(pnl), 6),
+        "pnl_pct": round(float(pnl_pct), 6),
+        "r_multiple": round(float(r_multiple), 6),
+        "result": result,
+    }
+
+
+def v21_open_trade(symbol, side, entry, strategy="MANUAL", qty=1, stop=None, target=None, notes=""):
+    v21_init_db()
+    symbol = str(symbol or "").strip().upper()
+    side = str(side or "CALL").strip().upper()
+    strategy = v21_clean_strategy(strategy)
+    entry = safe_float(entry)
+    qty = safe_float(qty, 1) or 1
+    stop = safe_float(stop)
+    target = safe_float(target)
+    if not symbol:
+        raise ValueError("symbol is required")
+    if entry is None or entry <= 0:
+        raise ValueError("entry must be a positive number")
+    now = v21_now_iso()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO v21_trade_journal
+        (created_at, updated_at, symbol, side, strategy, entry_price, stop_price, target_price, qty, entry_time, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+    """, (now, now, symbol, side, strategy, entry, stop, target, qty, now, str(notes or "")[:1000]))
+    trade_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return v21_get_trade(trade_id)
+
+
+def v21_get_trade(trade_id):
+    v21_init_db()
+    conn = db()
+    row = conn.execute("SELECT * FROM v21_trade_journal WHERE id=?", (int(trade_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def v21_close_trade(trade_id, exit_price, notes_append=""):
+    v21_init_db()
+    trade = v21_get_trade(trade_id)
+    if not trade:
+        raise ValueError("trade not found")
+    if str(trade.get("status", "")).upper() == "CLOSED":
+        return trade
+    exit_price = safe_float(exit_price)
+    if exit_price is None or exit_price <= 0:
+        raise ValueError("exit must be a positive number")
+    metrics = v21_calc_trade_metrics(
+        trade.get("side"), trade.get("entry_price"), exit_price,
+        stop=trade.get("stop_price"), qty=trade.get("qty")
+    )
+    now = v21_now_iso()
+    notes = (trade.get("notes") or "")
+    if notes_append:
+        notes = (notes + " | " + str(notes_append))[:1000]
+    conn = db()
+    conn.execute("""
+        UPDATE v21_trade_journal
+        SET updated_at=?, exit_price=?, exit_time=?, pnl=?, pnl_pct=?, r_multiple=?, result=?, status='CLOSED', notes=?
+        WHERE id=?
+    """, (now, exit_price, now, metrics["pnl"], metrics["pnl_pct"], metrics["r_multiple"], metrics["result"], notes, int(trade_id)))
+    conn.commit()
+    conn.close()
+    return v21_get_trade(trade_id)
+
+
+def v21_rows(status=None, limit=250):
+    v21_init_db()
+    limit = int(safe_float(limit, 250) or 250)
+    conn = db()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM v21_trade_journal WHERE status=? ORDER BY id DESC LIMIT ?",
+            (str(status).upper(), limit)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM v21_trade_journal ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def v21_closed_rows(limit=5000):
+    v21_init_db()
+    conn = db()
+    rows = conn.execute("""
+        SELECT * FROM v21_trade_journal
+        WHERE status='CLOSED' AND r_multiple IS NOT NULL
+        ORDER BY id ASC LIMIT ?
+    """, (int(limit),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def v21_performance(rows=None):
+    rows = rows if rows is not None else v21_closed_rows()
+    n = len(rows)
+    if n == 0:
+        return {
+            "trades": 0, "wins": 0, "losses": 0, "flats": 0,
+            "win_rate_pct": 0.0, "avg_win_r": 0.0, "avg_loss_r": 0.0,
+            "profit_factor": 0.0, "expectancy_r": 0.0,
+            "total_r": 0.0, "max_drawdown_r": 0.0,
+            "sample_warning": "Need 50-100 closed trades before trusting statistics."
+        }
+    rs = [safe_float(r.get("r_multiple"), 0) or 0 for r in rows]
+    wins = [x for x in rs if x > 0]
+    losses = [x for x in rs if x < 0]
+    flats = [x for x in rs if x == 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    pf = gross_win / gross_loss if gross_loss else (gross_win if gross_win else 0.0)
+    expectancy = sum(rs) / n if n else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
+    equity = []
+    cur = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for x in rs:
+        cur += x
+        peak = max(peak, cur)
+        max_dd = min(max_dd, cur - peak)
+        equity.append(round(cur, 4))
+    return {
+        "trades": n,
+        "wins": len(wins),
+        "losses": len(losses),
+        "flats": len(flats),
+        "win_rate_pct": round(len(wins) / n * 100, 2),
+        "avg_win_r": round(avg_win, 4),
+        "avg_loss_r": round(avg_loss, 4),
+        "profit_factor": round(pf, 4),
+        "expectancy_r": round(expectancy, 4),
+        "total_r": round(sum(rs), 4),
+        "max_drawdown_r": round(abs(max_dd), 4),
+        "sample_warning": "Reliable" if n >= 50 else "Low sample: collect at least 50 closed trades."
+    }
+
+
+def v21_strategy_stats():
+    rows = v21_closed_rows()
+    groups = {}
+    for r in rows:
+        key = v21_clean_strategy(r.get("strategy"))
+        groups.setdefault(key, []).append(r)
+    out = []
+    for strategy, items in groups.items():
+        p = v21_performance(items)
+        p["strategy"] = strategy
+        out.append(p)
+    out.sort(key=lambda x: (x.get("expectancy_r", 0), x.get("profit_factor", 0), x.get("trades", 0)), reverse=True)
+    return out
+
+
+def v21_equity_curve():
+    rows = v21_closed_rows()
+    curve = []
+    cur = 0.0
+    peak = 0.0
+    for r in rows:
+        r_mult = safe_float(r.get("r_multiple"), 0) or 0
+        cur += r_mult
+        peak = max(peak, cur)
+        curve.append({
+            "trade_id": r.get("id"),
+            "time": r.get("exit_time") or r.get("updated_at"),
+            "symbol": r.get("symbol"),
+            "strategy": r.get("strategy"),
+            "r": round(r_mult, 4),
+            "equity_r": round(cur, 4),
+            "drawdown_r": round(max(0.0, peak - cur), 4),
+        })
+    return curve
+
+
+def v21_dashboard_snapshot():
+    rows = v21_rows(limit=100)
+    closed = [r for r in rows if str(r.get("status", "")).upper() == "CLOSED"]
+    open_rows = [r for r in rows if str(r.get("status", "")).upper() == "OPEN"]
+    perf = v21_performance(v21_closed_rows())
+    return {
+        "version": V21_VERSION,
+        "open_trades": len(open_rows),
+        "recent_trades": rows[:20],
+        "performance": perf,
+        "strategy_stats": v21_strategy_stats(),
+        "equity_curve": v21_equity_curve()[-100:],
+    }
+
+
+def v21_html_escape(x):
+    return str(x if x is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def v21_layout(title, body, active="dashboard"):
+    nav = "".join([
+        f'<a class="nav {"on" if active==k else ""}" href="{href}">{label}</a>'
+        for k, label, href in [
+            ("dashboard", "Dashboard", "/v21"),
+            ("journal", "Journal", "/v21/journal"),
+            ("stats", "Stats", "/v21/stats"),
+            ("equity", "Equity", "/v21/equity"),
+            ("api", "JSON", "/v21/api/snapshot"),
+        ]
+    ])
+    return Response(f"""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{v21_html_escape(title)}</title>
+<style>
+body{{margin:0;background:#0f172a;color:#e5e7eb;font-family:Arial,Helvetica,sans-serif}}.wrap{{max-width:1180px;margin:0 auto;padding:22px}}
+.top{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}}h1{{font-size:28px;margin:0}}.sub{{color:#94a3b8;font-size:13px}}
+.nav{{color:#cbd5e1;text-decoration:none;padding:9px 12px;border-radius:12px;background:#172036;margin-left:6px;font-size:13px}}.nav.on{{background:#2563eb;color:#fff}}
+.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.card{{background:#172036;border:1px solid #334155;border-radius:16px;padding:16px;box-shadow:0 8px 20px rgba(0,0,0,.18)}}
+.card h3{{margin:0 0 8px;font-size:13px;color:#cbd5e1;text-transform:uppercase}}.big{{font-size:28px;font-weight:800}}.ok{{color:#22c55e}}.bad{{color:#ef4444}}.warn{{color:#f59e0b}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:10px;border-bottom:1px solid #334155;text-align:left}}th{{color:#93c5fd;font-size:12px;text-transform:uppercase}}.section{{margin-top:16px}}
+.badge{{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;background:#334155}}.win{{background:#14532d;color:#bbf7d0}}.loss{{background:#7f1d1d;color:#fecaca}}.open{{background:#1e3a8a;color:#bfdbfe}}
+pre{{white-space:pre-wrap;background:#0b1020;border-radius:14px;padding:14px;border:1px solid #334155;overflow:auto}}@media(max-width:900px){{.grid{{grid-template-columns:1fr 1fr}}.top{{display:block}}.nav{{display:inline-block;margin:6px 4px 0 0}}}}@media(max-width:560px){{.grid{{grid-template-columns:1fr}}}}
+</style></head><body><div class="wrap"><div class="top"><div><h1>{v21_html_escape(title)}</h1><div class="sub">{V21_VERSION} • {v21_now_iso()} • Real closed-trade database only</div></div><div>{nav}</div></div>{body}</div></body></html>
+""", mimetype="text/html")
+
+
+def v21_dashboard_body():
+    snap = v21_dashboard_snapshot()
+    p = snap["performance"]
+    stats = snap["strategy_stats"][:8]
+    recent = snap["recent_trades"][:12]
+    cards = f"""
+    <div class="grid">
+      <div class="card"><h3>Closed Trades</h3><div class="big">{p['trades']}</div><div class="sub">Real outcomes only</div></div>
+      <div class="card"><h3>Win Rate</h3><div class="big">{p['win_rate_pct']}%</div><div class="sub">Wins {p['wins']} / Losses {p['losses']}</div></div>
+      <div class="card"><h3>Profit Factor</h3><div class="big">{p['profit_factor']}</div><div class="sub">Gross win / gross loss</div></div>
+      <div class="card"><h3>Expectancy</h3><div class="big {'ok' if p['expectancy_r']>0 else 'bad' if p['expectancy_r']<0 else ''}">{p['expectancy_r']}R</div><div class="sub">{p['sample_warning']}</div></div>
+    </div>
+    """
+    stat_rows = "".join([f"<tr><td>{v21_html_escape(s['strategy'])}</td><td>{s['trades']}</td><td>{s['win_rate_pct']}%</td><td>{s['profit_factor']}</td><td>{s['expectancy_r']}R</td><td>{s['max_drawdown_r']}R</td></tr>" for s in stats]) or "<tr><td colspan='6'>No closed outcomes yet. Open and close trades to build real statistics.</td></tr>"
+    recent_rows = "".join([f"<tr><td>{r['id']}</td><td>{v21_html_escape(r['symbol'])}</td><td>{v21_html_escape(r['side'])}</td><td>{v21_html_escape(r['strategy'])}</td><td>{r['entry_price']}</td><td>{r.get('exit_price') or ''}</td><td><span class='badge {str(r.get('status','')).lower()}'>{v21_html_escape(r.get('status'))}</span></td><td>{r.get('r_multiple') if r.get('r_multiple') is not None else ''}</td></tr>" for r in recent]) or "<tr><td colspan='8'>No trades yet.</td></tr>"
+    return cards + f"""
+    <div class="section card"><h3>True Strategy Leaderboard</h3><table><tr><th>Strategy</th><th>Trades</th><th>Win%</th><th>PF</th><th>Expectancy</th><th>Max DD</th></tr>{stat_rows}</table></div>
+    <div class="section card"><h3>Recent Journal</h3><table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>Status</th><th>R</th></tr>{recent_rows}</table></div>
+    <div class="section card"><h3>How to log a real trade</h3><pre>/v21/journal/open/NVDA?side=CALL&entry=212&stop=205&target=225&strategy=MOMENTUM&qty=1
+/v21/journal/close/1?exit=225</pre></div>
+    """
+
+
+def v21_journal_body():
+    rows = v21_rows(limit=300)
+    tr = "".join([f"<tr><td>{r['id']}</td><td>{v21_html_escape(r['symbol'])}</td><td>{v21_html_escape(r['side'])}</td><td>{v21_html_escape(r['strategy'])}</td><td>{r['entry_price']}</td><td>{r.get('stop_price') or ''}</td><td>{r.get('target_price') or ''}</td><td>{r.get('exit_price') or ''}</td><td><span class='badge {str(r.get('status','')).lower()}'>{v21_html_escape(r.get('status'))}</span></td><td>{r.get('r_multiple') if r.get('r_multiple') is not None else ''}</td><td>{v21_html_escape(r.get('entry_time'))}</td></tr>" for r in rows]) or "<tr><td colspan='11'>No journal entries yet.</td></tr>"
+    return f"<div class='card'><h3>Real Trade Journal</h3><table><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Stop</th><th>Target</th><th>Exit</th><th>Status</th><th>R</th><th>Entry Time</th></tr>{tr}</table></div>"
+
+
+def v21_stats_body():
+    p = v21_performance(v21_closed_rows())
+    stats = v21_strategy_stats()
+    rows = "".join([f"<tr><td>{v21_html_escape(s['strategy'])}</td><td>{s['trades']}</td><td>{s['wins']}</td><td>{s['losses']}</td><td>{s['win_rate_pct']}%</td><td>{s['avg_win_r']}R</td><td>{s['avg_loss_r']}R</td><td>{s['profit_factor']}</td><td>{s['expectancy_r']}R</td><td>{s['total_r']}R</td></tr>" for s in stats]) or "<tr><td colspan='10'>No closed outcomes yet.</td></tr>"
+    return f"""
+    <div class="grid"><div class="card"><h3>All Trades</h3><div class="big">{p['trades']}</div></div><div class="card"><h3>Win Rate</h3><div class="big">{p['win_rate_pct']}%</div></div><div class="card"><h3>PF</h3><div class="big">{p['profit_factor']}</div></div><div class="card"><h3>Expectancy</h3><div class="big">{p['expectancy_r']}R</div></div></div>
+    <div class="section card"><h3>Strategy Stats From Closed Trades</h3><table><tr><th>Strategy</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win%</th><th>Avg Win</th><th>Avg Loss</th><th>PF</th><th>Expectancy</th><th>Total R</th></tr>{rows}</table></div>
+    """
+
+
+def v21_equity_body():
+    curve = v21_equity_curve()
+    rows = "".join([f"<tr><td>{c['trade_id']}</td><td>{v21_html_escape(c['time'])}</td><td>{v21_html_escape(c['symbol'])}</td><td>{v21_html_escape(c['strategy'])}</td><td>{c['r']}R</td><td>{c['equity_r']}R</td><td>{c['drawdown_r']}R</td></tr>" for c in curve[-100:]]) or "<tr><td colspan='7'>No equity curve yet. Close trades first.</td></tr>"
+    points = [c['equity_r'] for c in curve[-60:]]
+    bars = "".join([f"<div title='{p}R' style='height:{max(4, min(120, 60 + p*8))}px;width:8px;background:#38bdf8;border-radius:4px;display:inline-block;margin-right:3px;vertical-align:bottom'></div>" for p in points]) or "<div class='sub'>No curve yet</div>"
+    return f"<div class='card'><h3>Equity Curve in R</h3><div style='height:140px;display:flex;align-items:flex-end'>{bars}</div></div><div class='section card'><h3>Equity Points</h3><table><tr><th>ID</th><th>Time</th><th>Symbol</th><th>Strategy</th><th>R</th><th>Equity</th><th>DD</th></tr>{rows}</table></div>"
+
+
+@app.route("/v21/status", methods=["GET"])
+def v21_status_route():
+    v21_init_db()
+    return jsonify({
+        "version": V21_VERSION,
+        "enabled": True,
+        "purpose": "Core Database Layer only: journal, closed trades, true stats, equity curve.",
+        "routes": ["/v21", "/v21/dashboard", "/v21/journal", "/v21/journal/open/<symbol>", "/v21/journal/close/<id>", "/v21/stats", "/v21/equity", "/v21/api/snapshot"]
+    })
+
+
+@app.route("/v21", methods=["GET"])
+@app.route("/v21/dashboard", methods=["GET"])
+def v21_dashboard_route():
+    return v21_layout("V21 Core Database Layer", v21_dashboard_body(), "dashboard")
+
+
+@app.route("/v21/journal", methods=["GET"])
+def v21_journal_route():
+    return v21_layout("V21 Real Trade Journal", v21_journal_body(), "journal")
+
+
+@app.route("/v21/journal/open/<symbol>", methods=["GET", "POST"])
+def v21_open_trade_route(symbol):
+    try:
+        trade = v21_open_trade(
+            symbol=symbol,
+            side=request.args.get("side", "CALL"),
+            entry=request.args.get("entry"),
+            strategy=request.args.get("strategy", "MANUAL"),
+            qty=request.args.get("qty", 1),
+            stop=request.args.get("stop"),
+            target=request.args.get("target"),
+            notes=request.args.get("notes", "")
+        )
+        return jsonify({"ok": True, "trade": trade, "close_url_example": f"/v21/journal/close/{trade['id']}?exit=YOUR_EXIT_PRICE"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "example": "/v21/journal/open/NVDA?side=CALL&entry=212&stop=205&target=225&strategy=MOMENTUM&qty=1"}), 400
+
+
+@app.route("/v21/journal/close/<int:trade_id>", methods=["GET", "POST"])
+def v21_close_trade_route(trade_id):
+    try:
+        trade = v21_close_trade(trade_id, request.args.get("exit"), notes_append=request.args.get("notes", ""))
+        return jsonify({"ok": True, "trade": trade, "performance": v21_performance(v21_closed_rows())})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "example": f"/v21/journal/close/{trade_id}?exit=225"}), 400
+
+
+@app.route("/v21/stats", methods=["GET"])
+def v21_stats_route():
+    return v21_layout("V21 True Strategy Stats", v21_stats_body(), "stats")
+
+
+@app.route("/v21/equity", methods=["GET"])
+def v21_equity_route():
+    return v21_layout("V21 Equity Curve From Closed Trades", v21_equity_body(), "equity")
+
+
+@app.route("/v21/api/snapshot", methods=["GET"])
+def v21_snapshot_route():
+    return jsonify(v21_dashboard_snapshot())
+
+
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
