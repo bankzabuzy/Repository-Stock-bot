@@ -10581,3 +10581,399 @@ if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
         threading.Thread(target=auto_alert_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
+
+
+# ============================================================
+# V21.5 AUTO JOURNAL + OUTCOME DATABASE + STRATEGY PERFORMANCE DB
+# ============================================================
+V215_VERSION = "V21.5 Auto Journal + Outcome DB + Strategy Performance Free 100%"
+
+
+def v215_init_db():
+    """Persistent outcome layer built on top of the proven V21 trade journal."""
+    v21_init_db()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v215_trade_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER UNIQUE,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            stop_price REAL,
+            target_price REAL,
+            exit_price REAL NOT NULL,
+            pnl REAL,
+            pnl_pct REAL,
+            r_multiple REAL NOT NULL,
+            result TEXT NOT NULL,
+            holding_minutes REAL,
+            regime TEXT,
+            source TEXT,
+            notes TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v215_outcome_strategy ON v215_trade_outcomes(strategy)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v215_outcome_symbol ON v215_trade_outcomes(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v215_outcome_result ON v215_trade_outcomes(result)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v215_strategy_stats (
+            strategy TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL,
+            trades INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            flats INTEGER DEFAULT 0,
+            win_rate_pct REAL DEFAULT 0,
+            avg_win_r REAL DEFAULT 0,
+            avg_loss_r REAL DEFAULT 0,
+            profit_factor REAL DEFAULT 0,
+            expectancy_r REAL DEFAULT 0,
+            total_r REAL DEFAULT 0,
+            max_drawdown_r REAL DEFAULT 0,
+            sample_quality TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v215_auto_journal_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            source TEXT,
+            symbol TEXT,
+            strategy TEXT,
+            side TEXT,
+            entry_price REAL,
+            trade_id INTEGER,
+            status TEXT,
+            notes TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def v215_parse_dt(s):
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(s)[:19], fmt)
+        except Exception:
+            pass
+    return None
+
+
+def v215_holding_minutes(entry_time, exit_time):
+    a = v215_parse_dt(entry_time)
+    b = v215_parse_dt(exit_time)
+    if not a or not b:
+        return None
+    return round(max(0, (b - a).total_seconds() / 60.0), 2)
+
+
+def v215_outcome_from_trade(trade, source="manual_close"):
+    if not trade or str(trade.get("status", "")).upper() != "CLOSED":
+        return None
+    v215_init_db()
+    trade_id = int(trade.get("id"))
+    conn = db()
+    existing = conn.execute("SELECT * FROM v215_trade_outcomes WHERE trade_id=?", (trade_id,)).fetchone()
+    now = v21_now_iso()
+    vals = (
+        trade_id, now, str(trade.get("symbol") or "").upper(), str(trade.get("side") or "").upper(),
+        v21_clean_strategy(trade.get("strategy")), safe_float(trade.get("entry_price"), 0) or 0,
+        safe_float(trade.get("stop_price")), safe_float(trade.get("target_price")), safe_float(trade.get("exit_price"), 0) or 0,
+        safe_float(trade.get("pnl"), 0) or 0, safe_float(trade.get("pnl_pct"), 0) or 0,
+        safe_float(trade.get("r_multiple"), 0) or 0, str(trade.get("result") or "FLAT").upper(),
+        v215_holding_minutes(trade.get("entry_time"), trade.get("exit_time")),
+        None, source, str(trade.get("notes") or "")[:1000]
+    )
+    if existing:
+        conn.execute("""
+            UPDATE v215_trade_outcomes
+            SET created_at=?, symbol=?, side=?, strategy=?, entry_price=?, stop_price=?, target_price=?, exit_price=?,
+                pnl=?, pnl_pct=?, r_multiple=?, result=?, holding_minutes=?, regime=?, source=?, notes=?
+            WHERE trade_id=?
+        """, (now, vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], vals[15], vals[16], trade_id))
+    else:
+        conn.execute("""
+            INSERT INTO v215_trade_outcomes
+            (trade_id, created_at, symbol, side, strategy, entry_price, stop_price, target_price, exit_price, pnl, pnl_pct,
+             r_multiple, result, holding_minutes, regime, source, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, vals)
+    conn.commit()
+    conn.close()
+    v215_recalculate_strategy_stats()
+    return v215_get_outcome(trade_id)
+
+
+def v215_get_outcome(trade_id):
+    v215_init_db()
+    conn = db()
+    row = conn.execute("SELECT * FROM v215_trade_outcomes WHERE trade_id=?", (int(trade_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def v215_outcome_rows(limit=5000):
+    v215_init_db()
+    conn = db()
+    rows = conn.execute("SELECT * FROM v215_trade_outcomes ORDER BY id ASC LIMIT ?", (int(safe_float(limit, 5000) or 5000),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def v215_recalculate_strategy_stats():
+    v215_init_db()
+    rows = v215_outcome_rows(100000)
+    groups = {}
+    for r in rows:
+        groups.setdefault(v21_clean_strategy(r.get("strategy")), []).append({"r_multiple": r.get("r_multiple")})
+    conn = db()
+    now = v21_now_iso()
+    for strategy, items in groups.items():
+        perf = v21_performance(items)
+        conn.execute("""
+            INSERT INTO v215_strategy_stats
+            (strategy, updated_at, trades, wins, losses, flats, win_rate_pct, avg_win_r, avg_loss_r, profit_factor,
+             expectancy_r, total_r, max_drawdown_r, sample_quality)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(strategy) DO UPDATE SET
+              updated_at=excluded.updated_at,
+              trades=excluded.trades,
+              wins=excluded.wins,
+              losses=excluded.losses,
+              flats=excluded.flats,
+              win_rate_pct=excluded.win_rate_pct,
+              avg_win_r=excluded.avg_win_r,
+              avg_loss_r=excluded.avg_loss_r,
+              profit_factor=excluded.profit_factor,
+              expectancy_r=excluded.expectancy_r,
+              total_r=excluded.total_r,
+              max_drawdown_r=excluded.max_drawdown_r,
+              sample_quality=excluded.sample_quality
+        """, (
+            strategy, now, perf["trades"], perf["wins"], perf["losses"], perf["flats"], perf["win_rate_pct"],
+            perf["avg_win_r"], perf["avg_loss_r"], perf["profit_factor"], perf["expectancy_r"], perf["total_r"],
+            perf["max_drawdown_r"], perf.get("sample_warning")
+        ))
+    conn.commit()
+    conn.close()
+    return v215_strategy_stats_rows()
+
+
+def v215_strategy_stats_rows():
+    v215_init_db()
+    conn = db()
+    rows = conn.execute("""
+        SELECT * FROM v215_strategy_stats
+        ORDER BY expectancy_r DESC, profit_factor DESC, trades DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def v215_backfill_outcomes():
+    closed = v21_closed_rows(100000)
+    made = []
+    for trade in closed:
+        out = v215_outcome_from_trade(trade, source="backfill_v21_closed")
+        if out:
+            made.append(out)
+    return {"ok": True, "backfilled": len(made), "strategy_stats": v215_strategy_stats_rows()}
+
+
+def v215_auto_journal_from_ranking(limit=5, min_grade=None):
+    """Open trades from current V20 ranking so future outcomes can be measured.
+    This does not send orders. It only logs research candidates into the journal.
+    """
+    v215_init_db()
+    limit = int(safe_float(limit, 5) or 5)
+    source_rows = []
+    if "v20_quality_rows" in globals():
+        source_rows = v20_quality_rows(limit=max(limit * 2, 10), mode=request.args.get("mode", "daily")).get("top", [])
+    elif "v18_ranking" in globals():
+        source_rows = v18_ranking(limit=max(limit * 2, 10), mode=request.args.get("mode", "daily")).get("top", [])
+    opened = []
+    skipped = []
+    conn = db()
+    for row in source_rows:
+        if len(opened) >= limit:
+            break
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        action = str(row.get("action") or row.get("decision") or "").upper()
+        if "WAIT" in action:
+            skipped.append({"symbol": symbol, "reason": "WAIT decision"})
+            continue
+        existing = conn.execute("SELECT id FROM v21_trade_journal WHERE symbol=? AND status='OPEN' LIMIT 1", (symbol,)).fetchone()
+        if existing:
+            skipped.append({"symbol": symbol, "reason": "already open", "trade_id": existing["id"]})
+            continue
+        entry = safe_float(row.get("entry") or row.get("price") or row.get("last") or row.get("underlying_price"))
+        # Fallback: estimate entry from yfinance fast info if ranking did not include a price.
+        if entry is None or entry <= 0:
+            try:
+                hist = yf.Ticker(symbol).history(period="5d", interval="1d")
+                if hist is not None and len(hist) > 0:
+                    entry = float(hist["Close"].dropna().iloc[-1])
+            except Exception:
+                entry = None
+        if entry is None or entry <= 0:
+            skipped.append({"symbol": symbol, "reason": "missing entry"})
+            continue
+        side = "PUT" if ("PUT" in action or "SELL" in action or "SHORT" in action) else "CALL"
+        strategy = row.get("strategy") or row.get("setup") or "AUTO_RANKING"
+        if side == "CALL":
+            stop = round(entry * 0.97, 4)
+            target = round(entry * 1.06, 4)
+        else:
+            stop = round(entry * 1.03, 4)
+            target = round(entry * 0.94, 4)
+        trade = v21_open_trade(symbol, side, entry, strategy=strategy, qty=1, stop=stop, target=target, notes="v21.5 auto_journal_from_ranking")
+        opened.append(trade)
+        conn.execute("""
+            INSERT INTO v215_auto_journal_log
+            (created_at, source, symbol, strategy, side, entry_price, trade_id, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v21_now_iso(), "ranking", symbol, v21_clean_strategy(strategy), side, entry, trade.get("id"), "OPENED", "auto journal only; not a trading order"))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "opened": opened, "skipped": skipped, "source_count": len(source_rows)}
+
+
+def v215_snapshot():
+    v215_backfill_outcomes()
+    outcomes = v215_outcome_rows(10000)
+    perf = v21_performance([{"r_multiple": r.get("r_multiple")} for r in outcomes])
+    return {
+        "version": V215_VERSION,
+        "time": v21_now_iso(),
+        "open_trades": len([r for r in v21_rows(limit=10000) if str(r.get("status", "")).upper()=="OPEN"]),
+        "closed_outcomes": len(outcomes),
+        "performance": perf,
+        "strategy_performance_db": v215_strategy_stats_rows(),
+        "recent_outcomes": outcomes[-20:][::-1],
+        "equity_curve": v21_equity_curve()[-200:],
+    }
+
+
+def v215_badge(x):
+    s = str(x or "").upper()
+    cls = "win" if s == "WIN" else "loss" if s == "LOSS" else "open"
+    return f"<span class='badge {cls}'>{v21_html_escape(s)}</span>"
+
+
+def v215_layout(title, body, active="dashboard"):
+    nav = "".join([
+        f'<a class="nav {"on" if active==k else ""}" href="{href}">{label}</a>'
+        for k, label, href in [
+            ("dashboard", "Dashboard", "/v21-5"),
+            ("journal", "Journal", "/v21-5/journal"),
+            ("outcomes", "Outcomes", "/v21-5/outcomes"),
+            ("stats", "Strategy DB", "/v21-5/strategy-db"),
+            ("equity", "Equity", "/v21-5/equity"),
+            ("json", "JSON", "/v21-5/api/snapshot"),
+        ]
+    ])
+    return v21_layout(title, body.replace("/v21/", "/v21-5/"), active="dashboard").get_data(as_text=True).replace("</div></body></html>", f"<div class='section card'><h3>V21.5 Navigation</h3>{nav}</div></div></body></html>")
+
+
+def v215_dashboard_body():
+    snap = v215_snapshot()
+    p = snap["performance"]
+    cards = f"""
+    <div class="grid">
+      <div class="card"><h3>Closed Outcomes</h3><div class="big">{p['trades']}</div><div class="sub">Outcome DB rows</div></div>
+      <div class="card"><h3>Win Rate</h3><div class="big">{p['win_rate_pct']}%</div><div class="sub">Wins {p['wins']} / Losses {p['losses']}</div></div>
+      <div class="card"><h3>Profit Factor</h3><div class="big">{p['profit_factor']}</div><div class="sub">Real outcomes only</div></div>
+      <div class="card"><h3>Expectancy</h3><div class="big {'ok' if p['expectancy_r']>0 else 'bad' if p['expectancy_r']<0 else ''}">{p['expectancy_r']}R</div><div class="sub">{p['sample_warning']}</div></div>
+    </div>
+    """
+    strat_rows = "".join([f"<tr><td>{v21_html_escape(s['strategy'])}</td><td>{s['trades']}</td><td>{s['win_rate_pct']}%</td><td>{s['profit_factor']}</td><td>{s['expectancy_r']}R</td><td>{s['total_r']}R</td><td>{s['sample_quality']}</td></tr>" for s in snap["strategy_performance_db"]]) or "<tr><td colspan='7'>No strategy outcomes yet.</td></tr>"
+    out_rows = "".join([f"<tr><td>{o['trade_id']}</td><td>{v21_html_escape(o['symbol'])}</td><td>{v21_html_escape(o['strategy'])}</td><td>{v21_html_escape(o['side'])}</td><td>{o['entry_price']}</td><td>{o['exit_price']}</td><td>{v215_badge(o['result'])}</td><td>{o['r_multiple']}R</td></tr>" for o in snap["recent_outcomes"][:12]]) or "<tr><td colspan='8'>No closed outcomes yet.</td></tr>"
+    return cards + f"""
+    <div class="section card"><h3>Strategy Performance Database</h3><table><tr><th>Strategy</th><th>Trades</th><th>Win%</th><th>PF</th><th>Expectancy</th><th>Total R</th><th>Sample</th></tr>{strat_rows}</table></div>
+    <div class="section card"><h3>Recent Closed Outcomes</h3><table><tr><th>ID</th><th>Symbol</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Exit</th><th>Result</th><th>R</th></tr>{out_rows}</table></div>
+    <div class="section card"><h3>Auto Journal</h3><pre>/v21-5/auto-journal?limit=5
+/v21-5/journal/close/1?exit=220
+/v21-5/backfill</pre></div>
+    """
+
+
+@app.route("/v21-5/status", methods=["GET"])
+def v215_status_route():
+    v215_init_db()
+    return jsonify({
+        "version": V215_VERSION,
+        "enabled": True,
+        "modules": ["Auto Journal", "Outcome Database", "Strategy Performance Database", "Backfill from V21 closed trades"],
+        "routes": ["/v21-5", "/v21-5/dashboard", "/v21-5/journal", "/v21-5/outcomes", "/v21-5/strategy-db", "/v21-5/equity", "/v21-5/auto-journal", "/v21-5/backfill", "/v21-5/api/snapshot"]
+    })
+
+
+@app.route("/v21-5", methods=["GET"])
+@app.route("/v21-5/dashboard", methods=["GET"])
+def v215_dashboard_route():
+    return v21_layout("V21.5 Auto Journal + Outcome Database", v215_dashboard_body(), "dashboard")
+
+
+@app.route("/v21-5/journal", methods=["GET"])
+def v215_journal_route():
+    return v21_layout("V21.5 Real Trade Journal", v21_journal_body(), "journal")
+
+
+@app.route("/v21-5/outcomes", methods=["GET"])
+def v215_outcomes_route():
+    v215_backfill_outcomes()
+    rows = v215_outcome_rows(1000)[::-1]
+    tr = "".join([f"<tr><td>{r['trade_id']}</td><td>{v21_html_escape(r['symbol'])}</td><td>{v21_html_escape(r['side'])}</td><td>{v21_html_escape(r['strategy'])}</td><td>{r['entry_price']}</td><td>{r['exit_price']}</td><td>{v215_badge(r['result'])}</td><td>{r['r_multiple']}R</td><td>{r.get('holding_minutes') or ''}</td></tr>" for r in rows]) or "<tr><td colspan='9'>No outcomes yet.</td></tr>"
+    return v21_layout("V21.5 Closed Outcome Database", f"<div class='card'><h3>Closed Outcomes</h3><table><tr><th>Trade ID</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>Result</th><th>R</th><th>Minutes</th></tr>{tr}</table></div>", "journal")
+
+
+@app.route("/v21-5/strategy-db", methods=["GET"])
+def v215_strategy_db_route():
+    v215_recalculate_strategy_stats()
+    rows = v215_strategy_stats_rows()
+    tr = "".join([f"<tr><td>{v21_html_escape(r['strategy'])}</td><td>{r['trades']}</td><td>{r['wins']}</td><td>{r['losses']}</td><td>{r['win_rate_pct']}%</td><td>{r['avg_win_r']}R</td><td>{r['avg_loss_r']}R</td><td>{r['profit_factor']}</td><td>{r['expectancy_r']}R</td><td>{r['total_r']}R</td><td>{v21_html_escape(r['sample_quality'])}</td></tr>" for r in rows]) or "<tr><td colspan='11'>No strategy stats yet.</td></tr>"
+    return v21_layout("V21.5 Strategy Performance Database", f"<div class='card'><h3>Persistent Strategy Performance Database</h3><table><tr><th>Strategy</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win%</th><th>Avg Win</th><th>Avg Loss</th><th>PF</th><th>Expectancy</th><th>Total R</th><th>Sample</th></tr>{tr}</table></div>", "stats")
+
+
+@app.route("/v21-5/equity", methods=["GET"])
+def v215_equity_route():
+    return v21_layout("V21.5 Equity Curve From Real Outcomes", v21_equity_body(), "equity")
+
+
+@app.route("/v21-5/journal/open/<symbol>", methods=["GET", "POST"])
+def v215_open_trade_route(symbol):
+    return v21_open_trade_route(symbol)
+
+
+@app.route("/v21-5/journal/close/<int:trade_id>", methods=["GET", "POST"])
+def v215_close_trade_route(trade_id):
+    try:
+        trade = v21_close_trade(trade_id, request.args.get("exit"), notes_append=request.args.get("notes", ""))
+        outcome = v215_outcome_from_trade(trade, source="v21_5_close")
+        return jsonify({"ok": True, "trade": trade, "outcome": outcome, "strategy_db": v215_strategy_stats_rows(), "performance": v21_performance(v21_closed_rows())})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "example": f"/v21-5/journal/close/{trade_id}?exit=225"}), 400
+
+
+@app.route("/v21-5/backfill", methods=["GET", "POST"])
+def v215_backfill_route():
+    return jsonify(v215_backfill_outcomes())
+
+
+@app.route("/v21-5/auto-journal", methods=["GET", "POST"])
+def v215_auto_journal_route():
+    return jsonify(v215_auto_journal_from_ranking(limit=request.args.get("limit", 5), min_grade=request.args.get("min_grade")))
+
+
+@app.route("/v21-5/api/snapshot", methods=["GET"])
+def v215_snapshot_route():
+    return jsonify(v215_snapshot())
