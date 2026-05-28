@@ -101,8 +101,8 @@ AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
-US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
-US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "03:00")
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
@@ -118,9 +118,9 @@ STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
 STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
-PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
-TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
     x.strip().upper()
@@ -168,37 +168,7 @@ GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAU
 US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
 
 CACHE = {}
-def is_us_market_open_th():
-    now = datetime.now(timezone(timedelta(hours=7)))
 
-    # เสาร์-อาทิตย์ ไม่ส่ง
-    if now.weekday() >= 5:
-        return False
-
-    current = now.hour * 60 + now.minute
-
-    start_h, start_m = map(int, US_SESSION_START_TH.split(":"))
-    end_h, end_m = map(int, US_SESSION_END_TH.split(":"))
-
-    start = start_h * 60 + start_m
-    end = end_h * 60 + end_m
-
-    # กรณีตลาดข้ามวัน เช่น 20:30 - 03:00
-    if start > end:
-        return current >= start or current <= end
-
-    return start <= current <= end
-
-
-def should_send_us_alert(symbol=None):
-    if not ENABLE_MARKET_HOURS_GUARD:
-        return True
-
-    if not is_us_market_open_th():
-        print("US market closed - skip alert")
-        return False
-
-    return True
 
 # ============================================================
 # DATABASE
@@ -3148,7 +3118,7 @@ def build_premarket_reminder():
 
     return f"""⏰ US Open Reminder 21:15
 
-
+ตลาด US ใกล้เปิดแล้ว
 เวลาไทย: {now_text()}
 
 🔥 Premarket Movers
@@ -5301,8 +5271,422 @@ def v10_explain_route(symbol):
     return jsonify(v10_explainable_score(symbol))
 
 
+# ============================================================
+# V11 INSTITUTIONAL PLUS LAYER - FREE 100%
+# Adds: historical winrate journal, portfolio risk, multi-factor regime,
+# unusual options activity, performance dashboard.
+# ============================================================
+V11_ENABLED = os.getenv("V11_ENABLED", "true").lower() == "true"
+V11_DASHBOARD_UNIVERSE = env_list("V11_DASHBOARD_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,QQQ,SPY,PLTR,AVGO,SMH,IWM")
+V11_PORTFOLIO_POSITIONS = os.getenv("V11_PORTFOLIO_POSITIONS", "")  # Example: NVDA:1000,AAPL:800,QQQ:1200
+V11_MAX_SYMBOL_RISK_PCT = float(os.getenv("V11_MAX_SYMBOL_RISK_PCT", "8"))
+V11_MAX_PORTFOLIO_RISK_PCT = float(os.getenv("V11_MAX_PORTFOLIO_RISK_PCT", "25"))
+V11_SIGNAL_HORIZON_DAYS = int(os.getenv("V11_SIGNAL_HORIZON_DAYS", "5"))
+
+
+def v11_init_db():
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v11_signal_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT,
+            entry_price REAL,
+            score INTEGER,
+            regime TEXT,
+            reason TEXT,
+            horizon_days INTEGER,
+            exit_price REAL,
+            result_pct REAL,
+            win INTEGER
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v11_portfolio_positions (
+            symbol TEXT PRIMARY KEY,
+            market_value REAL NOT NULL DEFAULT 0,
+            side TEXT NOT NULL DEFAULT 'LONG',
+            risk_pct REAL NOT NULL DEFAULT 5,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.commit(); conn.close()
+
+
+def v11_download(symbol, period="1y", interval="1d"):
+    try:
+        df = yf.download(symbol.upper(), period=period, interval=interval, progress=False, auto_adjust=True)
+        if df is None or len(df) == 0:
+            return None
+        return df.dropna()
+    except Exception as e:
+        print("v11_download error", symbol, e)
+        return None
+
+
+def v11_last_close(symbol):
+    df = v11_download(symbol, period="10d", interval="1d")
+    if df is None or len(df) == 0:
+        return None
+    try:
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def v11_historical_signal_winrate(symbol, period="1y", horizon_days=None):
+    """Simple free historical signal test. Not a full backtest: no slippage/fees/options pricing."""
+    horizon_days = int(horizon_days or V11_SIGNAL_HORIZON_DAYS)
+    sym = symbol.upper()
+    df = v11_download(sym, period=period, interval="1d")
+    if df is None or len(df) < 80:
+        return {"symbol": sym, "error": "not enough historical data from yfinance"}
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    ema20 = close.ewm(span=20).mean()
+    ema50 = close.ewm(span=50).mean()
+    ret5 = close.pct_change(5)
+    rng = ((high - low) / close).rolling(14).mean()
+    signals = []
+    # Skip recent bars that do not have future outcome yet.
+    for i in range(60, len(df) - horizon_days):
+        side = None
+        score = 50
+        reasons = []
+        if close.iloc[i] > ema20.iloc[i] > ema50.iloc[i] and ret5.iloc[i] > 0.015:
+            side = "CALL"; score += 25; reasons.append("price>EMA20>EMA50 and 5d momentum positive")
+        elif close.iloc[i] < ema20.iloc[i] < ema50.iloc[i] and ret5.iloc[i] < -0.015:
+            side = "PUT"; score -= 25; reasons.append("price<EMA20<EMA50 and 5d momentum negative")
+        if side is None:
+            continue
+        if float(rng.iloc[i] or 0) > 0.045:
+            reasons.append("high volatility regime")
+        entry = float(close.iloc[i])
+        exitp = float(close.iloc[i + horizon_days])
+        result_pct = (exitp - entry) / entry * 100
+        if side == "PUT":
+            result_pct = -result_pct
+        win = 1 if result_pct > 0 else 0
+        signals.append({
+            "date": str(df.index[i].date()), "side": side, "entry": round(entry, 4), "exit": round(exitp, 4),
+            "result_pct": round(result_pct, 2), "win": win, "score": score, "reason": "; ".join(reasons)
+        })
+    total = len(signals)
+    wins = sum(s["win"] for s in signals)
+    avg = sum(s["result_pct"] for s in signals) / total if total else 0
+    by_side = {}
+    for side in ["CALL", "PUT"]:
+        rows = [s for s in signals if s["side"] == side]
+        by_side[side] = {
+            "signals": len(rows),
+            "win_rate_pct": round(sum(s["win"] for s in rows) / len(rows) * 100, 2) if rows else 0,
+            "avg_result_pct": round(sum(s["result_pct"] for s in rows) / len(rows), 2) if rows else 0,
+        }
+    return {
+        "symbol": sym,
+        "period": period,
+        "horizon_days": horizon_days,
+        "closed_historical_signals": total,
+        "win_rate_pct": round(wins / total * 100, 2) if total else 0,
+        "avg_result_pct": round(avg, 2),
+        "by_side": by_side,
+        "latest_sample": signals[-20:],
+        "limitation": "Free historical proxy: tests underlying movement only, not real option fills, bid/ask, IV crush, slippage or commissions."
+    }
+
+
+def v11_log_current_signal(symbol):
+    sym = symbol.upper()
+    ex = v10_explainable_score(sym)
+    price = None
+    try:
+        price = float(ex.get("price")) if ex.get("price") is not None else v11_last_close(sym)
+    except Exception:
+        price = v11_last_close(sym)
+    decision = str(ex.get("decision", "HOLD"))
+    side = "CALL" if "CALL" in decision else "PUT" if "PUT" in decision else "WATCH"
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO v11_signal_journal(created_at, symbol, side, entry_price, score, regime, reason, horizon_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (now_text(), sym, side, price, int(ex.get("final_score", 50)), str(ex.get("regime", {}).get("regime", "UNKNOWN")), json.dumps(ex, ensure_ascii=False)[:4500], V11_SIGNAL_HORIZON_DAYS))
+    conn.commit(); conn.close()
+    return {"logged": True, "symbol": sym, "side": side, "entry_price": price, "score": ex.get("final_score"), "horizon_days": V11_SIGNAL_HORIZON_DAYS}
+
+
+def v11_update_journal_results():
+    conn = db(); cur = conn.cursor()
+    rows = cur.execute("SELECT * FROM v11_signal_journal WHERE exit_price IS NULL ORDER BY id ASC LIMIT 200").fetchall()
+    updated = 0
+    for r in rows:
+        try:
+            created = datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if datetime.now(timezone.utc) - created.replace(tzinfo=timezone.utc) < timedelta(days=int(r["horizon_days"] or V11_SIGNAL_HORIZON_DAYS)):
+            continue
+        price = v11_last_close(r["symbol"])
+        if not price or not r["entry_price"]:
+            continue
+        pct = (price - float(r["entry_price"])) / float(r["entry_price"]) * 100
+        if r["side"] == "PUT":
+            pct = -pct
+        win = 1 if pct > 0 else 0
+        cur.execute("UPDATE v11_signal_journal SET exit_price=?, result_pct=?, win=? WHERE id=?", (price, pct, win, r["id"]))
+        updated += 1
+    conn.commit(); conn.close()
+    return updated
+
+
+def v11_journal_stats(symbol=None):
+    updated = v11_update_journal_results()
+    conn = db(); cur = conn.cursor()
+    params = []
+    where = "WHERE win IS NOT NULL AND side IN ('CALL','PUT')"
+    if symbol:
+        where += " AND symbol=?"; params.append(symbol.upper())
+    rows = cur.execute(f"SELECT * FROM v11_signal_journal {where} ORDER BY id DESC LIMIT 1000", params).fetchall()
+    latest = cur.execute("SELECT id, created_at, symbol, side, entry_price, score, regime, exit_price, result_pct, win FROM v11_signal_journal ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    total = len(rows); wins = sum(1 for r in rows if r["win"] == 1)
+    avg = sum(float(r["result_pct"] or 0) for r in rows) / total if total else 0
+    return {
+        "updated_results": updated,
+        "symbol_filter": symbol.upper() if symbol else None,
+        "closed_signals": total,
+        "win_rate_pct": round(wins / total * 100, 2) if total else 0,
+        "avg_result_pct": round(avg, 2),
+        "latest": [dict(r) for r in latest],
+        "note": "Use /v11/journal/log/<symbol> to log a live signal; /v11/historical/<symbol> gives immediate historical proxy stats."
+    }
+
+
+def v11_parse_portfolio_env():
+    positions = []
+    raw = V11_PORTFOLIO_POSITIONS.strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                for p in data:
+                    positions.append({"symbol": str(p.get("symbol", "")).upper(), "market_value": float(p.get("market_value", 0)), "side": str(p.get("side", "LONG")).upper(), "risk_pct": float(p.get("risk_pct", 5))})
+                return [p for p in positions if p["symbol"]]
+        except Exception:
+            pass
+        for part in raw.split(","):
+            if ":" in part:
+                s, v = part.split(":", 1)
+                try:
+                    positions.append({"symbol": s.strip().upper(), "market_value": float(v), "side": "LONG", "risk_pct": 5.0})
+                except Exception:
+                    pass
+    if not positions:
+        for s in V11_DASHBOARD_UNIVERSE[:6]:
+            positions.append({"symbol": s, "market_value": 1000.0, "side": "LONG", "risk_pct": 5.0})
+    return positions
+
+
+def v11_portfolio_risk_engine():
+    positions = v11_parse_portfolio_env()
+    total_value = sum(abs(float(p.get("market_value", 0))) for p in positions)
+    rows = []
+    risk_dollars_total = 0
+    sector_proxy = {"NVDA":"AI_SEMI", "AMD":"AI_SEMI", "AVGO":"AI_SEMI", "SMH":"AI_SEMI", "AAPL":"MEGA_TECH", "MSFT":"MEGA_TECH", "META":"MEGA_TECH", "GOOGL":"MEGA_TECH", "AMZN":"MEGA_TECH", "TSLA":"HIGH_BETA", "PLTR":"HIGH_BETA", "QQQ":"INDEX", "SPY":"INDEX", "IWM":"SMALL_CAP"}
+    buckets = {}
+    for p in positions:
+        sym = p["symbol"]
+        mv = float(p.get("market_value", 0))
+        risk_pct = float(p.get("risk_pct", 5))
+        risk_dollars = abs(mv) * risk_pct / 100
+        risk_dollars_total += risk_dollars
+        weight = abs(mv) / total_value * 100 if total_value else 0
+        bucket = sector_proxy.get(sym, "OTHER")
+        buckets[bucket] = buckets.get(bucket, 0) + weight
+        rows.append({"symbol": sym, "market_value": mv, "side": p.get("side", "LONG"), "weight_pct": round(weight, 2), "risk_pct": risk_pct, "risk_dollars": round(risk_dollars, 2), "bucket": bucket})
+    max_weight = max([r["weight_pct"] for r in rows], default=0)
+    concentration = "HIGH" if max_weight > 35 or any(v > 55 for v in buckets.values()) else "MEDIUM" if max_weight > 20 or any(v > 40 for v in buckets.values()) else "LOW"
+    portfolio_risk_pct = risk_dollars_total / total_value * 100 if total_value else 0
+    allowed = portfolio_risk_pct <= V11_MAX_PORTFOLIO_RISK_PCT and max_weight <= 40
+    return {
+        "portfolio_value": round(total_value, 2),
+        "estimated_risk_dollars": round(risk_dollars_total, 2),
+        "estimated_risk_pct": round(portfolio_risk_pct, 2),
+        "max_single_position_weight_pct": round(max_weight, 2),
+        "concentration_level": concentration,
+        "bucket_exposure_pct": {k: round(v, 2) for k, v in buckets.items()},
+        "positions": rows,
+        "risk_action": "ALLOW_NEW_RISK" if allowed else "REDUCE_SIZE_OR_SKIP_NEW_TRADES",
+        "limits": {"max_portfolio_risk_pct": V11_MAX_PORTFOLIO_RISK_PCT, "max_symbol_risk_pct": V11_MAX_SYMBOL_RISK_PCT},
+        "note": "Set V11_PORTFOLIO_POSITIONS='NVDA:2000,AAPL:1000,QQQ:1500' or JSON list in Railway Variables for real portfolio sizing."
+    }
+
+
+def v11_market_regime_multidim():
+    inputs = {}
+    def get_ret(sym, period="3mo"):
+        df = v11_download(sym, period=period, interval="1d")
+        if df is None or len(df) < 25:
+            return None
+        close = df["Close"]
+        return {
+            "last": round(float(close.iloc[-1]), 4),
+            "ret_5d_pct": round((float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100, 2) if len(close) > 6 else None,
+            "ret_20d_pct": round((float(close.iloc[-1]) / float(close.iloc[-21]) - 1) * 100, 2) if len(close) > 21 else None,
+            "above_ema20": bool(float(close.iloc[-1]) > float(close.ewm(span=20).mean().iloc[-1])),
+            "above_ema50": bool(float(close.iloc[-1]) > float(close.ewm(span=50).mean().iloc[-1])) if len(close) > 50 else None,
+        }
+    symbols = {"SPY":"SPY", "QQQ":"QQQ", "IWM":"IWM", "VIX":"^VIX", "TNX_10Y_YIELD":"^TNX", "DOLLAR_PROXY":"DX-Y.NYB", "SMH":"SMH", "XLF":"XLF", "XLE":"XLE", "XLV":"XLV", "XLY":"XLY", "XLP":"XLP", "XLU":"XLU"}
+    for k, sym in symbols.items():
+        inputs[k] = get_ret(sym)
+        if inputs[k] is None and k == "DOLLAR_PROXY":
+            inputs[k] = get_ret("UUP")
+    score = 50; reasons = []
+    spy = inputs.get("SPY") or {}; qqq = inputs.get("QQQ") or {}; iwm = inputs.get("IWM") or {}; vix = inputs.get("VIX") or {}; tnx = inputs.get("TNX_10Y_YIELD") or {}; dollar = inputs.get("DOLLAR_PROXY") or {}
+    if spy.get("above_ema20") and qqq.get("above_ema20"):
+        score += 12; reasons.append("SPY and QQQ above EMA20")
+    if spy.get("above_ema50") and qqq.get("above_ema50"):
+        score += 10; reasons.append("SPY and QQQ above EMA50")
+    if (vix.get("ret_5d_pct") or 0) > 10:
+        score -= 14; reasons.append("VIX rising fast")
+    elif (vix.get("ret_5d_pct") or 0) < -5:
+        score += 6; reasons.append("VIX cooling")
+    if (tnx.get("ret_20d_pct") or 0) > 6:
+        score -= 7; reasons.append("10Y yield pressure rising")
+    if (dollar.get("ret_20d_pct") or 0) > 3:
+        score -= 5; reasons.append("Dollar proxy rising")
+    if (iwm.get("ret_20d_pct") or -999) > (spy.get("ret_20d_pct") or 999):
+        score += 6; reasons.append("Small caps outperform SPY")
+    # Sector rotation scoring
+    sector_keys = ["SMH","XLF","XLE","XLV","XLY","XLP","XLU"]
+    sector_momentum = {k: (inputs.get(k) or {}).get("ret_20d_pct") for k in sector_keys}
+    leadership = sorted([(k, v) for k, v in sector_momentum.items() if v is not None], key=lambda x: x[1], reverse=True)
+    if leadership and leadership[0][0] in ["SMH", "XLY"]:
+        score += 8; reasons.append("growth/risk-on sector leadership")
+    if leadership and leadership[0][0] in ["XLU", "XLP", "XLV"]:
+        score -= 6; reasons.append("defensive sector leadership")
+    score = max(0, min(100, score))
+    if score >= 75:
+        regime = "RISK_ON_MULTI_FACTOR"
+    elif score <= 35:
+        regime = "RISK_OFF_MULTI_FACTOR"
+    else:
+        regime = "MIXED_MULTI_FACTOR"
+    return {"regime": regime, "score": score, "reasons": reasons, "inputs": inputs, "sector_leadership_20d": leadership, "trade_instruction": "CALL bias allowed; avoid chasing" if score >= 65 else "Reduce size / wait for confirmation" if score <= 45 else "Mixed: trade only high quality setups"}
+
+
+def v11_option_flow_unusual(symbol):
+    sym = symbol.upper()
+    try:
+        t = yf.Ticker(sym)
+        expiries = list(t.options or [])[:4]
+        if not expiries:
+            return {"symbol": sym, "error": "no options expirations from yfinance"}
+        rows = []
+        for exp in expiries:
+            chain = t.option_chain(exp)
+            for typ, df in [("CALL", chain.calls), ("PUT", chain.puts)]:
+                if df is None or len(df) == 0:
+                    continue
+                for _, r in df.iterrows():
+                    vol = int(r.get("volume") or 0)
+                    oi = int(r.get("openInterest") or 0)
+                    bid = float(r.get("bid") or 0); ask = float(r.get("ask") or 0); last = float(r.get("lastPrice") or 0)
+                    if vol <= 0 and oi <= 0:
+                        continue
+                    spread = ask - bid if ask and bid else None
+                    mid = (ask + bid) / 2 if ask and bid else last
+                    unusual_score = 0
+                    flags = []
+                    if oi > 0 and vol / max(oi, 1) >= 0.5:
+                        unusual_score += 35; flags.append("volume/OI >= 0.5")
+                    if vol >= 1000:
+                        unusual_score += 25; flags.append("volume >= 1000")
+                    if oi >= 5000:
+                        unusual_score += 15; flags.append("large open interest")
+                    if spread is not None and mid and spread / max(mid, 0.01) <= 0.12:
+                        unusual_score += 10; flags.append("tight spread")
+                    if unusual_score >= 30:
+                        rows.append({"contractSymbol": r.get("contractSymbol"), "type": typ, "expiration": exp, "strike": float(r.get("strike") or 0), "last": last, "bid": bid, "ask": ask, "volume": vol, "openInterest": oi, "vol_oi_ratio": round(vol / max(oi, 1), 2), "impliedVolatility": round(float(r.get("impliedVolatility") or 0), 4), "unusual_score": min(100, unusual_score), "flags": flags})
+        rows = sorted(rows, key=lambda x: (x["unusual_score"], x["volume"]), reverse=True)[:40]
+        call_count = sum(1 for r in rows if r["type"] == "CALL"); put_count = sum(1 for r in rows if r["type"] == "PUT")
+        bias = "CALL_FLOW" if call_count > put_count * 1.3 else "PUT_FLOW" if put_count > call_count * 1.3 else "MIXED_FLOW"
+        return {"symbol": sym, "bias": bias, "unusual_contracts": rows, "summary": {"count": len(rows), "calls": call_count, "puts": put_count}, "limitation": "Free yfinance chain can be delayed/incomplete; this is unusual activity proxy, not paid order-flow tape."}
+    except Exception as e:
+        return {"symbol": sym, "error": str(e)}
+
+
+def v11_performance_dashboard():
+    universe = V11_DASHBOARD_UNIVERSE[:20]
+    regime = v11_market_regime_multidim()
+    breadth = v10_true_market_breadth(universe)
+    portfolio = v11_portfolio_risk_engine()
+    journal = v11_journal_stats()
+    leaders = []
+    for s in universe[:12]:
+        try:
+            ex = v10_explainable_score(s)
+            hist = v11_historical_signal_winrate(s, period="1y", horizon_days=V11_SIGNAL_HORIZON_DAYS)
+            leaders.append({"symbol": s, "decision": ex.get("decision"), "score": ex.get("final_score"), "price": ex.get("price"), "historical_win_rate_pct": hist.get("win_rate_pct"), "historical_signals": hist.get("closed_historical_signals")})
+        except Exception as e:
+            leaders.append({"symbol": s, "error": str(e)})
+    leaders = sorted(leaders, key=lambda x: x.get("score") if isinstance(x.get("score"), (int,float)) else -1, reverse=True)
+    return {"version": "V11 Institutional Plus Free 100%", "time": now_text(), "market_regime_multidim": regime, "breadth": breadth, "portfolio_risk": portfolio, "journal": journal, "top_watchlist_scores": leaders, "dashboard_note": "This is a free analyst dashboard. Validate with broker data before trading."}
+
+
+def v11_institutional_snapshot(symbol):
+    sym = symbol.upper()
+    return {"version": "V11 Institutional Plus Free 100%", "symbol": sym, "explainable_score": v10_explainable_score(sym), "historical_signal_winrate": v11_historical_signal_winrate(sym), "option_flow_unusual": v11_option_flow_unusual(sym), "portfolio_risk": v11_portfolio_risk_engine(), "market_regime_multidim": v11_market_regime_multidim(), "trade_note": "Use as decision support only; not investment advice."}
+
+
+@app.route("/v11-status", methods=["GET"])
+def v11_status_route():
+    return jsonify({"version": "V11 Institutional Plus Free 100%", "enabled": V11_ENABLED, "axes": ["Signal Journal + historical win-rate proxy", "Portfolio Risk Engine", "Multi-dimensional Market Regime: VIX/Yield/Dollar/Sector", "Option Flow / Unusual Volume proxy", "Performance Dashboard"], "routes": ["/v11/<symbol>", "/v11/historical/<symbol>", "/v11/journal", "/v11/journal/log/<symbol>", "/v11/portfolio", "/v11/regime", "/v11/options-flow/<symbol>", "/v11/dashboard"]})
+
+
+@app.route("/v11/<symbol>", methods=["GET"])
+def v11_snapshot_route(symbol):
+    return jsonify(v11_institutional_snapshot(symbol))
+
+
+@app.route("/v11/historical/<symbol>", methods=["GET"])
+def v11_historical_route(symbol):
+    return jsonify(v11_historical_signal_winrate(symbol, request.args.get("period", "1y"), request.args.get("horizon_days")))
+
+
+@app.route("/v11/journal", methods=["GET"])
+def v11_journal_route():
+    return jsonify(v11_journal_stats(request.args.get("symbol")))
+
+
+@app.route("/v11/journal/log/<symbol>", methods=["GET", "POST"])
+def v11_journal_log_route(symbol):
+    return jsonify(v11_log_current_signal(symbol))
+
+
+@app.route("/v11/portfolio", methods=["GET"])
+def v11_portfolio_route():
+    return jsonify(v11_portfolio_risk_engine())
+
+
+@app.route("/v11/regime", methods=["GET"])
+def v11_regime_route():
+    return jsonify(v11_market_regime_multidim())
+
+
+@app.route("/v11/options-flow/<symbol>", methods=["GET"])
+def v11_options_flow_route(symbol):
+    return jsonify(v11_option_flow_unusual(symbol))
+
+
+@app.route("/v11/dashboard", methods=["GET"])
+def v11_dashboard_route():
+    return jsonify(v11_performance_dashboard())
+
 init_db()
 v10_init_db()
+v11_init_db()
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
