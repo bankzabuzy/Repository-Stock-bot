@@ -96,7 +96,7 @@ STRICT_REQUIRE_4H_CONFIRM = os.getenv("STRICT_REQUIRE_4H_CONFIRM", "true").lower
 MIN_POSITION_RISK_LEVEL = os.getenv("MIN_POSITION_RISK_LEVEL", "MEDIUM").upper()
 
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
-AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
+AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "86"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
@@ -104,12 +104,12 @@ ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == 
 US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
 US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
-STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
+STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "88"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
-STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
+STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "68"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
 STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "0.85"))
 STRICT_REQUIRE_TF_CONFIRM = os.getenv("STRICT_REQUIRE_TF_CONFIRM", "true").lower() == "true"
@@ -1191,6 +1191,10 @@ def mtf_alignment(asset):
 
 
 def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
+    """V22.5 strict market-realistic scoring.
+    Goal: avoid 95-100 scores too easily, penalize range/overbought/no-volume setups,
+    and make probability conservative because this bot does not have real option-chain delta/IV/OI.
+    """
     price = safe_float(quote.get("close"))
     previous_close = safe_float(quote.get("previous_close"))
     change = safe_float(quote.get("change"))
@@ -1209,69 +1213,174 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     momentum_score = 0
     volume_score = 0
     volatility_score = 0
-
+    regime_score = 0
+    risk_penalty = 0
     reasons = []
 
-    if price and ema6 and ema12:
-        if price > ema6 > ema12:
+    # Trend: require clean EMA stack. Give less credit than older versions.
+    if price and ema6 and ema12 and ema50:
+        if price > ema6 > ema12 > ema50:
             trend_score += 22
+            reasons.append("ราคาอยู่เหนือ EMA6/EMA12/EMA50 แบบเรียงตัวขาขึ้น")
+        elif price > ema6 > ema12:
+            trend_score += 14
             reasons.append("ราคาอยู่เหนือ EMA6 และ EMA12")
-        elif price < ema6 < ema12:
+        elif price < ema6 < ema12 < ema50:
             trend_score -= 22
+            reasons.append("ราคาอยู่ใต้ EMA6/EMA12/EMA50 แบบเรียงตัวขาลง")
+        elif price < ema6 < ema12:
+            trend_score -= 14
             reasons.append("ราคาอยู่ใต้ EMA6 และ EMA12")
 
+    # Medium trend confirmation.
     if ema12 and ema50:
         if ema12 > ema50:
-            trend_score += 14
+            trend_score += 8
             reasons.append("แนวโน้มกลางยังเป็นบวก")
         elif ema12 < ema50:
-            trend_score -= 14
+            trend_score -= 8
             reasons.append("แนวโน้มกลางยังเป็นลบ")
 
-    if rsi is not None:
-        if 50 <= rsi <= 65:
-            momentum_score += 14
-            reasons.append("RSI อยู่ในโซนโมเมนตัมขาขึ้น")
-        elif rsi >= 72:
-            momentum_score -= 10
-            reasons.append("RSI สูง ระวังพักตัว")
-        elif rsi <= 30:
+    # Price slope from recent closes.
+    if closes and len(closes) >= 8 and closes[-8]:
+        recent_slope_pct = (closes[-1] - closes[-8]) / closes[-8] * 100
+        if recent_slope_pct >= 1.0:
             momentum_score += 6
-            reasons.append("RSI ต่ำ มีโอกาสรีบาวด์")
-        elif rsi < 45:
+            reasons.append("Slope ระยะสั้นเป็นบวก")
+        elif recent_slope_pct <= -1.0:
+            momentum_score -= 6
+            reasons.append("Slope ระยะสั้นเป็นลบ")
+
+    # RSI: strict. Near 70 is not a reason to increase score; it is a chasing-risk zone.
+    if rsi is not None:
+        if 52 <= rsi <= 63:
+            momentum_score += 12
+            reasons.append("RSI อยู่ในโซนโมเมนตัมขาขึ้นที่ยังไม่ร้อนเกินไป")
+        elif 63 < rsi <= 68:
+            momentum_score += 5
+            risk_penalty += 2
+            reasons.append("RSI แข็งแรง แต่เริ่มเข้าโซนไล่ราคา")
+        elif 68 < rsi <= 72:
+            momentum_score += 1
+            risk_penalty += 8
+            reasons.append("RSI ใกล้ Overbought ลดความมั่นใจของสัญญาณ")
+        elif rsi > 72:
             momentum_score -= 8
+            risk_penalty += 14
+            reasons.append("RSI สูงมาก ระวังพักตัว/โดนขายทำกำไร")
+        elif 38 <= rsi < 48:
+            momentum_score -= 6
             reasons.append("RSI ต่ำกว่าโซนแข็งแรง")
+        elif rsi < 35:
+            momentum_score -= 10
+            risk_penalty += 4
+            reasons.append("RSI อ่อนแรง ยังไม่ควรรีบสวน")
 
+    # Intraday momentum, but cap enthusiasm.
     if percent_change is not None:
-        if percent_change > 1:
-            momentum_score += 9
+        if 0.4 <= percent_change <= 2.0:
+            momentum_score += 6
             reasons.append("โมเมนตัมล่าสุดเป็นบวก")
-        elif percent_change < -1:
-            momentum_score -= 9
+        elif percent_change > 2.0:
+            momentum_score += 3
+            risk_penalty += 6
+            reasons.append("ราคาขึ้นแรงแล้ว ระวังไล่ราคา")
+        elif -2.0 <= percent_change <= -0.4:
+            momentum_score -= 6
             reasons.append("โมเมนตัมล่าสุดเป็นลบ")
+        elif percent_change < -2.0:
+            momentum_score -= 8
+            risk_penalty += 6
+            reasons.append("ราคาลงแรง ความเสี่ยงผันผวนสูง")
 
+    # Volume confirmation. No volume = no high score.
     if rvol is not None:
-        if rvol >= 1.5 and percent_change and percent_change > 0:
-            volume_score += 10
+        if rvol >= 2.0 and percent_change and percent_change > 0:
+            volume_score += 14
+            reasons.append("RVOL สูงมากและหนุนฝั่งซื้อ")
+        elif rvol >= 1.3 and percent_change and percent_change > 0:
+            volume_score += 8
             reasons.append("Volume หนุนขาขึ้น")
-        elif rvol >= 1.5 and percent_change and percent_change < 0:
-            volume_score -= 10
+        elif rvol >= 2.0 and percent_change and percent_change < 0:
+            volume_score -= 14
+            reasons.append("RVOL สูงมากและหนุนแรงขาย")
+        elif rvol >= 1.3 and percent_change and percent_change < 0:
+            volume_score -= 8
             reasons.append("Volume หนุนแรงขาย")
+        elif rvol < 0.8:
+            volume_score -= 8
+            reasons.append("Volume เบา สัญญาณไม่น่าเชื่อถือพอ")
 
+    # Market regime gate.
+    regime_text = str(regime or "").upper()
+    if "STRONG UPTREND" in regime_text:
+        regime_score += 12
+        reasons.append("Market Regime เป็น Strong Uptrend")
+    elif "UPTREND" in regime_text:
+        regime_score += 7
+        reasons.append("Market Regime เป็น Uptrend")
+    elif "STRONG DOWNTREND" in regime_text:
+        regime_score -= 12
+        reasons.append("Market Regime เป็น Strong Downtrend")
+    elif "DOWNTREND" in regime_text:
+        regime_score -= 7
+        reasons.append("Market Regime เป็น Downtrend")
+    elif "RANGE" in regime_text:
+        regime_score -= 7
+        reasons.append("ตลาดเป็น Range/Low Vol ลดความมั่นใจของ Breakout")
+
+    # Volatility quality.
     if atr and price:
         atr_pct = atr / price * 100
-        if 0.8 <= atr_pct <= 3.5:
-            volatility_score += 5
-        elif atr_pct > 5:
-            volatility_score -= 8
-            reasons.append("ความผันผวนสูง คุมขนาดไม้")
+        if 0.6 <= atr_pct <= 2.8:
+            volatility_score += 4
+        elif atr_pct < 0.35:
+            volatility_score -= 5
+            reasons.append("ATR ต่ำมาก ระยะทำกำไรอาจแคบ")
+        elif atr_pct > 4.0:
+            volatility_score -= 10
+            risk_penalty += 6
+            reasons.append("ความผันผวนสูง ต้องลดขนาดไม้")
 
-    raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score
-    score = max(0, min(100, int(raw_score)))
+    # Multi-timeframe confirmation.
+    bulls = sum(1 for _, st in (mtf_states or []) if st == "BULLISH")
+    bears = sum(1 for _, st in (mtf_states or []) if st == "BEARISH")
+    total_tf = len(mtf_states or [])
+    if total_tf:
+        if bulls == total_tf:
+            trend_score += 8
+            reasons.append("Multi Timeframe ยืนยัน Bullish")
+        elif bears == total_tf:
+            trend_score -= 8
+            reasons.append("Multi Timeframe ยืนยัน Bearish")
+        elif bulls > bears:
+            trend_score += 3
+        elif bears > bulls:
+            trend_score -= 3
+        else:
+            risk_penalty += 4
+            reasons.append("Multi Timeframe ยังผสมกัน")
 
-    if score >= 75:
+    raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score + regime_score - risk_penalty
+    score = int(max(0, min(100, raw_score)))
+
+    # Hard caps to match real market behavior.
+    if "RANGE" in regime_text:
+        score = min(score, 88)
+    if rvol is not None and rvol < 1.0:
+        score = min(score, 82)
+    if rsi is not None and rsi > 68:
+        score = min(score, 90)
+    if rsi is not None and rsi > 72:
+        score = min(score, 82)
+    if total_tf and bulls != total_tf and bears != total_tf:
+        score = min(score, 86)
+    if "RANGE" in regime_text and rsi is not None and rsi > 68:
+        score = min(score, 84)
+
+    if score >= 82:
         bias = "BULLISH / ฝั่งซื้อได้เปรียบ"
-    elif score <= 35:
+    elif score <= 28:
         bias = "BEARISH / ฝั่งขายได้เปรียบ"
     else:
         bias = "NEUTRAL / รอดูจังหวะ"
@@ -1279,12 +1388,20 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     if price and atr:
         support = price - atr
         resistance = price + atr
-        stop_loss = price - atr * 1.2
-        take_profit = price + atr * 1.8
+        stop_loss = price - atr * 1.25
+        take_profit = price + atr * 1.75
     else:
         support = resistance = stop_loss = take_profit = None
 
-    probability = max(40, min(78, 50 + int((score - 50) * 0.55)))
+    # Conservative probability. Never claim extreme certainty from free data.
+    probability = 50 + int((score - 50) * 0.42)
+    probability = max(38, min(72, probability))
+    if "RANGE" in regime_text:
+        probability = min(probability, 68)
+    if rsi is not None and rsi > 68:
+        probability = min(probability, 66)
+    if rvol is not None and rvol < 1:
+        probability = min(probability, 62)
 
     return {
         "price": price, "previous_close": previous_close, "change": change, "percent_change": percent_change,
@@ -1292,12 +1409,14 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         "regime": regime, "alignment": alignment, "mtf_states": mtf_states,
         "score": score, "bias": bias, "probability": probability,
         "support": support, "resistance": resistance, "stop_loss": stop_loss, "take_profit": take_profit,
-        "reasons": reasons,
+        "reasons": reasons[:8],
         "component_scores": {
             "trend": trend_score,
             "momentum": momentum_score,
             "volume": volume_score,
             "volatility": volatility_score,
+            "regime": regime_score,
+            "risk_penalty": risk_penalty,
         },
     }
 
@@ -1580,39 +1699,53 @@ def options_hybrid_engine(asset, analysis):
     if not price or not atr:
         return ""
 
-    score = analysis["score"]
-    prob = analysis["probability"]
+    score = int(analysis["score"])
+    prob = int(analysis["probability"])
+    regime_text = str(analysis.get("regime", "")).upper()
+    rsi = safe_float(analysis.get("rsi"))
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    step = option_strike_step(price)
 
-    call_strike = round_strike(price + atr * 0.60)
-    call_sell = round_strike(price + atr * 1.70)
-    put_strike = round_strike(price - atr * 0.60)
-    put_sell = round_strike(price - atr * 1.70)
+    # Directional option strikes should not be ATM by accident. Use OTM strikes.
+    call_strike = math.ceil((price + max(atr * 0.35, step * 0.25)) / step) * step
+    if call_strike <= price:
+        call_strike += step
+    call_sell = call_strike + max(step * 2, 5.0 if price >= 100 else step * 2)
+
+    put_strike = math.floor((price - max(atr * 0.35, step * 0.25)) / step) * step
+    if put_strike >= price:
+        put_strike -= step
+    put_sell = put_strike - max(step * 2, 5.0 if price >= 100 else step * 2)
+
     call_strike, call_sell = ensure_option_spread(call_strike, call_sell, "CALL", price)
     put_strike, put_sell = ensure_option_spread(put_strike, put_sell, "PUT", price)
 
-    # Downgrade confidence in range/low-vol/noisy conditions.
-    regime_text = str(analysis.get("regime", "")).upper()
-    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    # Additional realism penalties for options without chain data.
     if "RANGE" in regime_text or "LOW VOL" in regime_text:
-        prob = max(45, int(prob) - 8)
-    if rvol < 1.0:
-        prob = max(40, int(prob) - 5)
+        prob = max(42, prob - 6)
+    if rvol < 1.2:
+        prob = max(40, prob - 4)
+    if rsi is not None and rsi > 68:
+        prob = max(42, prob - 4)
 
-    entry_low = price - atr * 0.25
-    entry_high = price + atr * 0.15
-    tp1 = price + atr * 0.90
-    tp2 = price + atr * 1.80
-    sl = price - atr * 0.90
+    entry_low = price - atr * 0.30
+    entry_high = price + atr * 0.10
+    tp1 = price + atr * 0.85
+    tp2 = price + atr * 1.70
+    sl = price - atr * 1.00
 
-    put_entry_low = price - atr * 0.15
-    put_entry_high = price + atr * 0.25
-    put_tp1 = price - atr * 0.90
-    put_tp2 = price - atr * 1.80
-    put_sl = price + atr * 0.90
+    put_entry_low = price - atr * 0.10
+    put_entry_high = price + atr * 0.30
+    put_tp1 = price - atr * 0.85
+    put_tp2 = price - atr * 1.70
+    put_sl = price + atr * 1.00
 
-    if score >= 70:
+    call_allowed = score >= 82 and not (rsi is not None and rsi > 72 and "STRONG UPTREND" not in regime_text)
+    put_allowed = score <= 28 and not (rsi is not None and rsi < 28 and "STRONG DOWNTREND" not in regime_text)
+
+    if call_allowed:
         setup = f"""🧠 Options Hybrid Max Free
-Setup: CALL / Bullish
+Setup: CALL / Bullish แบบเข้มงวด
 Strike แนะนำ: {fmt_num(call_strike, 2)}C
 Probability ประมาณ: {prob}%
 
@@ -1626,10 +1759,10 @@ Bull Call Spread
 Buy {fmt_num(call_strike, 2)}C
 Sell {fmt_num(call_sell, 2)}C
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
-    elif score <= 35:
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
+    elif put_allowed:
         setup = f"""🧠 Options Hybrid Max Free
-Setup: PUT / Bearish
+Setup: PUT / Bearish แบบเข้มงวด
 Strike แนะนำ: {fmt_num(put_strike, 2)}P
 Probability ประมาณ: {prob}%
 
@@ -1643,14 +1776,14 @@ Bear Put Spread
 Buy {fmt_num(put_strike, 2)}P
 Sell {fmt_num(put_sell, 2)}P
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด"""
     else:
         setup = f"""🧠 Options Hybrid Max Free
 Setup: WAIT / Neutral
 Probability ประมาณ: {prob}%
 
 ยังไม่ควรรีบซื้อ CALL/PUT
-รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
+เงื่อนไขยังไม่ผ่านสูตรเข้มงวด เช่น Range, RSI สูง, Volume ไม่พอ หรือ MTF ไม่ยืนยัน
 
 Idea เฝ้าดู:
 CALL เหนือ {fmt_num(analysis['resistance'])}
