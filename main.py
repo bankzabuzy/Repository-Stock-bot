@@ -11852,6 +11852,634 @@ try:
 except Exception as e:
     print("v21.6.1 init error:", e)
 
+import os
+import math
+import random
+from datetime import datetime, timedelta
+
+V217_ACCOUNT_EQUITY = float(os.getenv("ACCOUNT_EQUITY", "100000"))
+V217_RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
+V217_MAX_PORTFOLIO_HEAT_PCT = float(os.getenv("MAX_PORTFOLIO_HEAT_PCT", "6.0"))
+V217_MAX_DAILY_LOSS_R = float(os.getenv("MAX_DAILY_LOSS_R", "-3.0"))
+V217_MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5"))
+V217_AUTO_STOP_HOURS = int(os.getenv("AUTO_STOP_HOURS", "24"))
+V217_MONTE_CARLO_RUNS = int(os.getenv("MONTE_CARLO_RUNS", "10000"))
+V217_MONTE_CARLO_TRADES = int(os.getenv("MONTE_CARLO_TRADES", "100"))
+
+
+def v217_parse_portfolio_positions(raw=None):
+    raw = raw if raw is not None else os.getenv("PORTFOLIO_POSITIONS", "")
+    out = []
+    if not raw:
+        return out
+    for part in str(raw).replace(";", ",").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        sym, weight = part.split(":", 1)
+        w = v216_safe_float(weight, 0)
+        if sym.strip():
+            out.append({"symbol": sym.strip().upper(), "weight_pct": w})
+    return out
+
+
+def v217_symbol_sector(symbol):
+    s = str(symbol or "").upper()
+    sector_map = {
+        "NVDA": "TECH", "AMD": "TECH", "AAPL": "TECH", "MSFT": "TECH",
+        "QQQ": "TECH", "TSLA": "MEGA_CAP", "AMZN": "MEGA_CAP",
+        "GOOGL": "MEGA_CAP", "META": "MEGA_CAP", "AVGO": "TECH",
+        "SPY": "INDEX", "IWM": "INDEX", "DIA": "INDEX",
+        "XLK": "TECH", "XLF": "FINANCIAL", "XLE": "ENERGY",
+        "XLV": "HEALTHCARE", "XLY": "CONSUMER", "XLI": "INDUSTRIAL",
+        "AOT": "THAI_TRAVEL", "PTT": "THAI_ENERGY", "CPALL": "THAI_CONSUMER",
+        "SVI": "THAI_ELECTRONICS",
+        "XAUUSD": "GOLD", "GC": "GOLD", "GLD": "GOLD",
+    }
+    return sector_map.get(s, "OTHER")
+
+
+def v217_init_db():
+    v216_init_db()
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS risk_state (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS risk_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            message TEXT,
+            value REAL,
+            meta TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS monte_carlo_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            runs INTEGER,
+            trades_per_run INTEGER,
+            p05 REAL,
+            p50 REAL,
+            p95 REAL,
+            worst_final_r REAL,
+            best_final_r REAL,
+            avg_final_r REAL,
+            avg_max_dd_r REAL,
+            worst_max_dd_r REAL,
+            risk_of_ruin_pct REAL
+        )
+    """)
+
+    for table in ["trade_journal", "closed_outcomes"]:
+        try:
+            cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+            if cols and "setup" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN setup TEXT")
+            if cols and "market_regime" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN market_regime TEXT")
+            if cols and "position_size" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN position_size REAL")
+            if cols and "risk_amount" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN risk_amount REAL")
+            if cols and "risk_pct" not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN risk_pct REAL")
+        except Exception:
+            pass
+
+    conn.commit()
+    conn.close()
+
+
+def v217_set_state(key, value):
+    conn = db()
+    conn.execute("""
+        INSERT OR REPLACE INTO risk_state(key, value, updated_at)
+        VALUES (?, ?, ?)
+    """, (key, str(value), v216_now_text()))
+    conn.commit()
+    conn.close()
+
+
+def v217_get_state(key, default=None):
+    conn = db()
+    row = conn.execute("SELECT value FROM risk_state WHERE key=?", (key,)).fetchone()
+    conn.close()
+    if not row:
+        return default
+    return row["value"]
+
+
+def v217_log_event(event_type, message, value=None, meta=None):
+    conn = db()
+    conn.execute("""
+        INSERT INTO risk_events(created_at, event_type, message, value, meta)
+        VALUES (?, ?, ?, ?, ?)
+    """, (v216_now_text(), event_type, message, value, meta))
+    conn.commit()
+    conn.close()
+
+
+def v217_position_size(entry, stop, account_equity=None, risk_pct=None):
+    account_equity = v216_safe_float(account_equity, V217_ACCOUNT_EQUITY)
+    risk_pct = v216_safe_float(risk_pct, V217_RISK_PER_TRADE_PCT)
+    entry = v216_safe_float(entry)
+    stop = v216_safe_float(stop)
+
+    if not entry or not stop or entry <= 0 or stop <= 0 or entry == stop:
+        return {
+            "ok": False,
+            "reason": "entry/stop invalid",
+            "account_equity": account_equity,
+            "risk_pct": risk_pct,
+            "risk_amount": 0,
+            "unit_risk": 0,
+            "qty": 0,
+            "position_value": 0,
+            "position_pct": 0
+        }
+
+    risk_amount = account_equity * (risk_pct / 100.0)
+    unit_risk = abs(entry - stop)
+    qty = math.floor(risk_amount / unit_risk)
+    position_value = qty * entry
+    position_pct = (position_value / account_equity * 100.0) if account_equity else 0
+
+    return {
+        "ok": True,
+        "account_equity": v216_round(account_equity, 2),
+        "risk_pct": v216_round(risk_pct, 3),
+        "risk_amount": v216_round(risk_amount, 2),
+        "unit_risk": v216_round(unit_risk, 4),
+        "qty": int(max(qty, 0)),
+        "position_value": v216_round(position_value, 2),
+        "position_pct": v216_round(position_pct, 2)
+    }
+
+
+def v217_equity_drawdown_stats():
+    v216_snapshot()
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM equity_curve ORDER BY id ASC").fetchall()
+    conn.close()
+
+    if not rows:
+        return {
+            "equity_r": 0.0,
+            "peak_r": 0.0,
+            "current_dd_r": 0.0,
+            "max_dd_r": 0.0,
+            "closed_trades": 0,
+            "status": "NO_DATA"
+        }
+
+    equity = [float(r["equity_r"] or 0) for r in rows]
+    peak = max(equity) if equity else 0.0
+    current = equity[-1]
+    max_dd = min(float(r["drawdown_r"] or 0) for r in rows)
+    current_dd = current - peak
+
+    return {
+        "equity_r": v216_round(current, 4),
+        "peak_r": v216_round(peak, 4),
+        "current_dd_r": v216_round(current_dd, 4),
+        "max_dd_r": v216_round(max_dd, 4),
+        "closed_trades": len(rows),
+        "status": "OK"
+    }
+
+
+def v217_portfolio_heat():
+    positions = v217_parse_portfolio_positions()
+    open_risk_pct = 0.0
+    open_positions = []
+
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT * FROM trade_journal WHERE status='OPEN' ORDER BY id DESC").fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+
+    for r in rows:
+        entry = v216_safe_float(r["entry_price"], 0)
+        stop = v216_safe_float(r["stop_price"], None)
+        qty = v216_safe_float(r["qty"], 1)
+        if entry and stop:
+            unit_risk = abs(entry - stop)
+            risk_amount = unit_risk * qty
+            risk_pct = (risk_amount / V217_ACCOUNT_EQUITY * 100.0) if V217_ACCOUNT_EQUITY else 0
+        else:
+            risk_pct = 0
+
+        open_risk_pct += risk_pct
+        open_positions.append({
+            "id": r["id"],
+            "symbol": r["symbol"],
+            "side": r["side"],
+            "strategy": r["strategy"],
+            "entry": entry,
+            "stop": stop,
+            "qty": qty,
+            "risk_pct": v216_round(risk_pct, 3),
+            "sector": v217_symbol_sector(r["symbol"])
+        })
+
+    sector_exposure = {}
+    total_static_weight = 0.0
+    for p in positions:
+        sector = v217_symbol_sector(p["symbol"])
+        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + float(p["weight_pct"] or 0)
+        total_static_weight += float(p["weight_pct"] or 0)
+
+    top_sector = "N/A"
+    top_sector_weight = 0.0
+    for k, v in sector_exposure.items():
+        if v > top_sector_weight:
+            top_sector = k
+            top_sector_weight = v
+
+    heat_score = min(100, (open_risk_pct / max(V217_MAX_PORTFOLIO_HEAT_PCT, 0.01)) * 100)
+    status = "LOW"
+    if heat_score >= 80:
+        status = "HIGH"
+    elif heat_score >= 50:
+        status = "MEDIUM"
+
+    return {
+        "portfolio_positions_env": positions,
+        "static_total_weight_pct": v216_round(total_static_weight, 2),
+        "sector_exposure": {k: v216_round(v, 2) for k, v in sector_exposure.items()},
+        "top_sector": top_sector,
+        "top_sector_weight_pct": v216_round(top_sector_weight, 2),
+        "open_risk_pct": v216_round(open_risk_pct, 3),
+        "max_heat_pct": V217_MAX_PORTFOLIO_HEAT_PCT,
+        "heat_score": v216_round(heat_score, 2),
+        "status": status,
+        "open_positions": open_positions
+    }
+
+
+def v217_setup_stats():
+    v216_snapshot()
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM closed_outcomes ORDER BY id ASC").fetchall()
+    conn.close()
+
+    buckets = {}
+    for r in rows:
+        setup = None
+        try:
+            setup = r["setup"]
+        except Exception:
+            setup = None
+        setup = setup or r["strategy"] or "UNKNOWN"
+        buckets.setdefault(setup, []).append(r)
+
+    result = []
+    for setup, rs in buckets.items():
+        p = v216_performance_from_rows(rs)
+        result.append({"setup": setup, **p})
+
+    result.sort(key=lambda x: (x["expectancy_r"], x["profit_factor"], x["trades"]), reverse=True)
+    return result
+
+
+def v217_regime_stats():
+    v216_snapshot()
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM closed_outcomes ORDER BY id ASC").fetchall()
+    conn.close()
+
+    buckets = {}
+    for r in rows:
+        regime = None
+        try:
+            regime = r["market_regime"]
+        except Exception:
+            regime = None
+        try:
+            regime = regime or r["regime"]
+        except Exception:
+            pass
+        regime = regime or "UNKNOWN"
+        buckets.setdefault(regime, []).append(r)
+
+    out = []
+    for regime, rs in buckets.items():
+        p = v216_performance_from_rows(rs)
+        out.append({"regime": regime, **p})
+    out.sort(key=lambda x: (x["expectancy_r"], x["trades"]), reverse=True)
+    return out
+
+
+def v217_recent_loss_streak():
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT result, r_multiple, closed_at FROM closed_outcomes ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+
+    streak = 0
+    for r in rows:
+        rr = float(r["r_multiple"] or 0)
+        if rr < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def v217_today_r():
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT r_multiple, closed_at FROM closed_outcomes WHERE closed_at LIKE ?", (today + "%",)).fetchall()
+    conn.close()
+    return sum(float(r["r_multiple"] or 0) for r in rows)
+
+
+def v217_auto_stop_status():
+    until_raw = v217_get_state("auto_stop_until", "")
+    now = datetime.now()
+
+    active_until = None
+    try:
+        if until_raw:
+            active_until = datetime.strptime(until_raw[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        active_until = None
+
+    if active_until and now < active_until:
+        return {
+            "active": True,
+            "reason": v217_get_state("auto_stop_reason", "Manual/Rule Stop"),
+            "until": active_until.strftime("%Y-%m-%d %H:%M:%S"),
+            "loss_streak": v217_recent_loss_streak(),
+            "today_r": v216_round(v217_today_r(), 4)
+        }
+
+    streak = v217_recent_loss_streak()
+    today_r = v217_today_r()
+
+    reason = None
+    if streak >= V217_MAX_CONSECUTIVE_LOSSES:
+        reason = f"Consecutive losses >= {V217_MAX_CONSECUTIVE_LOSSES}"
+    elif today_r <= V217_MAX_DAILY_LOSS_R:
+        reason = f"Daily loss reached {V217_MAX_DAILY_LOSS_R}R"
+
+    if reason:
+        until = now + timedelta(hours=V217_AUTO_STOP_HOURS)
+        v217_set_state("auto_stop_until", until.strftime("%Y-%m-%d %H:%M:%S"))
+        v217_set_state("auto_stop_reason", reason)
+        v217_log_event("AUTO_STOP", reason, today_r, f"streak={streak}")
+        return {
+            "active": True,
+            "reason": reason,
+            "until": until.strftime("%Y-%m-%d %H:%M:%S"),
+            "loss_streak": streak,
+            "today_r": v216_round(today_r, 4)
+        }
+
+    return {
+        "active": False,
+        "reason": "OK",
+        "until": None,
+        "loss_streak": streak,
+        "today_r": v216_round(today_r, 4)
+    }
+
+
+def v217_monte_carlo(runs=None, trades_per_run=None):
+    runs = int(runs or V217_MONTE_CARLO_RUNS)
+    trades_per_run = int(trades_per_run or V217_MONTE_CARLO_TRADES)
+
+    conn = db()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT r_multiple FROM closed_outcomes ORDER BY id ASC").fetchall()
+    conn.close()
+
+    samples = [float(r["r_multiple"] or 0) for r in rows]
+    if not samples:
+        samples = [1.0, -1.0, 0.5, -0.7, 1.5, -1.0]
+
+    finals = []
+    max_dds = []
+    ruin_count = 0
+
+    for _ in range(runs):
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        ruined = False
+        for _t in range(trades_per_run):
+            rr = random.choice(samples)
+            equity += rr
+            peak = max(peak, equity)
+            dd = equity - peak
+            max_dd = min(max_dd, dd)
+            if equity <= V217_MAX_DAILY_LOSS_R * 2:
+                ruined = True
+        if ruined:
+            ruin_count += 1
+        finals.append(equity)
+        max_dds.append(max_dd)
+
+    finals_sorted = sorted(finals)
+
+    def pct(p):
+        idx = int(max(0, min(len(finals_sorted)-1, round((p/100.0)*(len(finals_sorted)-1)))))
+        return finals_sorted[idx]
+
+    result = {
+        "runs": runs,
+        "trades_per_run": trades_per_run,
+        "sample_size": len(samples),
+        "p05": v216_round(pct(5), 4),
+        "p50": v216_round(pct(50), 4),
+        "p95": v216_round(pct(95), 4),
+        "worst_final_r": v216_round(min(finals), 4),
+        "best_final_r": v216_round(max(finals), 4),
+        "avg_final_r": v216_round(sum(finals) / len(finals), 4),
+        "avg_max_dd_r": v216_round(sum(max_dds) / len(max_dds), 4),
+        "worst_max_dd_r": v216_round(min(max_dds), 4),
+        "risk_of_ruin_pct": v216_round((ruin_count / runs) * 100.0, 2),
+        "note": "Uses real closed outcomes if available; fallback synthetic sample if no trades."
+    }
+
+    conn = db()
+    conn.execute("""
+        INSERT INTO monte_carlo_results
+        (created_at, runs, trades_per_run, p05, p50, p95, worst_final_r, best_final_r,
+         avg_final_r, avg_max_dd_r, worst_max_dd_r, risk_of_ruin_pct)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        v216_now_text(), runs, trades_per_run, result["p05"], result["p50"], result["p95"],
+        result["worst_final_r"], result["best_final_r"], result["avg_final_r"],
+        result["avg_max_dd_r"], result["worst_max_dd_r"], result["risk_of_ruin_pct"]
+    ))
+    conn.commit()
+    conn.close()
+
+    return result
+
+
+def v217_snapshot():
+    v217_init_db()
+    base = v216_snapshot()
+    base["v217"] = {
+        "position_sizing_policy": {
+            "account_equity": V217_ACCOUNT_EQUITY,
+            "risk_per_trade_pct": V217_RISK_PER_TRADE_PCT
+        },
+        "drawdown": v217_equity_drawdown_stats(),
+        "portfolio_heat": v217_portfolio_heat(),
+        "win_rate_by_setup": v217_setup_stats(),
+        "market_regime_analysis": v217_regime_stats(),
+        "auto_stop": v217_auto_stop_status()
+    }
+    return base
+
+
+@app.route("/v21-7/status")
+def v217_status():
+    try:
+        v217_init_db()
+        return jsonify({
+            "ok": True,
+            "version": "V21.7 Risk Engine",
+            "base_required": "V21.6.1",
+            "routes": [
+                "/v21-7",
+                "/v21-7/status",
+                "/v21-7/sizing?entry=212&stop=205",
+                "/v21-7/drawdown",
+                "/v21-7/portfolio-heat",
+                "/v21-7/setup-stats",
+                "/v21-7/regime",
+                "/v21-7/auto-stop",
+                "/v21-7/monte-carlo",
+                "/v21-7/api/snapshot"
+            ]
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/v21-7/sizing")
+def v217_route_sizing():
+    return jsonify(v217_position_size(
+        entry=request.args.get("entry"),
+        stop=request.args.get("stop"),
+        account_equity=request.args.get("equity") or V217_ACCOUNT_EQUITY,
+        risk_pct=request.args.get("risk_pct") or V217_RISK_PER_TRADE_PCT
+    ))
+
+
+@app.route("/v21-7/drawdown")
+def v217_route_drawdown():
+    return jsonify({"ok": True, "drawdown": v217_equity_drawdown_stats()})
+
+
+@app.route("/v21-7/portfolio-heat")
+def v217_route_portfolio_heat_json():
+    return jsonify({"ok": True, "portfolio_heat": v217_portfolio_heat()})
+
+
+@app.route("/v21-7/setup-stats")
+def v217_route_setup_stats_json():
+    return jsonify({"ok": True, "setup_stats": v217_setup_stats()})
+
+
+@app.route("/v21-7/regime")
+def v217_route_regime_json():
+    return jsonify({"ok": True, "regime_stats": v217_regime_stats()})
+
+
+@app.route("/v21-7/auto-stop")
+def v217_route_auto_stop_json():
+    return jsonify({"ok": True, "auto_stop": v217_auto_stop_status()})
+
+
+@app.route("/v21-7/monte-carlo")
+def v217_route_monte_carlo_json():
+    runs = request.args.get("runs")
+    trades = request.args.get("trades")
+    return jsonify({"ok": True, "monte_carlo": v217_monte_carlo(runs, trades)})
+
+
+@app.route("/v21-7/api/snapshot")
+def v217_route_snapshot():
+    try:
+        return jsonify(v217_snapshot())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/v21-7")
+@app.route("/v21-7/dashboard")
+def v217_dashboard():
+    snap = v217_snapshot()
+    p = snap["performance"]
+    dd = snap["v217"]["drawdown"]
+    heat = snap["v217"]["portfolio_heat"]
+    astop = snap["v217"]["auto_stop"]
+    body = f"""
+    <div class="grid">
+      <div class="metric"><div class="label">Closed Trades</div><div class="value">{snap["closed_outcomes"]}</div></div>
+      <div class="metric"><div class="label">Profit Factor</div><div class="value">{p["profit_factor"]}</div></div>
+      <div class="metric"><div class="label">Expectancy</div><div class="value">{p["expectancy_r"]}R</div></div>
+      <div class="metric"><div class="label">Max Drawdown</div><div class="value">{dd["max_dd_r"]}R</div></div>
+    </div>
+    <div class="grid">
+      <div class="metric"><div class="label">Portfolio Heat</div><div class="value">{heat["heat_score"]}</div><p>{heat["status"]}</p></div>
+      <div class="metric"><div class="label">Open Risk</div><div class="value">{heat["open_risk_pct"]}%</div></div>
+      <div class="metric"><div class="label">Top Sector</div><div class="value">{heat["top_sector"]}</div><p>{heat["top_sector_weight_pct"]}%</p></div>
+      <div class="metric"><div class="label">Auto Stop</div><div class="value">{"ON" if astop["active"] else "OFF"}</div><p>{astop["reason"]}</p></div>
+    </div>
+    <div class="card"><h2>V21.7 Tools</h2>
+    <pre>/v21-7/sizing?entry=212&stop=205
+/v21-7/portfolio-heat
+/v21-7/setup-stats
+/v21-7/regime
+/v21-7/auto-stop
+/v21-7/monte-carlo?runs=10000&trades=100</pre></div>
+    """
+    return v216_html_page("V21.7 Risk + Portfolio Engine", body, "dashboard")
+
+
+# Optional safety wrapper: block opening new trade when auto-stop is active
+try:
+    _v217_original_open_trade = v216_open_trade
+
+    def v216_open_trade(*args, **kwargs):
+        st = v217_auto_stop_status()
+        if st.get("active"):
+            raise ValueError(f"AUTO_STOP_ACTIVE: {st.get('reason')} until {st.get('until')}")
+        return _v217_original_open_trade(*args, **kwargs)
+
+except Exception:
+    pass
+
+
+try:
+    v217_init_db()
+except Exception as e:
+    print("v21.7 init error:", e)
+
 
 if __name__ == "__main__":
     if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
