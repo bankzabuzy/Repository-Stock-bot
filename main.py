@@ -12,11 +12,6 @@ from datetime import datetime, timedelta, timezone, timezone, timezone
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
-try:
-    import psycopg2
-    import psycopg2.extras
-except Exception:
-    psycopg2 = None
 from flask import Flask, request, abort, jsonify, Response
 
 app = Flask(__name__)
@@ -24,12 +19,7 @@ app = Flask(__name__)
 # ============================================================
 # V7 HYBRID MAX FREE CONFIG
 # ============================================================
-LINE_CHANNEL_ACCESS_TOKEN = (
-    os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    or os.getenv("LINE_TOKEN")
-    or os.getenv("LINE_ACCESS_TOKEN")
-    or ""
-)
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
@@ -86,16 +76,7 @@ V8_SKIP_INVALID_SYMBOLS = os.getenv("V8_SKIP_INVALID_SYMBOLS", "true").lower() =
 V8_LOG_SKIPPED_SYMBOLS = os.getenv("V8_LOG_SKIPPED_SYMBOLS", "false").lower() == "true"
 
 ALLOWED_USERS = [x.strip() for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()]
-ALERT_USER_IDS = [
-    x.strip()
-    for x in (
-        os.getenv("ALERT_USER_IDS")
-        or os.getenv("LINE_USER_ID")
-        or os.getenv("LINE_USER_IDS")
-        or ""
-    ).replace(";", ",").split(",")
-    if x.strip()
-]
+ALERT_USER_IDS = [x.strip() for x in os.getenv("ALERT_USER_IDS", "").split(",") if x.strip()]
 
 ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "false").lower() == "true"
 ENABLE_MARKET_HOURS_GUARD = os.getenv("ENABLE_MARKET_HOURS_GUARD", "true").lower() == "true"
@@ -150,31 +131,6 @@ PREMARKET_COOLDOWN_KEY = "premarket_reminder"
 TOP5_COOLDOWN_KEY = "top5_daily"
 
 DB_PATH = os.getenv("DB_PATH", "signals.db")
-
-def _build_pg_url_from_parts():
-    host = os.getenv("PGHOST", "").strip()
-    user = os.getenv("PGUSER", "").strip()
-    password = os.getenv("PGPASSWORD", "").strip()
-    database = os.getenv("PGDATABASE", "").strip()
-    port = os.getenv("PGPORT", "5432").strip()
-    if host and user and password and database:
-        from urllib.parse import quote_plus
-        return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{database}"
-    return ""
-
-DATABASE_URL = (
-    os.getenv("DATABASE_URL")
-    or os.getenv("DATABASE_PUBLIC_URL")
-    or os.getenv("POSTGRES_URL")
-    or os.getenv("POSTGRESQL_URL")
-    or os.getenv("RAILWAY_DATABASE_URL")
-    or _build_pg_url_from_parts()
-    or ""
-).strip()
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
-USE_POSTGRES = bool(DATABASE_URL)
-
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
@@ -233,66 +189,7 @@ def resolve_delisted_symbol(symbol):
 # ============================================================
 # DATABASE
 # ============================================================
-class PgCompatCursor:
-    def __init__(self, cur):
-        self.cur = cur
-
-    def _sql(self, sql):
-        sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-        sql = sql.replace("AUTOINCREMENT", "")
-        sql = sql.replace("?", "%s")
-        return sql
-
-    def execute(self, sql, params=None):
-        if params is None:
-            params = ()
-        self.cur.execute(self._sql(sql), params)
-        return self
-
-    def fetchone(self):
-        return self.cur.fetchone()
-
-    def fetchall(self):
-        return self.cur.fetchall()
-
-    def __iter__(self):
-        return iter(self.cur)
-
-    def __getattr__(self, name):
-        return getattr(self.cur, name)
-
-
-class PgCompatConnection:
-    def __init__(self, conn):
-        self.conn = conn
-        self.row_factory = None
-
-    def cursor(self):
-        return PgCompatCursor(self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor))
-
-    def execute(self, sql, params=None):
-        cur = self.cursor()
-        cur.execute(sql, params or ())
-        return cur
-
-    def commit(self):
-        self.conn.commit()
-
-    def close(self):
-        self.conn.close()
-
-    def rollback(self):
-        self.conn.rollback()
-
-    def __getattr__(self, name):
-        return getattr(self.conn, name)
-
-
 def db():
-    if USE_POSTGRES:
-        if psycopg2 is None:
-            raise RuntimeError("DATABASE_URL is set but psycopg2-binary is not installed.")
-        return PgCompatConnection(psycopg2.connect(DATABASE_URL, connect_timeout=15))
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -409,6 +306,32 @@ def round_strike(price):
     else:
         step = 0.5
     return round(price / step) * step
+
+
+def option_strike_step(price):
+    if price is None:
+        return 1.0
+    if price >= 500:
+        return 5.0
+    if price >= 100:
+        return 2.5
+    if price >= 30:
+        return 1.0
+    return 0.5
+
+
+def ensure_option_spread(buy_strike, sell_strike, side, price):
+    """Prevent invalid spreads such as Buy 215C / Sell 215C."""
+    step = option_strike_step(price)
+    buy = float(buy_strike)
+    sell = float(sell_strike)
+    if str(side).upper().startswith("CALL"):
+        if sell <= buy:
+            sell = buy + step
+    else:
+        if sell >= buy:
+            sell = buy - step
+    return buy, sell
 
 
 def clean_price_text(value):
@@ -1489,17 +1412,48 @@ def human_market_cap(value, currency):
         return "N/A"
 
 
-def dividend_yield_text(value):
-    if value is None:
+def dividend_yield_pct_sane(price=None, dividend_yield=None, dividend_rate=None, last_dividend=None):
+    """Return dividend yield as percent, with unit/glitch protection.
+    APIs may return yield as 0.0047 (=0.47%), 0.47 (=47% or 0.47%), or 47 (=47%).
+    For growth stocks/ETFs, extreme values are usually provider/unit errors, so we fall back to annual dividend / price when possible.
+    """
+    price = safe_float(price)
+    raw = safe_float(dividend_yield)
+    rate = safe_float(dividend_rate)
+    last = safe_float(last_dividend)
+
+    candidates = []
+    if raw is not None:
+        # Common Yahoo format: 0.0047 = 0.47%.
+        if 0 <= raw <= 0.25:
+            candidates.append(raw * 100.0)
+        # Some sources already send percent, e.g. 0.47 or 1.20.
+        if 0 <= raw <= 25:
+            candidates.append(raw)
+        # Some sources send 47 for 47%, usually unrealistic for common equities.
+        if 0 <= raw <= 100:
+            candidates.append(raw)
+
+    if price and price > 0:
+        if rate and rate > 0:
+            candidates.append((rate / price) * 100.0)
+        if last and last > 0:
+            # Quarterly dividend fallback: annualize last dividend.
+            candidates.append((last * 4.0 / price) * 100.0)
+
+    # Keep plausible values. Above 15% is normally a data glitch for the instruments this bot scans.
+    plausible = [x for x in candidates if x is not None and 0 <= x <= 15]
+    if plausible:
+        # Prefer the smallest plausible value to avoid 0.47 becoming 47.00%.
+        return round(min(plausible), 4)
+    return None
+
+
+def dividend_yield_text(value, price=None, dividend_rate=None, last_dividend=None):
+    pct = dividend_yield_pct_sane(price, value, dividend_rate, last_dividend)
+    if pct is None:
         return "N/A"
-    try:
-        # Yahoo often returns 0.0285 for 2.85%.
-        val = float(value)
-        if val <= 1:
-            val *= 100
-        return f"{val:.2f}%"
-    except Exception:
-        return "N/A"
+    return f"{pct:.2f}%"
 
 
 def valuation_engine(asset, analysis, fundamentals):
@@ -1514,7 +1468,7 @@ def valuation_engine(asset, analysis, fundamentals):
     rsi = analysis.get("rsi")
     pe = fundamentals.get("trailing_pe")
     fwd_pe = fundamentals.get("forward_pe")
-    div_yield = fundamentals.get("dividend_yield")
+    div_yield = dividend_yield_pct_sane(price, fundamentals.get("dividend_yield"), fundamentals.get("dividend_rate"), fundamentals.get("last_dividend"))
     low52 = fundamentals.get("fifty_two_week_low")
     high52 = fundamentals.get("fifty_two_week_high")
 
@@ -1569,15 +1523,16 @@ def valuation_engine(asset, analysis, fundamentals):
         else:
             reasons.append("P/E อยู่ในโซนกลาง")
 
-    # Dividend yield rough filter
-    if div_yield:
-        dy = div_yield * 100 if div_yield <= 1 else div_yield
-        if dy >= 5:
+    # Dividend yield rough filter with unit/glitch protection.
+    if div_yield is not None:
+        if div_yield >= 5:
             score -= 1
             reasons.append("Dividend Yield สูง น่าสนใจสำหรับสายปันผล")
-        elif dy < 1:
+        elif div_yield < 1:
             score += 1
             reasons.append("Dividend Yield ต่ำ ไม่ได้ช่วยรองรับ valuation มากนัก")
+    else:
+        reasons.append("Dividend Yield ใช้ไม่ได้/ผิดหน่วย จึงตัดออกจากการประเมิน")
 
     if score <= -3:
         status = "ถูกน่าสนใจ"
@@ -1597,7 +1552,7 @@ def valuation_engine(asset, analysis, fundamentals):
 Market Cap: {human_market_cap(fundamentals.get('market_cap'), '฿' if asset['currency'] == 'THB' else '$')}
 P/E: {fmt_num(fundamentals.get('trailing_pe'))}
 Forward P/E: {fmt_num(fundamentals.get('forward_pe'))}
-Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'))}
+Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'), price, fundamentals.get('dividend_rate'), fundamentals.get('last_dividend'))}
 Dividend Rate: {fmt_num(fundamentals.get('dividend_rate'))}
 
 XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
@@ -1632,6 +1587,16 @@ def options_hybrid_engine(asset, analysis):
     call_sell = round_strike(price + atr * 1.70)
     put_strike = round_strike(price - atr * 0.60)
     put_sell = round_strike(price - atr * 1.70)
+    call_strike, call_sell = ensure_option_spread(call_strike, call_sell, "CALL", price)
+    put_strike, put_sell = ensure_option_spread(put_strike, put_sell, "PUT", price)
+
+    # Downgrade confidence in range/low-vol/noisy conditions.
+    regime_text = str(analysis.get("regime", "")).upper()
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    if "RANGE" in regime_text or "LOW VOL" in regime_text:
+        prob = max(45, int(prob) - 8)
+    if rvol < 1.0:
+        prob = max(40, int(prob) - 5)
 
     entry_low = price - atr * 0.25
     entry_high = price + atr * 0.15
@@ -2280,57 +2245,6 @@ def line_push(user_id, text):
     if r.status_code >= 300:
         print("LINE push failed:", r.status_code, r.text)
 
-def save_line_user_id(user_id):
-    if not user_id:
-        return
-    try:
-        conn = db()
-        conn.execute("CREATE TABLE IF NOT EXISTS line_users (user_id TEXT PRIMARY KEY, first_seen TEXT, last_seen TEXT)")
-        # PostgreSQL-compatible upsert through delete/insert fallback
-        try:
-            conn.execute("INSERT INTO line_users (user_id, first_seen, last_seen) VALUES (?, ?, ?)", (user_id, now_text(), now_text()))
-        except Exception:
-            conn.rollback()
-            conn.execute("UPDATE line_users SET last_seen=? WHERE user_id=?", (now_text(), user_id))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print("save_line_user_id failed:", e)
-
-
-def stored_line_user_ids():
-    try:
-        conn = db()
-        try:
-            rows = conn.execute("SELECT user_id FROM line_users ORDER BY last_seen DESC LIMIT 50").fetchall()
-        except Exception:
-            rows = []
-        conn.close()
-        out = []
-        for r in rows:
-            try:
-                out.append(r["user_id"] if isinstance(r, dict) else r["user_id"])
-            except Exception:
-                pass
-        return out
-    except Exception:
-        return []
-
-
-def line_push_all(text):
-    ids = []
-    for uid in ALERT_USER_IDS + stored_line_user_ids():
-        if uid and uid not in ids:
-            ids.append(uid)
-    results = []
-    for uid in ids:
-        try:
-            line_push(uid, text)
-            results.append({"to": uid[-6:], "ok": True})
-        except Exception as e:
-            results.append({"to": uid[-6:] if uid else "", "ok": False, "error": str(e)})
-    return results
-
 
 def verify_line_signature(body, signature):
     if not LINE_CHANNEL_SECRET:
@@ -2777,24 +2691,19 @@ def market_leader_watchlist_status():
     })
 
 
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.method == "GET":
-        return jsonify({"ok": True, "message": "webhook alive", "time_th": now_text()})
     body = request.get_data()
     signature = request.headers.get("X-Line-Signature", "")
     if not verify_line_signature(body, signature):
         abort(400)
     payload = request.get_json(silent=True) or {}
-    processed = 0
     for event in payload.get("events", []):
         if event.get("type") != "message":
             continue
-        processed += 1
         reply_token = event.get("replyToken")
         source = event.get("source", {})
         user_id = source.get("userId", "")
-        save_line_user_id(user_id)
         message = event.get("message", {})
         if message.get("type") != "text":
             line_reply(reply_token, "ตอนนี้รองรับเฉพาะข้อความเท่านั้นครับ")
@@ -2805,7 +2714,7 @@ def webhook():
             line_reply(reply_token, command_response)
             continue
         line_reply(reply_token, handle_message(user_id, user_text))
-    return jsonify({"ok": True, "processed": processed, "time_th": now_text()}), 200
+    return "OK", 200
 
 
 
@@ -6389,67 +6298,6 @@ def v121_liquidity_route(symbol):
 @app.route("/v12-1/ranking", methods=["GET"])
 def v121_ranking_route():
     return jsonify(v121_opportunity_ranking(request.args.get("limit")))
-
-# ============================================================
-# V22.3 PRODUCTION DIAGNOSTICS
-# ============================================================
-@app.route("/v22/debug-db", methods=["GET"])
-def v22_debug_db():
-    info = {
-        "ok": True,
-        "version": "V22.3 Preserve Original + PostgreSQL Compat",
-        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
-        "database_url_exists": bool(DATABASE_URL),
-        "use_postgres": USE_POSTGRES,
-        "psycopg2_loaded": psycopg2 is not None,
-        "db_path": DB_PATH,
-        "line_token_exists": bool(LINE_CHANNEL_ACCESS_TOKEN),
-        "alert_user_ids": len(ALERT_USER_IDS),
-        "stored_line_user_ids": len(stored_line_user_ids()) if "stored_line_user_ids" in globals() else 0,
-        "env_keys_present": {
-            "DATABASE_URL": bool(os.getenv("DATABASE_URL")),
-            "DATABASE_PUBLIC_URL": bool(os.getenv("DATABASE_PUBLIC_URL")),
-            "POSTGRES_URL": bool(os.getenv("POSTGRES_URL")),
-            "PGHOST": bool(os.getenv("PGHOST")),
-            "PGUSER": bool(os.getenv("PGUSER")),
-            "PGDATABASE": bool(os.getenv("PGDATABASE")),
-            "PGPORT": bool(os.getenv("PGPORT")),
-            "PGPASSWORD": bool(os.getenv("PGPASSWORD")),
-            "LINE_CHANNEL_ACCESS_TOKEN": bool(os.getenv("LINE_CHANNEL_ACCESS_TOKEN")),
-            "LINE_TOKEN": bool(os.getenv("LINE_TOKEN")),
-            "LINE_USER_ID": bool(os.getenv("LINE_USER_ID")),
-            "ALERT_USER_IDS": bool(os.getenv("ALERT_USER_IDS")),
-        }
-    }
-    try:
-        conn = db()
-        row = conn.execute("SELECT 1 AS ok").fetchone()
-        conn.close()
-        info["connection_ok"] = True
-        info["select_1"] = dict(row) if isinstance(row, dict) else {"ok": 1}
-    except Exception as e:
-        info["connection_ok"] = False
-        info["error"] = str(e)
-    return jsonify(info)
-
-
-@app.route("/v22/line/test", methods=["GET"])
-@app.route("/line/test", methods=["GET"])
-def v22_line_test():
-    msg = "✅ LINE test from Railway V22.3 " + now_text()
-    if ALERT_USER_IDS:
-        for uid in ALERT_USER_IDS:
-            line_push(uid, msg)
-        return jsonify({"ok": True, "sent_to_env_user_ids": len(ALERT_USER_IDS), "stored_user_ids": len(stored_line_user_ids())})
-    results = line_push_all(msg) if "line_push_all" in globals() else []
-    return jsonify({"ok": bool(results), "results": results, "message": "ถ้ายังไม่มี recipient ให้ส่งข้อความหา LINE OA ก่อน 1 ครั้ง"})
-
-
-@app.route("/v22/line/users", methods=["GET"])
-@app.route("/line/users", methods=["GET"])
-def v22_line_users():
-    return jsonify({"ok": True, "env_user_ids": len(ALERT_USER_IDS), "stored_line_user_ids": stored_line_user_ids() if "stored_line_user_ids" in globals() else []})
-
 
 init_db()
 v10_init_db()
