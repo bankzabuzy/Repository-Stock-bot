@@ -6,11 +6,6 @@ import time
 import base64
 import hashlib
 import sqlite3
-try:
-    import psycopg2
-    import psycopg2.extras
-except Exception:
-    psycopg2 = None
 import threading
 from datetime import datetime, timedelta, timezone, timezone, timezone
 
@@ -22,7 +17,7 @@ from flask import Flask, request, abort, jsonify, Response
 app = Flask(__name__)
 
 # ============================================================
-# V22 PROFESSIONAL CONFIG
+# V7 HYBRID MAX FREE CONFIG
 # ============================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
@@ -32,18 +27,6 @@ ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 PORT = int(os.getenv("PORT", "3000"))
-APP_VERSION = "V22.7 Professional Refactor — Scoring/Risk/Report/Option/Gold/News"
-DATABASE_URL = (
-    os.getenv("DATABASE_URL")
-    or os.getenv("DATABASE_PUBLIC_URL")
-    or os.getenv("POSTGRES_URL")
-    or ""
-).strip()
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
-USE_POSTGRES = bool(DATABASE_URL)
-DB_WRITE_LOCK = threading.RLock()
-
 
 WATCHLIST = [
     x.strip().upper()
@@ -64,11 +47,7 @@ DEFAULT_US_SYMBOLS = {
     "LULU", "COST", "JPM", "BAC", "XOM", "CVX", "UNH", "LLY", "WMT",
     "RKLB", "AAOI", "IREN", "ONDS", "PLUG", "EOSE", "QBTS", "HDC",
     "TJX", "CEG", "VST", "TSM", "DXYZ", "OKLO", "RGTI", "IONQ", "SOUN",
-    "HOOD", "RBLX", "SHOP", "CRWD", "SNOW", "NET", "DDOG", "U", "PATH",
-    # V22.9 user options universe / high-beta scan list
-    "MTRN", "LAES", "ZETA", "NOW", "NVTS", "CRWV", "CIFR", "NBIS",
-    "AMKR", "AEHR", "LEU", "UUUU", "UMAC", "KTOS", "AVAV", "INFQ",
-    "BKSY", "PL", "ASTS", "DXYZ", "AXTI", "WDC", "MRVL", "GOOG"
+    "HOOD", "RBLX", "SHOP", "CRWD", "SNOW", "NET", "DDOG", "U", "PATH"
 }
 
 EXTRA_US_SYMBOLS = set(env_list("EXTRA_US_SYMBOLS", ""))
@@ -117,7 +96,7 @@ STRICT_REQUIRE_4H_CONFIRM = os.getenv("STRICT_REQUIRE_4H_CONFIRM", "true").lower
 MIN_POSITION_RISK_LEVEL = os.getenv("MIN_POSITION_RISK_LEVEL", "MEDIUM").upper()
 
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
-AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "86"))
+AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
 AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
@@ -125,12 +104,12 @@ ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == 
 US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
 US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
-STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "88"))
+STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
-STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "68"))
+STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
 STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
 STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "0.85"))
 STRICT_REQUIRE_TF_CONFIRM = os.getenv("STRICT_REQUIRE_TF_CONFIRM", "true").lower() == "true"
@@ -210,85 +189,9 @@ def resolve_delisted_symbol(symbol):
 # ============================================================
 # DATABASE
 # ============================================================
-def _pg_translate_sql(sql):
-    """Translate the SQLite-style SQL used by the legacy monolith to PostgreSQL."""
-    if not USE_POSTGRES:
-        return sql
-    sql = str(sql)
-    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-    sql = sql.replace("AUTOINCREMENT", "")
-    sql = sql.replace("?", "%s")
-    return sql
-
-
-class _PgCompatCursor:
-    def __init__(self, cur):
-        self.cur = cur
-
-    def execute(self, sql, params=()):
-        self.cur.execute(_pg_translate_sql(sql), params or ())
-        return self
-
-    def fetchone(self):
-        return self.cur.fetchone()
-
-    def fetchall(self):
-        return self.cur.fetchall()
-
-    def __iter__(self):
-        return iter(self.cur)
-
-    def close(self):
-        try:
-            self.cur.close()
-        except Exception:
-            pass
-
-
-class _PgCompatConnection:
-    def __init__(self):
-        if psycopg2 is None:
-            raise RuntimeError("DATABASE_URL is set but psycopg2-binary is not installed")
-        self.conn = psycopg2.connect(
-            DATABASE_URL,
-            cursor_factory=psycopg2.extras.RealDictCursor,
-            connect_timeout=15,
-        )
-
-    def cursor(self):
-        return _PgCompatCursor(self.conn.cursor())
-
-    def execute(self, sql, params=()):
-        cur = self.cursor()
-        return cur.execute(sql, params)
-
-    def commit(self):
-        return self.conn.commit()
-
-    def rollback(self):
-        return self.conn.rollback()
-
-    def close(self):
-        return self.conn.close()
-
-
 def db():
-    """V22.7 database adapter.
-    - Uses PostgreSQL automatically when DATABASE_URL exists.
-    - Falls back to SQLite for local/dev use.
-    - Keeps legacy code working by translating ? placeholders and AUTOINCREMENT.
-    """
-    if USE_POSTGRES:
-        return _PgCompatConnection()
-
-    conn = sqlite3.connect(DB_PATH, timeout=60, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA busy_timeout=60000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
     return conn
 
 
@@ -403,32 +306,6 @@ def round_strike(price):
     else:
         step = 0.5
     return round(price / step) * step
-
-
-def option_strike_step(price):
-    if price is None:
-        return 1.0
-    if price >= 500:
-        return 5.0
-    if price >= 100:
-        return 2.5
-    if price >= 30:
-        return 1.0
-    return 0.5
-
-
-def ensure_option_spread(buy_strike, sell_strike, side, price):
-    """Prevent invalid spreads such as Buy 215C / Sell 215C."""
-    step = option_strike_step(price)
-    buy = float(buy_strike)
-    sell = float(sell_strike)
-    if str(side).upper().startswith("CALL"):
-        if sell <= buy:
-            sell = buy + step
-    else:
-        if sell >= buy:
-            sell = buy - step
-    return buy, sell
 
 
 def clean_price_text(value):
@@ -625,7 +502,7 @@ def normalize_asset(user_text):
 
 
 # ============================================================
-# V22 MULTI-FREE API FALLBACK ENGINE
+# V7.8 MULTI-FREE API FALLBACK ENGINE
 # ============================================================
 def log_api_fallback(message):
     if API_FALLBACK_VERBOSE:
@@ -932,7 +809,7 @@ def get_goldtraders_price():
             "gold_spot": safe_float(m.group(8)),
             "usd_thb_ref": safe_float(m.group(9)),
             "change": safe_float(m.group(10), 0),
-            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+            "source": "สมาคมค้าทองคำ / GoldTraders UpdatePriceList",
             "updated_at": f"{date_th} {time_th} ครั้งที่ {round_no}",
             "raw_url": url,
             "is_estimate": False,
@@ -964,7 +841,7 @@ def get_goldtraders_price():
             "gold_spot": None,
             "usd_thb_ref": None,
             "change": None,
-            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+            "source": "สมาคมค้าทองคำ / GoldTraders DailyPrices",
             "updated_at": now_text(),
             "raw_url": url,
             "is_estimate": False,
@@ -994,7 +871,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+                "source": "สมาคมค้าทองคำ / GoldTraders Homepage",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -1014,7 +891,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+                "source": "สมาคมค้าทองคำ / GoldTraders GTA BidAsk",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -1288,10 +1165,6 @@ def mtf_alignment(asset):
 
 
 def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
-    """V22.5 strict market-realistic scoring.
-    Goal: avoid 95-100 scores too easily, penalize range/overbought/no-volume setups,
-    and make probability conservative because this bot does not have real option-chain delta/IV/OI.
-    """
     price = safe_float(quote.get("close"))
     previous_close = safe_float(quote.get("previous_close"))
     change = safe_float(quote.get("change"))
@@ -1310,174 +1183,69 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     momentum_score = 0
     volume_score = 0
     volatility_score = 0
-    regime_score = 0
-    risk_penalty = 0
+
     reasons = []
 
-    # Trend: require clean EMA stack. Give less credit than older versions.
-    if price and ema6 and ema12 and ema50:
-        if price > ema6 > ema12 > ema50:
+    if price and ema6 and ema12:
+        if price > ema6 > ema12:
             trend_score += 22
-            reasons.append("ราคาอยู่เหนือ EMA6/EMA12/EMA50 แบบเรียงตัวขาขึ้น")
-        elif price > ema6 > ema12:
-            trend_score += 14
             reasons.append("ราคาอยู่เหนือ EMA6 และ EMA12")
-        elif price < ema6 < ema12 < ema50:
-            trend_score -= 22
-            reasons.append("ราคาอยู่ใต้ EMA6/EMA12/EMA50 แบบเรียงตัวขาลง")
         elif price < ema6 < ema12:
-            trend_score -= 14
+            trend_score -= 22
             reasons.append("ราคาอยู่ใต้ EMA6 และ EMA12")
 
-    # Medium trend confirmation.
     if ema12 and ema50:
         if ema12 > ema50:
-            trend_score += 8
+            trend_score += 14
             reasons.append("แนวโน้มกลางยังเป็นบวก")
         elif ema12 < ema50:
-            trend_score -= 8
+            trend_score -= 14
             reasons.append("แนวโน้มกลางยังเป็นลบ")
 
-    # Price slope from recent closes.
-    if closes and len(closes) >= 8 and closes[-8]:
-        recent_slope_pct = (closes[-1] - closes[-8]) / closes[-8] * 100
-        if recent_slope_pct >= 1.0:
-            momentum_score += 6
-            reasons.append("Slope ระยะสั้นเป็นบวก")
-        elif recent_slope_pct <= -1.0:
-            momentum_score -= 6
-            reasons.append("Slope ระยะสั้นเป็นลบ")
-
-    # RSI: strict. Near 70 is not a reason to increase score; it is a chasing-risk zone.
     if rsi is not None:
-        if 52 <= rsi <= 63:
-            momentum_score += 12
-            reasons.append("RSI อยู่ในโซนโมเมนตัมขาขึ้นที่ยังไม่ร้อนเกินไป")
-        elif 63 < rsi <= 68:
-            momentum_score += 5
-            risk_penalty += 2
-            reasons.append("RSI แข็งแรง แต่เริ่มเข้าโซนไล่ราคา")
-        elif 68 < rsi <= 72:
-            momentum_score += 1
-            risk_penalty += 8
-            reasons.append("RSI ใกล้ Overbought ลดความมั่นใจของสัญญาณ")
-        elif rsi > 72:
-            momentum_score -= 8
-            risk_penalty += 14
-            reasons.append("RSI สูงมาก ระวังพักตัว/โดนขายทำกำไร")
-        elif 38 <= rsi < 48:
-            momentum_score -= 6
-            reasons.append("RSI ต่ำกว่าโซนแข็งแรง")
-        elif rsi < 35:
+        if 50 <= rsi <= 65:
+            momentum_score += 14
+            reasons.append("RSI อยู่ในโซนโมเมนตัมขาขึ้น")
+        elif rsi >= 72:
             momentum_score -= 10
-            risk_penalty += 4
-            reasons.append("RSI อ่อนแรง ยังไม่ควรรีบสวน")
-
-    # Intraday momentum, but cap enthusiasm.
-    if percent_change is not None:
-        if 0.4 <= percent_change <= 2.0:
+            reasons.append("RSI สูง ระวังพักตัว")
+        elif rsi <= 30:
             momentum_score += 6
-            reasons.append("โมเมนตัมล่าสุดเป็นบวก")
-        elif percent_change > 2.0:
-            momentum_score += 3
-            risk_penalty += 6
-            reasons.append("ราคาขึ้นแรงแล้ว ระวังไล่ราคา")
-        elif -2.0 <= percent_change <= -0.4:
-            momentum_score -= 6
-            reasons.append("โมเมนตัมล่าสุดเป็นลบ")
-        elif percent_change < -2.0:
+            reasons.append("RSI ต่ำ มีโอกาสรีบาวด์")
+        elif rsi < 45:
             momentum_score -= 8
-            risk_penalty += 6
-            reasons.append("ราคาลงแรง ความเสี่ยงผันผวนสูง")
+            reasons.append("RSI ต่ำกว่าโซนแข็งแรง")
 
-    # Volume confirmation. No volume = no high score.
+    if percent_change is not None:
+        if percent_change > 1:
+            momentum_score += 9
+            reasons.append("โมเมนตัมล่าสุดเป็นบวก")
+        elif percent_change < -1:
+            momentum_score -= 9
+            reasons.append("โมเมนตัมล่าสุดเป็นลบ")
+
     if rvol is not None:
-        if rvol >= 2.0 and percent_change and percent_change > 0:
-            volume_score += 14
-            reasons.append("RVOL สูงมากและหนุนฝั่งซื้อ")
-        elif rvol >= 1.3 and percent_change and percent_change > 0:
-            volume_score += 8
+        if rvol >= 1.5 and percent_change and percent_change > 0:
+            volume_score += 10
             reasons.append("Volume หนุนขาขึ้น")
-        elif rvol >= 2.0 and percent_change and percent_change < 0:
-            volume_score -= 14
-            reasons.append("RVOL สูงมากและหนุนแรงขาย")
-        elif rvol >= 1.3 and percent_change and percent_change < 0:
-            volume_score -= 8
+        elif rvol >= 1.5 and percent_change and percent_change < 0:
+            volume_score -= 10
             reasons.append("Volume หนุนแรงขาย")
-        elif rvol < 0.8:
-            volume_score -= 8
-            reasons.append("Volume เบา สัญญาณไม่น่าเชื่อถือพอ")
 
-    # Market regime gate.
-    regime_text = str(regime or "").upper()
-    if "STRONG UPTREND" in regime_text:
-        regime_score += 12
-        reasons.append("Market Regime เป็น Strong Uptrend")
-    elif "UPTREND" in regime_text:
-        regime_score += 7
-        reasons.append("Market Regime เป็น Uptrend")
-    elif "STRONG DOWNTREND" in regime_text:
-        regime_score -= 12
-        reasons.append("Market Regime เป็น Strong Downtrend")
-    elif "DOWNTREND" in regime_text:
-        regime_score -= 7
-        reasons.append("Market Regime เป็น Downtrend")
-    elif "RANGE" in regime_text:
-        regime_score -= 7
-        reasons.append("ตลาดเป็น Range/Low Vol ลดความมั่นใจของ Breakout")
-
-    # Volatility quality.
     if atr and price:
         atr_pct = atr / price * 100
-        if 0.6 <= atr_pct <= 2.8:
-            volatility_score += 4
-        elif atr_pct < 0.35:
-            volatility_score -= 5
-            reasons.append("ATR ต่ำมาก ระยะทำกำไรอาจแคบ")
-        elif atr_pct > 4.0:
-            volatility_score -= 10
-            risk_penalty += 6
-            reasons.append("ความผันผวนสูง ต้องลดขนาดไม้")
+        if 0.8 <= atr_pct <= 3.5:
+            volatility_score += 5
+        elif atr_pct > 5:
+            volatility_score -= 8
+            reasons.append("ความผันผวนสูง คุมขนาดไม้")
 
-    # Multi-timeframe confirmation.
-    bulls = sum(1 for _, st in (mtf_states or []) if st == "BULLISH")
-    bears = sum(1 for _, st in (mtf_states or []) if st == "BEARISH")
-    total_tf = len(mtf_states or [])
-    if total_tf:
-        if bulls == total_tf:
-            trend_score += 8
-            reasons.append("Multi Timeframe ยืนยัน Bullish")
-        elif bears == total_tf:
-            trend_score -= 8
-            reasons.append("Multi Timeframe ยืนยัน Bearish")
-        elif bulls > bears:
-            trend_score += 3
-        elif bears > bulls:
-            trend_score -= 3
-        else:
-            risk_penalty += 4
-            reasons.append("Multi Timeframe ยังผสมกัน")
+    raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score
+    score = max(0, min(100, int(raw_score)))
 
-    raw_score = 50 + trend_score + momentum_score + volume_score + volatility_score + regime_score - risk_penalty
-    score = int(max(0, min(100, raw_score)))
-
-    # Hard caps to match real market behavior.
-    if "RANGE" in regime_text:
-        score = min(score, 88)
-    if rvol is not None and rvol < 1.0:
-        score = min(score, 82)
-    if rsi is not None and rsi > 68:
-        score = min(score, 90)
-    if rsi is not None and rsi > 72:
-        score = min(score, 82)
-    if total_tf and bulls != total_tf and bears != total_tf:
-        score = min(score, 86)
-    if "RANGE" in regime_text and rsi is not None and rsi > 68:
-        score = min(score, 84)
-
-    if score >= 82:
+    if score >= 75:
         bias = "BULLISH / ฝั่งซื้อได้เปรียบ"
-    elif score <= 28:
+    elif score <= 35:
         bias = "BEARISH / ฝั่งขายได้เปรียบ"
     else:
         bias = "NEUTRAL / รอดูจังหวะ"
@@ -1485,20 +1253,12 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     if price and atr:
         support = price - atr
         resistance = price + atr
-        stop_loss = price - atr * 1.25
-        take_profit = price + atr * 1.75
+        stop_loss = price - atr * 1.2
+        take_profit = price + atr * 1.8
     else:
         support = resistance = stop_loss = take_profit = None
 
-    # Conservative probability. Never claim extreme certainty from free data.
-    probability = 50 + int((score - 50) * 0.42)
-    probability = max(38, min(72, probability))
-    if "RANGE" in regime_text:
-        probability = min(probability, 68)
-    if rsi is not None and rsi > 68:
-        probability = min(probability, 66)
-    if rvol is not None and rvol < 1:
-        probability = min(probability, 62)
+    probability = max(40, min(78, 50 + int((score - 50) * 0.55)))
 
     return {
         "price": price, "previous_close": previous_close, "change": change, "percent_change": percent_change,
@@ -1506,124 +1266,19 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         "regime": regime, "alignment": alignment, "mtf_states": mtf_states,
         "score": score, "bias": bias, "probability": probability,
         "support": support, "resistance": resistance, "stop_loss": stop_loss, "take_profit": take_profit,
-        "reasons": reasons[:8],
+        "reasons": reasons,
         "component_scores": {
             "trend": trend_score,
             "momentum": momentum_score,
             "volume": volume_score,
             "volatility": volatility_score,
-            "regime": regime_score,
-            "risk_penalty": risk_penalty,
         },
     }
 
 
 
 # ============================================================
-# V22.7 PROFESSIONAL RISK / REPORT HELPERS
-# ============================================================
-def v22_risk_grade(analysis):
-    score = int(analysis.get("score") or 50)
-    rsi = safe_float(analysis.get("rsi"))
-    rvol = safe_float(analysis.get("rvol"))
-    regime = str(analysis.get("regime") or "").upper()
-    penalty = 0
-    if "RANGE" in regime or "LOW VOL" in regime:
-        penalty += 1
-    if rsi is not None and rsi >= 68:
-        penalty += 1
-    if rvol is not None and rvol < 1:
-        penalty += 1
-    adjusted = score - penalty * 5
-    if adjusted >= 88:
-        return "A"
-    if adjusted >= 80:
-        return "B+"
-    if adjusted >= 72:
-        return "B"
-    if adjusted >= 62:
-        return "C+"
-    if adjusted >= 50:
-        return "C"
-    return "D"
-
-
-def v22_setup_quality(analysis):
-    comps = analysis.get("component_scores", {}) or {}
-    trend = max(0, min(10, int((safe_float(comps.get("trend"), 0) + 25) / 5)))
-    momentum = max(0, min(10, int((safe_float(comps.get("momentum"), 0) + 15) / 3)))
-    volume = max(0, min(10, int((safe_float(comps.get("volume"), 0) + 15) / 3)))
-    regime_raw = str(analysis.get("regime") or "").upper()
-    if "STRONG" in regime_raw:
-        regime = 9
-    elif "UPTREND" in regime_raw or "DOWNTREND" in regime_raw:
-        regime = 7
-    elif "RANGE" in regime_raw:
-        regime = 5
-    else:
-        regime = 4
-    return {"trend": trend, "momentum": momentum, "volume": volume, "regime": regime}
-
-
-def v22_setup_quality_text(analysis):
-    q = v22_setup_quality(analysis)
-    return f"""🧪 Setup Quality V22
-Trend: {q['trend']}/10
-Momentum: {q['momentum']}/10
-Volume: {q['volume']}/10
-Regime: {q['regime']}/10
-Risk Grade: {v22_risk_grade(analysis)}"""
-
-
-def v22_news_sentiment_text(news_text):
-    text = str(news_text or "").lower()
-    pos_words = ["beat", "growth", "upgrade", "record", "strong", "surge", "กำไร", "เติบโต", "บวก"]
-    neg_words = ["miss", "downgrade", "lawsuit", "weak", "drop", "risk", "probe", "ขาดทุน", "ลบ", "สอบสวน"]
-    pos = sum(1 for w in pos_words if w in text)
-    neg = sum(1 for w in neg_words if w in text)
-    if pos > neg:
-        label = "Positive"
-        score = min(80, 55 + (pos-neg)*8)
-    elif neg > pos:
-        label = "Negative"
-        score = max(20, 45 - (neg-pos)*8)
-    else:
-        label = "Neutral / Insufficient"
-        score = 50
-    return f"News Sentiment V22: {label} ({score}/100)"
-
-
-def v22_cap_score_by_market_reality(analysis):
-    """Final market-realism guard for any legacy score output."""
-    score = int(analysis.get("score") or 50)
-    rsi = safe_float(analysis.get("rsi"))
-    rvol = safe_float(analysis.get("rvol"))
-    regime = str(analysis.get("regime") or "").upper()
-    alignment = str(analysis.get("alignment") or "").upper()
-    cap = 100
-    if "RANGE" in regime or "LOW VOL" in regime:
-        cap = min(cap, 84)
-    if "MIXED" in alignment:
-        cap = min(cap, 78)
-    if rsi is not None and rsi >= 68:
-        cap = min(cap, 84)
-    if rsi is not None and rsi >= 72:
-        cap = min(cap, 78)
-    if rvol is not None and rvol < 1:
-        cap = min(cap, 76)
-    analysis["score"] = min(score, cap)
-    probability = 50 + int((analysis["score"] - 50) * 0.42)
-    if "RANGE" in regime or "LOW VOL" in regime:
-        probability = min(probability, 63)
-    if rsi is not None and rsi >= 68:
-        probability = min(probability, 62)
-    analysis["probability"] = max(35, min(72, probability))
-    return analysis
-
-
-
-# ============================================================
-# V22 DIVIDEND + VALUATION ENGINE
+# DIVIDEND + VALUATION V7.1
 # ============================================================
 def fmt_date_from_timestamp(ts):
     try:
@@ -1731,48 +1386,17 @@ def human_market_cap(value, currency):
         return "N/A"
 
 
-def dividend_yield_pct_sane(price=None, dividend_yield=None, dividend_rate=None, last_dividend=None):
-    """Return dividend yield as percent, with unit/glitch protection.
-    APIs may return yield as 0.0047 (=0.47%), 0.47 (=47% or 0.47%), or 47 (=47%).
-    For growth stocks/ETFs, extreme values are usually provider/unit errors, so we fall back to annual dividend / price when possible.
-    """
-    price = safe_float(price)
-    raw = safe_float(dividend_yield)
-    rate = safe_float(dividend_rate)
-    last = safe_float(last_dividend)
-
-    candidates = []
-    if raw is not None:
-        # Common Yahoo format: 0.0047 = 0.47%.
-        if 0 <= raw <= 0.25:
-            candidates.append(raw * 100.0)
-        # Some sources already send percent, e.g. 0.47 or 1.20.
-        if 0 <= raw <= 25:
-            candidates.append(raw)
-        # Some sources send 47 for 47%, usually unrealistic for common equities.
-        if 0 <= raw <= 100:
-            candidates.append(raw)
-
-    if price and price > 0:
-        if rate and rate > 0:
-            candidates.append((rate / price) * 100.0)
-        if last and last > 0:
-            # Quarterly dividend fallback: annualize last dividend.
-            candidates.append((last * 4.0 / price) * 100.0)
-
-    # Keep plausible values. Above 15% is normally a data glitch for the instruments this bot scans.
-    plausible = [x for x in candidates if x is not None and 0 <= x <= 15]
-    if plausible:
-        # Prefer the smallest plausible value to avoid 0.47 becoming 47.00%.
-        return round(min(plausible), 4)
-    return None
-
-
-def dividend_yield_text(value, price=None, dividend_rate=None, last_dividend=None):
-    pct = dividend_yield_pct_sane(price, value, dividend_rate, last_dividend)
-    if pct is None:
+def dividend_yield_text(value):
+    if value is None:
         return "N/A"
-    return f"{pct:.2f}%"
+    try:
+        # Yahoo often returns 0.0285 for 2.85%.
+        val = float(value)
+        if val <= 1:
+            val *= 100
+        return f"{val:.2f}%"
+    except Exception:
+        return "N/A"
 
 
 def valuation_engine(asset, analysis, fundamentals):
@@ -1787,7 +1411,7 @@ def valuation_engine(asset, analysis, fundamentals):
     rsi = analysis.get("rsi")
     pe = fundamentals.get("trailing_pe")
     fwd_pe = fundamentals.get("forward_pe")
-    div_yield = dividend_yield_pct_sane(price, fundamentals.get("dividend_yield"), fundamentals.get("dividend_rate"), fundamentals.get("last_dividend"))
+    div_yield = fundamentals.get("dividend_yield")
     low52 = fundamentals.get("fifty_two_week_low")
     high52 = fundamentals.get("fifty_two_week_high")
 
@@ -1842,16 +1466,15 @@ def valuation_engine(asset, analysis, fundamentals):
         else:
             reasons.append("P/E อยู่ในโซนกลาง")
 
-    # Dividend yield rough filter with unit/glitch protection.
-    if div_yield is not None:
-        if div_yield >= 5:
+    # Dividend yield rough filter
+    if div_yield:
+        dy = div_yield * 100 if div_yield <= 1 else div_yield
+        if dy >= 5:
             score -= 1
             reasons.append("Dividend Yield สูง น่าสนใจสำหรับสายปันผล")
-        elif div_yield < 1:
+        elif dy < 1:
             score += 1
             reasons.append("Dividend Yield ต่ำ ไม่ได้ช่วยรองรับ valuation มากนัก")
-    else:
-        reasons.append("Dividend Yield ใช้ไม่ได้/ผิดหน่วย จึงตัดออกจากการประเมิน")
 
     if score <= -3:
         status = "ถูกน่าสนใจ"
@@ -1871,7 +1494,7 @@ def valuation_engine(asset, analysis, fundamentals):
 Market Cap: {human_market_cap(fundamentals.get('market_cap'), '฿' if asset['currency'] == 'THB' else '$')}
 P/E: {fmt_num(fundamentals.get('trailing_pe'))}
 Forward P/E: {fmt_num(fundamentals.get('forward_pe'))}
-Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'), price, fundamentals.get('dividend_rate'), fundamentals.get('last_dividend'))}
+Dividend Yield: {dividend_yield_text(fundamentals.get('dividend_yield'))}
 Dividend Rate: {fmt_num(fundamentals.get('dividend_rate'))}
 
 XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
@@ -1888,7 +1511,7 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
     return text, status
 
 # ============================================================
-# OPTIONS RISK ENGINE V22
+# OPTIONS HYBRID MAX FREE
 # ============================================================
 def options_hybrid_engine(asset, analysis):
     if asset["asset_type"] != "US_STOCK":
@@ -1899,55 +1522,31 @@ def options_hybrid_engine(asset, analysis):
     if not price or not atr:
         return ""
 
-    score = int(analysis["score"])
-    prob = int(analysis["probability"])
-    regime_text = str(analysis.get("regime", "")).upper()
-    rsi = safe_float(analysis.get("rsi"))
-    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
-    step = option_strike_step(price)
+    score = analysis["score"]
+    prob = analysis["probability"]
 
-    # Directional option strikes should not be ATM by accident. Use OTM strikes.
-    call_strike = math.ceil((price + max(atr * 0.35, step * 0.25)) / step) * step
-    if call_strike <= price:
-        call_strike += step
-    call_sell = call_strike + max(step * 2, 5.0 if price >= 100 else step * 2)
+    call_strike = round_strike(price + atr * 0.60)
+    call_sell = round_strike(price + atr * 1.70)
+    put_strike = round_strike(price - atr * 0.60)
+    put_sell = round_strike(price - atr * 1.70)
 
-    put_strike = math.floor((price - max(atr * 0.35, step * 0.25)) / step) * step
-    if put_strike >= price:
-        put_strike -= step
-    put_sell = put_strike - max(step * 2, 5.0 if price >= 100 else step * 2)
+    entry_low = price - atr * 0.25
+    entry_high = price + atr * 0.15
+    tp1 = price + atr * 0.90
+    tp2 = price + atr * 1.80
+    sl = price - atr * 0.90
 
-    call_strike, call_sell = ensure_option_spread(call_strike, call_sell, "CALL", price)
-    put_strike, put_sell = ensure_option_spread(put_strike, put_sell, "PUT", price)
+    put_entry_low = price - atr * 0.15
+    put_entry_high = price + atr * 0.25
+    put_tp1 = price - atr * 0.90
+    put_tp2 = price - atr * 1.80
+    put_sl = price + atr * 0.90
 
-    # Additional realism penalties for options without chain data.
-    if "RANGE" in regime_text or "LOW VOL" in regime_text:
-        prob = max(42, prob - 6)
-    if rvol < 1.2:
-        prob = max(40, prob - 4)
-    if rsi is not None and rsi > 68:
-        prob = max(42, prob - 4)
-
-    entry_low = price - atr * 0.30
-    entry_high = price + atr * 0.10
-    tp1 = price + atr * 0.85
-    tp2 = price + atr * 1.70
-    sl = price - atr * 1.00
-
-    put_entry_low = price - atr * 0.10
-    put_entry_high = price + atr * 0.30
-    put_tp1 = price - atr * 0.85
-    put_tp2 = price - atr * 1.70
-    put_sl = price + atr * 1.00
-
-    call_allowed = score >= 82 and not (rsi is not None and rsi > 72 and "STRONG UPTREND" not in regime_text)
-    put_allowed = score <= 28 and not (rsi is not None and rsi < 28 and "STRONG DOWNTREND" not in regime_text)
-
-    if call_allowed:
-        setup = f"""🧠 Options Risk Engine V22
-Setup: CALL / Bullish แบบเข้มงวด
+    if score >= 70:
+        setup = f"""🧠 Options Hybrid Max Free
+Setup: CALL / Bullish
 Strike แนะนำ: {fmt_num(call_strike, 2)}C
-Model Confidence: {prob}%
+Probability ประมาณ: {prob}%
 
 Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 TP1: {fmt_num(tp1)}
@@ -1959,12 +1558,12 @@ Bull Call Spread
 Buy {fmt_num(call_strike, 2)}C
 Sell {fmt_num(call_sell, 2)}C
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
-    elif put_allowed:
-        setup = f"""🧠 Options Risk Engine V22
-Setup: PUT / Bearish แบบเข้มงวด
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+    elif score <= 35:
+        setup = f"""🧠 Options Hybrid Max Free
+Setup: PUT / Bearish
 Strike แนะนำ: {fmt_num(put_strike, 2)}P
-Model Confidence: {prob}%
+Probability ประมาณ: {prob}%
 
 Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
 TP1: {fmt_num(put_tp1)}
@@ -1976,14 +1575,14 @@ Bear Put Spread
 Buy {fmt_num(put_strike, 2)}P
 Sell {fmt_num(put_sell, 2)}P
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
     else:
-        setup = f"""🧠 Options Risk Engine V22
+        setup = f"""🧠 Options Hybrid Max Free
 Setup: WAIT / Neutral
-Model Confidence: {prob}%
+Probability ประมาณ: {prob}%
 
 ยังไม่ควรรีบซื้อ CALL/PUT
-เงื่อนไขยังไม่ผ่านสูตรเข้มงวด เช่น Range, RSI สูง, Volume ไม่พอ หรือ MTF ไม่ยืนยัน
+รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
 
 Idea เฝ้าดู:
 CALL เหนือ {fmt_num(analysis['resistance'])}
@@ -2091,14 +1690,11 @@ XAUUSD
 แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-V22 Market Score: {analysis['score']}/100
-Model Confidence: {analysis['probability']}%
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
-Risk Grade: {v22_risk_grade(analysis)}
-
-{v22_setup_quality_text(analysis)}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -2123,16 +1719,14 @@ R3: {gold_level(r3)}
 
 📰 ข่าว/บริบท:
 {news_text}
-{v22_news_sentiment_text(news_text)}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ราคาทองไทยอ้างอิงสมาคมค้าทองคำแห่งประเทศไทย{note}"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
 
 
 def build_asset_report(user_text):
     asset = normalize_asset(user_text)
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-    analysis = v22_cap_score_by_market_reality(analysis)
     news_text, _ = fetch_news(asset)
     reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
@@ -2157,14 +1751,11 @@ def build_asset_report(user_text):
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
 
-V22 Market Score: {analysis['score']}/100
-Model Confidence: {analysis['probability']}%
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
-Risk Grade: {v22_risk_grade(analysis)}
-
-{v22_setup_quality_text(analysis)}
 
 Multi Timeframe:
 {mtf_lines}
@@ -2194,9 +1785,8 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 
 📰 ข่าว/บริบท:
 {news_text}
-{v22_news_sentiment_text(news_text)}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ใช้ข้อมูลฟรี + Risk Engine + Market Realism และประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
@@ -6643,498 +6233,204 @@ def v121_ranking_route():
 
 
 # ============================================================
-# V22.7 PROFESSIONAL API / HEALTH ROUTES
+# V22.10 STRICT SIGNAL ALERT PATCH — PRESERVE ORIGINAL MONOLITH
+# Added without removing original engines.
+# - /json health snapshot
+# - /scan/dry-run test strict scanner without LINE send
+# - /scan/send send only if strict gate passes
+# - background auto alert loop starts safely under both python main.py and gunicorn
 # ============================================================
-@app.route("/v22/status", methods=["GET"])
-def v22_status_route():
-    return jsonify({
-        "version": APP_VERSION,
-        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
-        "database_url_exists": bool(DATABASE_URL),
-        "psycopg2_loaded": psycopg2 is not None,
-        "line_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
-        "line_users": len(ALERT_USER_IDS),
-        "modules": [
-            "Scoring Engine V22.7",
-            "Risk Grade",
-            "Setup Quality",
-            "Option Risk Engine V22",
-            "Gold Association Engine",
-            "News Sentiment Proxy",
-            "PostgreSQL Adapter",
-            "Legacy V9-V12 Routes Preserved"
-        ],
-        "routes": ["/v22/status", "/v22/debug-db", "/v22/report/<symbol>", "/v22/risk/<symbol>", "/v22/gold"]
-    })
+_AUTO_ALERT_THREAD_STARTED = False
 
-
-@app.route("/v22/debug-db", methods=["GET"])
-def v22_debug_db_route():
-    out = {
-        "version": APP_VERSION,
-        "use_postgres": USE_POSTGRES,
-        "database_url_exists": bool(DATABASE_URL),
-        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
-        "db_path": DB_PATH,
-        "psycopg2_loaded": psycopg2 is not None,
-    }
-    try:
-        conn = db()
-        row = conn.execute("SELECT 1 AS ok").fetchone()
-        out["connection_ok"] = True
-        out["select_1"] = dict(row) if isinstance(row, dict) else {"ok": row["ok"] if row else None}
-        conn.close()
-    except Exception as e:
-        out["connection_ok"] = False
-        out["error"] = str(e)
-    return jsonify(out)
-
-
-@app.route("/v22/report/<symbol>", methods=["GET"])
-def v22_report_route(symbol):
-    try:
-        return Response(build_asset_report(symbol), mimetype="text/plain; charset=utf-8")
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/v22/gold", methods=["GET"])
-def v22_gold_route():
-    try:
-        return Response(build_asset_report("GOLD"), mimetype="text/plain; charset=utf-8")
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/v22/risk/<symbol>", methods=["GET"])
-def v22_risk_symbol_route(symbol):
-    try:
-        asset = normalize_asset(symbol)
-        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
-        analysis = v22_cap_score_by_market_reality(analyze_signal(asset, quote, closes, highs, lows, opens, volumes))
-        return jsonify({
-            "symbol": asset.get("display"),
-            "price": analysis.get("price"),
-            "score": analysis.get("score"),
-            "model_confidence": analysis.get("probability"),
-            "risk_grade": v22_risk_grade(analysis),
-            "setup_quality": v22_setup_quality(analysis),
-            "market_regime": analysis.get("regime"),
-            "alignment": analysis.get("alignment"),
-            "component_scores": analysis.get("component_scores"),
-            "reasons": analysis.get("reasons"),
-            "note": "V22.7 strict market-realism risk snapshot. Not investment advice."
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-
-# ============================================================
-# V22.8 STRICT ALERT QUOTA GUARD + US/GOLD GROUP SCANNER
-# Purpose:
-# - Use LINE free quota carefully.
-# - Disable Thai-stock auto alerts completely.
-# - Scan US market leaders by industry groups + gold.
-# - Send only very strong, fresh signals.
-# ============================================================
-APP_VERSION = "V22.9 Strict Options Universe US+Gold"
-
-# Override noisy defaults. Users may override with Railway variables if needed.
-DISABLE_THAI_AUTO_ALERTS = os.getenv("DISABLE_THAI_AUTO_ALERTS", "true").lower() == "true"
-ALERT_US_AND_GOLD_ONLY = os.getenv("ALERT_US_AND_GOLD_ONLY", "true").lower() == "true"
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
-ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "false").lower() == "true"
-
-# Strict alert thresholds. Designed for LINE Free 300 messages/month.
-STRICT_ALERT_SCORE_MIN = int(os.getenv("STRICT_ALERT_SCORE_MIN", "88"))
-STRICT_ALERT_SCORE_MAX = int(os.getenv("STRICT_ALERT_SCORE_MAX", "12"))
-STRICT_ALERT_CONFIDENCE_MIN = int(os.getenv("STRICT_ALERT_CONFIDENCE_MIN", "68"))
-STRICT_ALERT_RVOL_MIN = float(os.getenv("STRICT_ALERT_RVOL_MIN", "1.15"))
-STRICT_ALERT_TREND_MIN = int(os.getenv("STRICT_ALERT_TREND_MIN", "7"))
-STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES = int(os.getenv("STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES", "720"))
-STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES = int(os.getenv("STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES", "1440"))
-STRICT_ALERT_MAX_PER_SCAN_CYCLE = int(os.getenv("STRICT_ALERT_MAX_PER_SCAN_CYCLE", "1"))
-STRICT_ALERT_MAX_PER_GROUP = int(os.getenv("STRICT_ALERT_MAX_PER_GROUP", "1"))
-STRICT_ALERT_SKIP_RANGE_US = os.getenv("STRICT_ALERT_SKIP_RANGE_US", "true").lower() == "true"
-STRICT_ALERT_ALLOW_GOLD_RANGE = os.getenv("STRICT_ALERT_ALLOW_GOLD_RANGE", "false").lower() == "true"
-STRICT_ALERT_MIN_GOLD_SCORE = int(os.getenv("STRICT_ALERT_MIN_GOLD_SCORE", "82"))
-STRICT_ALERT_MIN_GOLD_CONFIDENCE = int(os.getenv("STRICT_ALERT_MIN_GOLD_CONFIDENCE", "60"))
-SCAN_GROUP_MODE = os.getenv("SCAN_GROUP_MODE", "group_rotation").lower()
-
-# Keep US groups focused on liquid/important names. These groups intentionally cover broad industries.
-V22_US_SCAN_GROUPS = {
-    # Main option-liquidity leaders. These are checked every rotation bucket with strict gates.
-    "OPTIONS_CORE_LEADERS": [
-        "SPY", "QQQ", "NVDA", "AAPL", "MSFT", "AMZN", "TSLA", "AMD", "GOOGL", "GOOG",
-        "META", "AVGO", "PLTR", "HOOD", "MRVL", "TSM", "INTC", "NOW"
-    ],
-
-    # AI, semiconductors, hardware, infrastructure.
-    "AI_SEMIS_HARDWARE": [
-        "NVDA", "AMD", "AVGO", "TSM", "ASML", "ARM", "MU", "MRVL", "QCOM", "INTC",
-        "SMCI", "AMAT", "LRCX", "KLAC", "AMKR", "WDC", "AXTI", "AAOI", "AEHR",
-        "CRDO", "NVTS", "MTRN", "LAES"
-    ],
-
-    # Software, cloud, data, cyber, AI platforms.
-    "AI_SOFTWARE_CLOUD_CYBER": [
-        "MSFT", "GOOGL", "GOOG", "META", "PLTR", "SNOW", "CRM", "NOW", "ADBE",
-        "CRWD", "PANW", "NET", "DDOG", "ZS", "CRWV", "NBIS", "ZETA", "IBM", "INFQ"
-    ],
-
-    # Energy, power, nuclear, uranium.
-    "ENERGY_POWER_URANIUM": [
-        "XOM", "CVX", "OXY", "COP", "SLB", "VLO", "CEG", "VST", "OKLO", "SMR",
-        "CCJ", "URA", "NEE", "SO", "LEU", "UUUU", "UEC", "DNN", "NXE"
-    ],
-
-    # Financials, brokers, payments, crypto proxy.
-    "FINANCIALS_PAYMENTS_CRYPTO": [
-        "JPM", "BAC", "GS", "MS", "WFC", "BLK", "AXP", "V", "MA", "HOOD",
-        "COIN", "MSTR", "CIFR", "IREN"
-    ],
-
-    # Healthcare / biotech / medtech.
-    "HEALTHCARE_BIOTECH": [
-        "LLY", "NVO", "UNH", "JNJ", "MRK", "ABBV", "AMGN", "GILD", "REGN", "VRTX", "ISRG", "BSX"
-    ],
-
-    # Consumer leaders / retail.
-    "CONSUMER_RETAIL": [
-        "COST", "WMT", "HD", "LOW", "MCD", "SBUX", "CMG", "NKE", "LULU", "TJX", "ELF", "CELH"
-    ],
-
-    # Industrial, defense, aerospace, space, drones.
-    "INDUSTRIAL_DEFENSE_SPACE": [
-        "GE", "GEV", "CAT", "DE", "ETN", "HON", "BA", "LMT", "RTX", "NOC",
-        "AXON", "RKLB", "ASTS", "KTOS", "AVAV", "BKSY", "PL", "UMAC"
-    ],
-
-    # High-beta momentum names from user's watchlist.
-    "USER_HIGH_BETA_MOMENTUM": [
-        "HOOD", "MTRN", "LAES", "CRDO", "MRVL", "ZETA", "NOW", "PLTR", "NVTS",
-        "CRWV", "CIFR", "NBIS", "AMKR", "INTC", "AEHR", "LEU", "UUUU",
-        "UMAC", "KTOS", "AVAV", "INFQ", "BKSY", "PL", "ASTS", "IBM", "CEG",
-        "VST", "TSM", "DXYZ", "AAOI", "RKLB", "TJX", "ONDS", "IREN", "EOSE",
-        "PLUG", "QBTS", "WDC", "AXTI", "OKLO"
-    ],
-
-    # Quantum / advanced computing.
-    "QUANTUM_ADVANCED_COMPUTING": ["IONQ", "RGTI", "QBTS", "QUBT", "IBM", "GOOGL", "MSFT"],
-
-    # ETF / index confirmation and option proxies.
-    "ETF_CONFIRM": [
-        "SPY", "QQQ", "IWM", "DIA", "SMH", "XLK", "XLE", "XLF", "XLV", "XLI",
-        "XLU", "TQQQ", "SQQQ", "SOXL", "SOXS", "GLD", "GDX"
-    ],
-}
-V22_GOLD_SCAN_GROUPS = {"GOLD": ["GOLD"]}
-
-# Make manual scan/watchlist endpoints reflect the new US+Gold focus; manual Thai analysis still works when user asks directly.
-US_WATCHLIST = env_list("US_WATCHLIST", ",".join(dedupe_keep_order(sum(V22_US_SCAN_GROUPS.values(), []))))
-TH_WATCHLIST = env_list("TH_WATCHLIST", "")
-TIER_C_WATCHLIST = env_list("TIER_C_WATCHLIST", "")
-GOLD_WATCHLIST = env_list("GOLD_WATCHLIST", "GOLD")
-try:
-    US_SYMBOLS.update(set(US_WATCHLIST))
-except Exception:
-    pass
-
-_V22_GROUP_CURSOR = 0
-
-def v22_alert_groups():
-    groups = []
-    for name, symbols in V22_US_SCAN_GROUPS.items():
-        groups.append((name, dedupe_keep_order(symbols)))
-    for name, symbols in V22_GOLD_SCAN_GROUPS.items():
-        groups.append((name, dedupe_keep_order(symbols)))
-    return groups
-
-
-def build_v8_scan_watchlist():
-    """V22.8 override: auto scanner universe is US market leaders + gold only.
-    Thai stock manual analysis remains available but auto alerts are blocked.
+def v2210_scan_once(send=False, limit=None):
+    """Scan one rotated V22 group. If send=False, never pushes LINE.
+    Returns a compact JSON-safe summary.
     """
-    out = []
-    for _, symbols in v22_alert_groups():
-        out.extend(symbols)
-    return dedupe_keep_order(out)
+    group_name, symbols = v22_next_scan_group() if "v22_next_scan_group" in globals() else ("WATCHLIST", build_v8_scan_watchlist())
+    limit = int(limit or len(symbols))
+    candidates = []
+    checked = 0
+    skipped = 0
+    errors = []
 
-
-def v22_next_scan_group():
-    global _V22_GROUP_CURSOR
-    groups = v22_alert_groups()
-    if not groups:
-        return "EMPTY", []
-    if SCAN_GROUP_MODE != "group_rotation":
-        return "ALL", build_v8_scan_watchlist()
-    name, symbols = groups[_V22_GROUP_CURSOR % len(groups)]
-    _V22_GROUP_CURSOR += 1
-    return name, symbols
-
-
-def v22_asset_allowed_for_auto_alert(asset):
-    atype = str(asset.get("asset_type", "")).upper()
-    if DISABLE_THAI_AUTO_ALERTS and atype == "THAI_STOCK":
-        return False, "Thai auto alerts disabled"
-    if ALERT_US_AND_GOLD_ONLY and atype not in {"US_STOCK", "GOLD"}:
-        return False, "Only US stocks and gold are allowed for auto alerts"
-    return True, "PASS"
-
-
-def v22_model_confidence(analysis, sig):
-    try:
-        # Prefer V22 model confidence/probability if available, then strict adjusted confidence.
-        if analysis.get("model_confidence") is not None:
-            return int(float(analysis.get("model_confidence")))
-        if analysis.get("probability") is not None:
-            return int(float(analysis.get("probability")))
-        if "adjusted_confidence" in globals():
-            return int(adjusted_confidence(analysis, sig))
-        return int(calculate_signal_confidence(analysis))
-    except Exception:
-        return 50
-
-
-def v22_setup_values(analysis, sig):
-    score = int(safe_float(analysis.get("score"), 50) or 50)
-    confidence = v22_model_confidence(analysis, sig)
-    trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else int(safe_float((analysis.get("setup_quality") or {}).get("trend"), 5) or 5)
-    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
-    rsi = safe_float(analysis.get("rsi"), 50) or 50
-    regime = str(analysis.get("regime", "")).upper()
-    bias = str(analysis.get("bias", "")).upper()
-    return score, confidence, trend, rvol, rsi, regime, bias
-
-
-def v22_strict_alert_gate(symbol, asset, analysis, sig):
-    allowed, reason = v22_asset_allowed_for_auto_alert(asset)
-    if not allowed:
-        return False, reason
-
-    atype = str(asset.get("asset_type", "")).upper()
-    score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
-
-    # Gold has a separate threshold because many feeds lack volume/RVOL.
-    if atype == "GOLD":
-        if sig in {"STRONG_CALL", "BUY"} and score < STRICT_ALERT_MIN_GOLD_SCORE:
-            return False, f"Gold score {score} < {STRICT_ALERT_MIN_GOLD_SCORE}"
-        if sig in {"STRONG_PUT", "SELL"} and score > (100 - STRICT_ALERT_MIN_GOLD_SCORE):
-            return False, f"Gold bearish score {score} not extreme enough"
-        if confidence < STRICT_ALERT_MIN_GOLD_CONFIDENCE:
-            return False, f"Gold confidence {confidence}% < {STRICT_ALERT_MIN_GOLD_CONFIDENCE}%"
-        if ("RANGE" in regime or "LOW VOL" in regime) and not STRICT_ALERT_ALLOW_GOLD_RANGE:
-            return False, "Gold range/low-vol blocked"
-    else:
-        if sig in {"STRONG_CALL", "BUY"} and score < STRICT_ALERT_SCORE_MIN:
-            return False, f"Score {score} < {STRICT_ALERT_SCORE_MIN}"
-        if sig in {"STRONG_PUT", "SELL"} and score > STRICT_ALERT_SCORE_MAX:
-            return False, f"Bearish score {score} > {STRICT_ALERT_SCORE_MAX}"
-        if confidence < STRICT_ALERT_CONFIDENCE_MIN:
-            return False, f"Confidence {confidence}% < {STRICT_ALERT_CONFIDENCE_MIN}%"
-        if trend < STRICT_ALERT_TREND_MIN:
-            return False, f"Trend {trend}/10 < {STRICT_ALERT_TREND_MIN}/10"
-        if rvol < STRICT_ALERT_RVOL_MIN:
-            return False, f"RVOL {rvol:.2f} < {STRICT_ALERT_RVOL_MIN:.2f}"
-        if STRICT_ALERT_SKIP_RANGE_US and ("RANGE" in regime or "LOW VOL" in regime):
-            return False, "US range/low-vol blocked"
-
-    # Do not fight the regime.
-    if sig in {"STRONG_CALL", "BUY"} and "DOWNTREND" in regime:
-        return False, "Long blocked in downtrend"
-    if sig in {"STRONG_PUT", "SELL"} and "UPTREND" in regime:
-        return False, "Short/put blocked in uptrend"
-
-    # RSI risk guard.
-    if sig in {"STRONG_CALL", "BUY"} and rsi >= 72:
-        return False, f"Long RSI too hot {rsi:.1f}"
-    if sig in {"STRONG_PUT", "SELL"} and rsi <= 28:
-        return False, f"Put RSI too stretched {rsi:.1f}"
-
-    # MTF confirmation if available.
-    if STRICT_REQUIRE_TF_CONFIRM:
+    for symbol in symbols[:limit]:
         try:
-            aligned, total = tf_confirm_counts(asset, analysis, sig)
-            if total >= 2 and aligned < total:
-                return False, f"TF Confirm {aligned}/{total}"
-        except Exception:
-            pass
+            if v8_skip_symbol(symbol):
+                skipped += 1
+                continue
 
-    return True, "PASS"
+            asset = normalize_asset(symbol)
+            allowed, allow_reason = v22_asset_allowed_for_auto_alert(asset) if "v22_asset_allowed_for_auto_alert" in globals() else (True, "PASS")
+            if not allowed:
+                skipped += 1
+                continue
 
+            if not should_scan_symbol_by_session(asset):
+                skipped += 1
+                continue
 
-def strict_signal_type_from_analysis(asset, analysis):
-    """V22.8 override: only return signal when truly strong."""
-    raw_sig = signal_type_from_analysis(asset, analysis)
-    if raw_sig == "NONE":
-        return "NONE", "No raw signal"
-    ok, reason = v22_strict_alert_gate(asset.get("symbol", ""), asset, analysis, raw_sig)
-    if not ok:
-        return "NONE", reason
-    return raw_sig, reason
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            analysis = v22_cap_score_by_market_reality(analysis) if "v22_cap_score_by_market_reality" in globals() else analysis
+            sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
 
+            checked += 1
 
-def v22_signature_key(symbol, sig, analysis):
-    score = int(safe_float(analysis.get("score"), 50) or 50)
-    regime = str(analysis.get("regime", "NA")).upper().replace(" ", "_")[:24]
-    bucket = int(score / 5) * 5
-    return f"V22SIG:{str(symbol).upper()}:{sig}:{regime}:{bucket}"
+            if sig == "NONE":
+                candidates.append({
+                    "symbol": symbol,
+                    "asset_type": asset.get("asset_type"),
+                    "status": "blocked",
+                    "reason": gate_reason,
+                    "score": analysis.get("score"),
+                    "confidence": analysis.get("probability"),
+                    "risk_grade": v22_risk_grade(analysis) if "v22_risk_grade" in globals() else None,
+                    "regime": analysis.get("regime"),
+                    "rvol": analysis.get("rvol"),
+                    "rsi": analysis.get("rsi"),
+                })
+                continue
 
+            ok_final, final_reason = should_send_alert_final(symbol, sig, analysis, asset)
+            item = {
+                "symbol": symbol,
+                "asset_type": asset.get("asset_type"),
+                "status": "pass" if ok_final else "blocked",
+                "signal": sig,
+                "reason": final_reason,
+                "score": analysis.get("score"),
+                "confidence": analysis.get("probability"),
+                "risk_grade": v22_risk_grade(analysis) if "v22_risk_grade" in globals() else None,
+                "regime": analysis.get("regime"),
+                "rvol": analysis.get("rvol"),
+                "rsi": analysis.get("rsi"),
+                "price": analysis.get("price"),
+            }
 
-def v22_cooldown_pass_minutes(key, minutes):
-    last = _cooldown_get(key)
-    return (time.time() - last) >= minutes * 60
+            if ok_final:
+                score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
+                rank = score + confidence + trend * 2 + min(float(rvol or 1), 3.0) * 4
+                item["rank"] = rank
+                item["_asset"] = asset
+                item["_analysis"] = analysis
+                candidates.append(item)
+            else:
+                candidates.append(item)
 
-
-def should_send_alert_final(symbol, sig, analysis, asset):
-    allowed, reason = v22_asset_allowed_for_auto_alert(asset)
-    if not allowed:
-        return False, reason
-
-    market_ok, market_reason = market_guard_check(symbol, asset)
-    if not market_ok:
-        return False, market_reason
-
-    # Symbol-level anti-spam: usually 12h. This protects LINE free quota.
-    if not v22_cooldown_pass_minutes(symbol_cooldown_key(symbol), STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES):
-        return False, f"Strict symbol cooldown {STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES}m"
-
-    # Signature-level anti-repeat: do not resend same signal/regime/score bucket for a day.
-    skey = v22_signature_key(symbol, sig, analysis)
-    if not v22_cooldown_pass_minutes(skey, STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES):
-        return False, f"Same signal signature cooldown {STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES}m"
-
-    ok, reason = v22_strict_alert_gate(symbol, asset, analysis, sig)
-    if not ok:
-        return False, reason
-
-    return True, "PASS"
-
-
-def mark_alert_sent_final(symbol, sig, analysis=None):
-    mark_symbol_cooldown(symbol)
-    if analysis is not None:
-        _cooldown_set(v22_signature_key(symbol, sig, analysis))
-    else:
-        _cooldown_set(f"V22SIG:{str(symbol).upper()}:{sig}")
-
-
-def auto_alert_loop():
-    """V22.8 group-rotation scanner.
-    Each cycle scans one industry group, ranks candidates, and sends only the best strict signal.
-    """
-    while True:
-        try:
-            # Optional daily/top5 messages are disabled by default in V22.8 to preserve quota.
-            maybe_send_premarket_and_top5()
-
-            if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-                group_name, symbols = v22_next_scan_group()
-                candidates = []
-
-                for symbol in symbols:
-                    try:
-                        if v8_skip_symbol(symbol):
-                            continue
-                        asset = normalize_asset(symbol)
-
-                        allowed, _ = v22_asset_allowed_for_auto_alert(asset)
-                        if not allowed:
-                            continue
-                        if not should_scan_symbol_by_session(asset):
-                            continue
-
-                        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
-                        analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-                        sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
-                        if sig == "NONE":
-                            continue
-
-                        ok_final, reason_final = should_send_alert_final(symbol, sig, analysis, asset)
-                        if not ok_final:
-                            continue
-
-                        score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
-                        rank = score + confidence + trend * 2 + min(rvol, 3.0) * 4
-                        if sig in {"STRONG_PUT", "SELL"}:
-                            rank = (100 - score) + confidence + trend * 2 + min(rvol, 3.0) * 4
-                        candidates.append((rank, symbol, asset, analysis, sig))
-                        time.sleep(1)
-                    except Exception as e:
-                        msg = str(e)
-                        if V8_SKIP_INVALID_SYMBOLS and ("possibly delisted" in msg.lower() or "no price data" in msg.lower()):
-                            if V8_LOG_SKIPPED_SYMBOLS:
-                                print(f"V22.9 skipped invalid/no-data symbol {symbol}: {e}")
-                        else:
-                            print(f"V22.9 group scan error for {symbol}: {e}")
-
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                sent = 0
-                for _, symbol, asset, analysis, sig in candidates[:STRICT_ALERT_MAX_PER_GROUP]:
-                    if sent >= STRICT_ALERT_MAX_PER_SCAN_CYCLE:
-                        break
-                    message = build_auto_signal_message(symbol, asset, analysis)
-                    if not message:
-                        continue
-                    prefix = f"🚨 V22.9 STRICT OPTIONS ALERT\nกลุ่มสแกน: {group_name}\nส่งเฉพาะสัญญาณเข้มจริง เพื่อลดการใช้โควตา LINE\n\n"
-                    for user_id in ALERT_USER_IDS:
-                        line_push(user_id, prefix + message)
-                    mark_alert_sent_final(symbol, sig, analysis)
-                    save_signal(
-                        asset["symbol"],
-                        asset["asset_type"],
-                        analysis.get("price"),
-                        analysis.get("score"),
-                        analysis.get("bias"),
-                        sig,
-                        analysis.get("regime"),
-                        analysis.get("probability"),
-                        message,
-                    )
-                    sent += 1
-
-                print(f"V22.9 scanned group={group_name}, symbols={len(symbols)}, candidates={len(candidates)}, sent={sent}")
-
-            time.sleep(max(60, SIGNAL_SCAN_SECONDS))
-
+            time.sleep(0.35)
         except Exception as e:
-            print(f"V22.9 auto alert loop error: {e}")
-            time.sleep(60)
+            errors.append({"symbol": symbol, "error": str(e)[:200]})
+            skipped += 1
 
+    pass_items = [x for x in candidates if x.get("status") == "pass"]
+    pass_items.sort(key=lambda x: x.get("rank", 0), reverse=True)
 
-@app.route("/v22/alert-policy", methods=["GET"])
-def v22_alert_policy():
-    return jsonify({
+    sent = 0
+    if send and ALERT_USER_IDS:
+        for item in pass_items[:STRICT_ALERT_MAX_PER_SCAN_CYCLE]:
+            asset = item.pop("_asset", None)
+            analysis = item.pop("_analysis", None)
+            sig = item.get("signal")
+            symbol = item.get("symbol")
+            if not asset or not analysis:
+                continue
+            msg = build_auto_signal_message(symbol, asset, analysis)
+            prefix = f"🚨 V22.10 STRICT SIGNAL ALERT\nกลุ่มสแกน: {group_name}\nส่งเฉพาะสัญญาณเข้มจริงเท่านั้น\n\n"
+            for user_id in ALERT_USER_IDS:
+                line_push(user_id, prefix + msg)
+            mark_alert_sent_final(symbol, sig, analysis)
+            save_signal(
+                asset.get("symbol"),
+                asset.get("asset_type"),
+                analysis.get("price"),
+                analysis.get("score"),
+                analysis.get("bias"),
+                sig,
+                analysis.get("regime"),
+                analysis.get("probability"),
+                msg,
+            )
+            sent += 1
+
+    # Remove private objects before JSON response.
+    for item in candidates:
+        item.pop("_asset", None)
+        item.pop("_analysis", None)
+
+    return {
         "ok": True,
         "version": APP_VERSION,
+        "mode": "send" if send else "dry-run",
+        "group": group_name,
+        "symbols_in_group": len(symbols),
+        "checked": checked,
+        "skipped": skipped,
+        "passed": len(pass_items),
+        "sent": sent,
+        "line_quota_safe": True,
         "thai_auto_alerts_disabled": DISABLE_THAI_AUTO_ALERTS,
         "alert_us_and_gold_only": ALERT_US_AND_GOLD_ONLY,
-        "scan_group_mode": SCAN_GROUP_MODE,
-        "groups": {name: symbols for name, symbols in v22_alert_groups()},
         "thresholds": {
-            "us_score_min": STRICT_ALERT_SCORE_MIN,
-            "us_score_max_for_put": STRICT_ALERT_SCORE_MAX,
-            "us_confidence_min": STRICT_ALERT_CONFIDENCE_MIN,
-            "us_rvol_min": STRICT_ALERT_RVOL_MIN,
+            "score_min": STRICT_ALERT_SCORE_MIN,
+            "confidence_min": STRICT_ALERT_CONFIDENCE_MIN,
+            "rvol_min": STRICT_ALERT_RVOL_MIN,
             "trend_min": STRICT_ALERT_TREND_MIN,
-            "gold_score_min": STRICT_ALERT_MIN_GOLD_SCORE,
-            "gold_confidence_min": STRICT_ALERT_MIN_GOLD_CONFIDENCE,
             "symbol_cooldown_minutes": STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES,
             "signature_cooldown_minutes": STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES,
-            "max_per_scan_cycle": STRICT_ALERT_MAX_PER_SCAN_CYCLE,
-            "max_per_group": STRICT_ALERT_MAX_PER_GROUP,
-            "premarket_reminder_enabled": ENABLE_PREMARKET_REMINDER,
-            "top5_daily_enabled": ENABLE_TOP5_DAILY,
         },
-        "line_quota_strategy": "Strict signals only; one industry group per scan cycle; no Thai stock auto alerts; no repeated same signature."
+        "top_pass_candidates": pass_items[:5],
+        "sample_blocked": [x for x in candidates if x.get("status") == "blocked"][:10],
+        "errors": errors[:10],
+    }
+
+@app.route("/json", methods=["GET"])
+def v2210_json_route():
+    return jsonify({
+        "ok": True,
+        "status": "running",
+        "version": APP_VERSION,
+        "time_th": now_text(),
+        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
+        "database_url_exists": bool(DATABASE_URL),
+        "line_ready": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "alert_users": len(ALERT_USER_IDS),
+        "auto_alerts_enabled": ENABLE_AUTO_ALERTS,
+        "thai_auto_alerts_disabled": DISABLE_THAI_AUTO_ALERTS,
+        "alert_us_and_gold_only": ALERT_US_AND_GOLD_ONLY,
+        "routes": ["/", "/health", "/json", "/v22/alert-policy", "/scan/dry-run", "/scan/send"]
     })
+
+@app.route("/scan/dry-run", methods=["GET"])
+def v2210_scan_dry_run_route():
+    limit = request.args.get("limit")
+    return jsonify(v2210_scan_once(send=False, limit=limit))
+
+@app.route("/scan/send", methods=["GET", "POST"])
+def v2210_scan_send_route():
+    if not require_admin():
+        return jsonify({"ok": False, "error": "ADMIN_TOKEN required"}), 403
+    limit = request.args.get("limit")
+    return jsonify(v2210_scan_once(send=True, limit=limit))
+
+def start_auto_alert_thread_once():
+    global _AUTO_ALERT_THREAD_STARTED
+    if _AUTO_ALERT_THREAD_STARTED:
+        return False
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        threading.Thread(target=auto_alert_loop, daemon=True).start()
+        _AUTO_ALERT_THREAD_STARTED = True
+        print("V22.10 auto alert thread started")
+        return True
+    return False
+
 
 init_db()
 v10_init_db()
 v11_init_db()
 
+# Start background alert loop on import too, so it works with Gunicorn/Railway web process.
+start_auto_alert_thread_once()
+
 if __name__ == "__main__":
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        threading.Thread(target=auto_alert_loop, daemon=True).start()
+    start_auto_alert_thread_once()
     app.run(host="0.0.0.0", port=PORT)
