@@ -6,6 +6,11 @@ import time
 import base64
 import hashlib
 import sqlite3
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception:
+    psycopg2 = None
 import threading
 from datetime import datetime, timedelta, timezone, timezone, timezone
 
@@ -17,7 +22,7 @@ from flask import Flask, request, abort, jsonify, Response
 app = Flask(__name__)
 
 # ============================================================
-# V7 HYBRID MAX FREE CONFIG
+# V22 PROFESSIONAL CONFIG
 # ============================================================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
@@ -27,6 +32,18 @@ ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 PORT = int(os.getenv("PORT", "3000"))
+APP_VERSION = "V22.7 Professional Refactor — Scoring/Risk/Report/Option/Gold/News"
+DATABASE_URL = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("DATABASE_PUBLIC_URL")
+    or os.getenv("POSTGRES_URL")
+    or ""
+).strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+USE_POSTGRES = bool(DATABASE_URL)
+DB_WRITE_LOCK = threading.RLock()
+
 
 WATCHLIST = [
     x.strip().upper()
@@ -189,9 +206,85 @@ def resolve_delisted_symbol(symbol):
 # ============================================================
 # DATABASE
 # ============================================================
+def _pg_translate_sql(sql):
+    """Translate the SQLite-style SQL used by the legacy monolith to PostgreSQL."""
+    if not USE_POSTGRES:
+        return sql
+    sql = str(sql)
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    sql = sql.replace("AUTOINCREMENT", "")
+    sql = sql.replace("?", "%s")
+    return sql
+
+
+class _PgCompatCursor:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def execute(self, sql, params=()):
+        self.cur.execute(_pg_translate_sql(sql), params or ())
+        return self
+
+    def fetchone(self):
+        return self.cur.fetchone()
+
+    def fetchall(self):
+        return self.cur.fetchall()
+
+    def __iter__(self):
+        return iter(self.cur)
+
+    def close(self):
+        try:
+            self.cur.close()
+        except Exception:
+            pass
+
+
+class _PgCompatConnection:
+    def __init__(self):
+        if psycopg2 is None:
+            raise RuntimeError("DATABASE_URL is set but psycopg2-binary is not installed")
+        self.conn = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=15,
+        )
+
+    def cursor(self):
+        return _PgCompatCursor(self.conn.cursor())
+
+    def execute(self, sql, params=()):
+        cur = self.cursor()
+        return cur.execute(sql, params)
+
+    def commit(self):
+        return self.conn.commit()
+
+    def rollback(self):
+        return self.conn.rollback()
+
+    def close(self):
+        return self.conn.close()
+
+
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    """V22.7 database adapter.
+    - Uses PostgreSQL automatically when DATABASE_URL exists.
+    - Falls back to SQLite for local/dev use.
+    - Keeps legacy code working by translating ? placeholders and AUTOINCREMENT.
+    """
+    if USE_POSTGRES:
+        return _PgCompatConnection()
+
+    conn = sqlite3.connect(DB_PATH, timeout=60, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
     return conn
 
 
@@ -528,7 +621,7 @@ def normalize_asset(user_text):
 
 
 # ============================================================
-# V7.8 MULTI-FREE API FALLBACK ENGINE
+# V22 MULTI-FREE API FALLBACK ENGINE
 # ============================================================
 def log_api_fallback(message):
     if API_FALLBACK_VERBOSE:
@@ -835,7 +928,7 @@ def get_goldtraders_price():
             "gold_spot": safe_float(m.group(8)),
             "usd_thb_ref": safe_float(m.group(9)),
             "change": safe_float(m.group(10), 0),
-            "source": "สมาคมค้าทองคำ / GoldTraders UpdatePriceList",
+            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
             "updated_at": f"{date_th} {time_th} ครั้งที่ {round_no}",
             "raw_url": url,
             "is_estimate": False,
@@ -867,7 +960,7 @@ def get_goldtraders_price():
             "gold_spot": None,
             "usd_thb_ref": None,
             "change": None,
-            "source": "สมาคมค้าทองคำ / GoldTraders DailyPrices",
+            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
             "updated_at": now_text(),
             "raw_url": url,
             "is_estimate": False,
@@ -897,7 +990,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำ / GoldTraders Homepage",
+                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -917,7 +1010,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำ / GoldTraders GTA BidAsk",
+                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -1423,7 +1516,110 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
 
 
 # ============================================================
-# DIVIDEND + VALUATION V7.1
+# V22.7 PROFESSIONAL RISK / REPORT HELPERS
+# ============================================================
+def v22_risk_grade(analysis):
+    score = int(analysis.get("score") or 50)
+    rsi = safe_float(analysis.get("rsi"))
+    rvol = safe_float(analysis.get("rvol"))
+    regime = str(analysis.get("regime") or "").upper()
+    penalty = 0
+    if "RANGE" in regime or "LOW VOL" in regime:
+        penalty += 1
+    if rsi is not None and rsi >= 68:
+        penalty += 1
+    if rvol is not None and rvol < 1:
+        penalty += 1
+    adjusted = score - penalty * 5
+    if adjusted >= 88:
+        return "A"
+    if adjusted >= 80:
+        return "B+"
+    if adjusted >= 72:
+        return "B"
+    if adjusted >= 62:
+        return "C+"
+    if adjusted >= 50:
+        return "C"
+    return "D"
+
+
+def v22_setup_quality(analysis):
+    comps = analysis.get("component_scores", {}) or {}
+    trend = max(0, min(10, int((safe_float(comps.get("trend"), 0) + 25) / 5)))
+    momentum = max(0, min(10, int((safe_float(comps.get("momentum"), 0) + 15) / 3)))
+    volume = max(0, min(10, int((safe_float(comps.get("volume"), 0) + 15) / 3)))
+    regime_raw = str(analysis.get("regime") or "").upper()
+    if "STRONG" in regime_raw:
+        regime = 9
+    elif "UPTREND" in regime_raw or "DOWNTREND" in regime_raw:
+        regime = 7
+    elif "RANGE" in regime_raw:
+        regime = 5
+    else:
+        regime = 4
+    return {"trend": trend, "momentum": momentum, "volume": volume, "regime": regime}
+
+
+def v22_setup_quality_text(analysis):
+    q = v22_setup_quality(analysis)
+    return f"""🧪 Setup Quality V22
+Trend: {q['trend']}/10
+Momentum: {q['momentum']}/10
+Volume: {q['volume']}/10
+Regime: {q['regime']}/10
+Risk Grade: {v22_risk_grade(analysis)}"""
+
+
+def v22_news_sentiment_text(news_text):
+    text = str(news_text or "").lower()
+    pos_words = ["beat", "growth", "upgrade", "record", "strong", "surge", "กำไร", "เติบโต", "บวก"]
+    neg_words = ["miss", "downgrade", "lawsuit", "weak", "drop", "risk", "probe", "ขาดทุน", "ลบ", "สอบสวน"]
+    pos = sum(1 for w in pos_words if w in text)
+    neg = sum(1 for w in neg_words if w in text)
+    if pos > neg:
+        label = "Positive"
+        score = min(80, 55 + (pos-neg)*8)
+    elif neg > pos:
+        label = "Negative"
+        score = max(20, 45 - (neg-pos)*8)
+    else:
+        label = "Neutral / Insufficient"
+        score = 50
+    return f"News Sentiment V22: {label} ({score}/100)"
+
+
+def v22_cap_score_by_market_reality(analysis):
+    """Final market-realism guard for any legacy score output."""
+    score = int(analysis.get("score") or 50)
+    rsi = safe_float(analysis.get("rsi"))
+    rvol = safe_float(analysis.get("rvol"))
+    regime = str(analysis.get("regime") or "").upper()
+    alignment = str(analysis.get("alignment") or "").upper()
+    cap = 100
+    if "RANGE" in regime or "LOW VOL" in regime:
+        cap = min(cap, 84)
+    if "MIXED" in alignment:
+        cap = min(cap, 78)
+    if rsi is not None and rsi >= 68:
+        cap = min(cap, 84)
+    if rsi is not None and rsi >= 72:
+        cap = min(cap, 78)
+    if rvol is not None and rvol < 1:
+        cap = min(cap, 76)
+    analysis["score"] = min(score, cap)
+    probability = 50 + int((analysis["score"] - 50) * 0.42)
+    if "RANGE" in regime or "LOW VOL" in regime:
+        probability = min(probability, 63)
+    if rsi is not None and rsi >= 68:
+        probability = min(probability, 62)
+    analysis["probability"] = max(35, min(72, probability))
+    return analysis
+
+
+
+# ============================================================
+# V22 DIVIDEND + VALUATION ENGINE
 # ============================================================
 def fmt_date_from_timestamp(ts):
     try:
@@ -1688,7 +1884,7 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
     return text, status
 
 # ============================================================
-# OPTIONS HYBRID MAX FREE
+# OPTIONS RISK ENGINE V22
 # ============================================================
 def options_hybrid_engine(asset, analysis):
     if asset["asset_type"] != "US_STOCK":
@@ -1744,10 +1940,10 @@ def options_hybrid_engine(asset, analysis):
     put_allowed = score <= 28 and not (rsi is not None and rsi < 28 and "STRONG DOWNTREND" not in regime_text)
 
     if call_allowed:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: CALL / Bullish แบบเข้มงวด
 Strike แนะนำ: {fmt_num(call_strike, 2)}C
-Probability ประมาณ: {prob}%
+Model Confidence: {prob}%
 
 Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 TP1: {fmt_num(tp1)}
@@ -1761,10 +1957,10 @@ Sell {fmt_num(call_sell, 2)}C
 
 ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
     elif put_allowed:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: PUT / Bearish แบบเข้มงวด
 Strike แนะนำ: {fmt_num(put_strike, 2)}P
-Probability ประมาณ: {prob}%
+Model Confidence: {prob}%
 
 Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
 TP1: {fmt_num(put_tp1)}
@@ -1778,9 +1974,9 @@ Sell {fmt_num(put_sell, 2)}P
 
 ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score แบบเข้มงวด"""
     else:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: WAIT / Neutral
-Probability ประมาณ: {prob}%
+Model Confidence: {prob}%
 
 ยังไม่ควรรีบซื้อ CALL/PUT
 เงื่อนไขยังไม่ผ่านสูตรเข้มงวด เช่น Range, RSI สูง, Volume ไม่พอ หรือ MTF ไม่ยืนยัน
@@ -1891,11 +2087,14 @@ XAUUSD
 แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-AI Score V3: {analysis['score']}/100
-Probability ประมาณ: {analysis['probability']}%
+V22 Market Score: {analysis['score']}/100
+Model Confidence: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
+Risk Grade: {v22_risk_grade(analysis)}
+
+{v22_setup_quality_text(analysis)}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -1920,14 +2119,16 @@ R3: {gold_level(r3)}
 
 📰 ข่าว/บริบท:
 {news_text}
+{v22_news_sentiment_text(news_text)}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ราคาทองไทยอ้างอิงสมาคมค้าทองคำแห่งประเทศไทย{note}"""
 
 
 def build_asset_report(user_text):
     asset = normalize_asset(user_text)
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    analysis = v22_cap_score_by_market_reality(analysis)
     news_text, _ = fetch_news(asset)
     reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
@@ -1952,11 +2153,14 @@ def build_asset_report(user_text):
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
 
-AI Score V3: {analysis['score']}/100
-Probability ประมาณ: {analysis['probability']}%
+V22 Market Score: {analysis['score']}/100
+Model Confidence: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
+Risk Grade: {v22_risk_grade(analysis)}
+
+{v22_setup_quality_text(analysis)}
 
 Multi Timeframe:
 {mtf_lines}
@@ -1986,8 +2190,9 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 
 📰 ข่าว/บริบท:
 {news_text}
+{v22_news_sentiment_text(news_text)}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ใช้ข้อมูลฟรี + Risk Engine + Market Realism และประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
@@ -6431,6 +6636,94 @@ def v121_liquidity_route(symbol):
 @app.route("/v12-1/ranking", methods=["GET"])
 def v121_ranking_route():
     return jsonify(v121_opportunity_ranking(request.args.get("limit")))
+
+
+# ============================================================
+# V22.7 PROFESSIONAL API / HEALTH ROUTES
+# ============================================================
+@app.route("/v22/status", methods=["GET"])
+def v22_status_route():
+    return jsonify({
+        "version": APP_VERSION,
+        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
+        "database_url_exists": bool(DATABASE_URL),
+        "psycopg2_loaded": psycopg2 is not None,
+        "line_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "line_users": len(ALERT_USER_IDS),
+        "modules": [
+            "Scoring Engine V22.7",
+            "Risk Grade",
+            "Setup Quality",
+            "Option Risk Engine V22",
+            "Gold Association Engine",
+            "News Sentiment Proxy",
+            "PostgreSQL Adapter",
+            "Legacy V9-V12 Routes Preserved"
+        ],
+        "routes": ["/v22/status", "/v22/debug-db", "/v22/report/<symbol>", "/v22/risk/<symbol>", "/v22/gold"]
+    })
+
+
+@app.route("/v22/debug-db", methods=["GET"])
+def v22_debug_db_route():
+    out = {
+        "version": APP_VERSION,
+        "use_postgres": USE_POSTGRES,
+        "database_url_exists": bool(DATABASE_URL),
+        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
+        "db_path": DB_PATH,
+        "psycopg2_loaded": psycopg2 is not None,
+    }
+    try:
+        conn = db()
+        row = conn.execute("SELECT 1 AS ok").fetchone()
+        out["connection_ok"] = True
+        out["select_1"] = dict(row) if isinstance(row, dict) else {"ok": row["ok"] if row else None}
+        conn.close()
+    except Exception as e:
+        out["connection_ok"] = False
+        out["error"] = str(e)
+    return jsonify(out)
+
+
+@app.route("/v22/report/<symbol>", methods=["GET"])
+def v22_report_route(symbol):
+    try:
+        return Response(build_asset_report(symbol), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/v22/gold", methods=["GET"])
+def v22_gold_route():
+    try:
+        return Response(build_asset_report("GOLD"), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/v22/risk/<symbol>", methods=["GET"])
+def v22_risk_symbol_route(symbol):
+    try:
+        asset = normalize_asset(symbol)
+        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+        analysis = v22_cap_score_by_market_reality(analyze_signal(asset, quote, closes, highs, lows, opens, volumes))
+        return jsonify({
+            "symbol": asset.get("display"),
+            "price": analysis.get("price"),
+            "score": analysis.get("score"),
+            "model_confidence": analysis.get("probability"),
+            "risk_grade": v22_risk_grade(analysis),
+            "setup_quality": v22_setup_quality(analysis),
+            "market_regime": analysis.get("regime"),
+            "alignment": analysis.get("alignment"),
+            "component_scores": analysis.get("component_scores"),
+            "reasons": analysis.get("reasons"),
+            "note": "V22.7 strict market-realism risk snapshot. Not investment advice."
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 init_db()
 v10_init_db()
