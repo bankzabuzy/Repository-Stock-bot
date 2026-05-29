@@ -64,7 +64,11 @@ DEFAULT_US_SYMBOLS = {
     "LULU", "COST", "JPM", "BAC", "XOM", "CVX", "UNH", "LLY", "WMT",
     "RKLB", "AAOI", "IREN", "ONDS", "PLUG", "EOSE", "QBTS", "HDC",
     "TJX", "CEG", "VST", "TSM", "DXYZ", "OKLO", "RGTI", "IONQ", "SOUN",
-    "HOOD", "RBLX", "SHOP", "CRWD", "SNOW", "NET", "DDOG", "U", "PATH"
+    "HOOD", "RBLX", "SHOP", "CRWD", "SNOW", "NET", "DDOG", "U", "PATH",
+    # V22.9 user options universe / high-beta scan list
+    "MTRN", "LAES", "ZETA", "NOW", "NVTS", "CRWV", "CIFR", "NBIS",
+    "AMKR", "AEHR", "LEU", "UUUU", "UMAC", "KTOS", "AVAV", "INFQ",
+    "BKSY", "PL", "ASTS", "DXYZ", "AXTI", "WDC", "MRVL", "GOOG"
 }
 
 EXTRA_US_SYMBOLS = set(env_list("EXTRA_US_SYMBOLS", ""))
@@ -6724,6 +6728,407 @@ def v22_risk_symbol_route(symbol):
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+
+# ============================================================
+# V22.8 STRICT ALERT QUOTA GUARD + US/GOLD GROUP SCANNER
+# Purpose:
+# - Use LINE free quota carefully.
+# - Disable Thai-stock auto alerts completely.
+# - Scan US market leaders by industry groups + gold.
+# - Send only very strong, fresh signals.
+# ============================================================
+APP_VERSION = "V22.9 Strict Options Universe US+Gold"
+
+# Override noisy defaults. Users may override with Railway variables if needed.
+DISABLE_THAI_AUTO_ALERTS = os.getenv("DISABLE_THAI_AUTO_ALERTS", "true").lower() == "true"
+ALERT_US_AND_GOLD_ONLY = os.getenv("ALERT_US_AND_GOLD_ONLY", "true").lower() == "true"
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
+ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "false").lower() == "true"
+
+# Strict alert thresholds. Designed for LINE Free 300 messages/month.
+STRICT_ALERT_SCORE_MIN = int(os.getenv("STRICT_ALERT_SCORE_MIN", "88"))
+STRICT_ALERT_SCORE_MAX = int(os.getenv("STRICT_ALERT_SCORE_MAX", "12"))
+STRICT_ALERT_CONFIDENCE_MIN = int(os.getenv("STRICT_ALERT_CONFIDENCE_MIN", "68"))
+STRICT_ALERT_RVOL_MIN = float(os.getenv("STRICT_ALERT_RVOL_MIN", "1.15"))
+STRICT_ALERT_TREND_MIN = int(os.getenv("STRICT_ALERT_TREND_MIN", "7"))
+STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES = int(os.getenv("STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES", "720"))
+STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES = int(os.getenv("STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES", "1440"))
+STRICT_ALERT_MAX_PER_SCAN_CYCLE = int(os.getenv("STRICT_ALERT_MAX_PER_SCAN_CYCLE", "1"))
+STRICT_ALERT_MAX_PER_GROUP = int(os.getenv("STRICT_ALERT_MAX_PER_GROUP", "1"))
+STRICT_ALERT_SKIP_RANGE_US = os.getenv("STRICT_ALERT_SKIP_RANGE_US", "true").lower() == "true"
+STRICT_ALERT_ALLOW_GOLD_RANGE = os.getenv("STRICT_ALERT_ALLOW_GOLD_RANGE", "false").lower() == "true"
+STRICT_ALERT_MIN_GOLD_SCORE = int(os.getenv("STRICT_ALERT_MIN_GOLD_SCORE", "82"))
+STRICT_ALERT_MIN_GOLD_CONFIDENCE = int(os.getenv("STRICT_ALERT_MIN_GOLD_CONFIDENCE", "60"))
+SCAN_GROUP_MODE = os.getenv("SCAN_GROUP_MODE", "group_rotation").lower()
+
+# Keep US groups focused on liquid/important names. These groups intentionally cover broad industries.
+V22_US_SCAN_GROUPS = {
+    # Main option-liquidity leaders. These are checked every rotation bucket with strict gates.
+    "OPTIONS_CORE_LEADERS": [
+        "SPY", "QQQ", "NVDA", "AAPL", "MSFT", "AMZN", "TSLA", "AMD", "GOOGL", "GOOG",
+        "META", "AVGO", "PLTR", "HOOD", "MRVL", "TSM", "INTC", "NOW"
+    ],
+
+    # AI, semiconductors, hardware, infrastructure.
+    "AI_SEMIS_HARDWARE": [
+        "NVDA", "AMD", "AVGO", "TSM", "ASML", "ARM", "MU", "MRVL", "QCOM", "INTC",
+        "SMCI", "AMAT", "LRCX", "KLAC", "AMKR", "WDC", "AXTI", "AAOI", "AEHR",
+        "CRDO", "NVTS", "MTRN", "LAES"
+    ],
+
+    # Software, cloud, data, cyber, AI platforms.
+    "AI_SOFTWARE_CLOUD_CYBER": [
+        "MSFT", "GOOGL", "GOOG", "META", "PLTR", "SNOW", "CRM", "NOW", "ADBE",
+        "CRWD", "PANW", "NET", "DDOG", "ZS", "CRWV", "NBIS", "ZETA", "IBM", "INFQ"
+    ],
+
+    # Energy, power, nuclear, uranium.
+    "ENERGY_POWER_URANIUM": [
+        "XOM", "CVX", "OXY", "COP", "SLB", "VLO", "CEG", "VST", "OKLO", "SMR",
+        "CCJ", "URA", "NEE", "SO", "LEU", "UUUU", "UEC", "DNN", "NXE"
+    ],
+
+    # Financials, brokers, payments, crypto proxy.
+    "FINANCIALS_PAYMENTS_CRYPTO": [
+        "JPM", "BAC", "GS", "MS", "WFC", "BLK", "AXP", "V", "MA", "HOOD",
+        "COIN", "MSTR", "CIFR", "IREN"
+    ],
+
+    # Healthcare / biotech / medtech.
+    "HEALTHCARE_BIOTECH": [
+        "LLY", "NVO", "UNH", "JNJ", "MRK", "ABBV", "AMGN", "GILD", "REGN", "VRTX", "ISRG", "BSX"
+    ],
+
+    # Consumer leaders / retail.
+    "CONSUMER_RETAIL": [
+        "COST", "WMT", "HD", "LOW", "MCD", "SBUX", "CMG", "NKE", "LULU", "TJX", "ELF", "CELH"
+    ],
+
+    # Industrial, defense, aerospace, space, drones.
+    "INDUSTRIAL_DEFENSE_SPACE": [
+        "GE", "GEV", "CAT", "DE", "ETN", "HON", "BA", "LMT", "RTX", "NOC",
+        "AXON", "RKLB", "ASTS", "KTOS", "AVAV", "BKSY", "PL", "UMAC"
+    ],
+
+    # High-beta momentum names from user's watchlist.
+    "USER_HIGH_BETA_MOMENTUM": [
+        "HOOD", "MTRN", "LAES", "CRDO", "MRVL", "ZETA", "NOW", "PLTR", "NVTS",
+        "CRWV", "CIFR", "NBIS", "AMKR", "INTC", "AEHR", "LEU", "UUUU",
+        "UMAC", "KTOS", "AVAV", "INFQ", "BKSY", "PL", "ASTS", "IBM", "CEG",
+        "VST", "TSM", "DXYZ", "AAOI", "RKLB", "TJX", "ONDS", "IREN", "EOSE",
+        "PLUG", "QBTS", "WDC", "AXTI", "OKLO"
+    ],
+
+    # Quantum / advanced computing.
+    "QUANTUM_ADVANCED_COMPUTING": ["IONQ", "RGTI", "QBTS", "QUBT", "IBM", "GOOGL", "MSFT"],
+
+    # ETF / index confirmation and option proxies.
+    "ETF_CONFIRM": [
+        "SPY", "QQQ", "IWM", "DIA", "SMH", "XLK", "XLE", "XLF", "XLV", "XLI",
+        "XLU", "TQQQ", "SQQQ", "SOXL", "SOXS", "GLD", "GDX"
+    ],
+}
+V22_GOLD_SCAN_GROUPS = {"GOLD": ["GOLD"]}
+
+# Make manual scan/watchlist endpoints reflect the new US+Gold focus; manual Thai analysis still works when user asks directly.
+US_WATCHLIST = env_list("US_WATCHLIST", ",".join(dedupe_keep_order(sum(V22_US_SCAN_GROUPS.values(), []))))
+TH_WATCHLIST = env_list("TH_WATCHLIST", "")
+TIER_C_WATCHLIST = env_list("TIER_C_WATCHLIST", "")
+GOLD_WATCHLIST = env_list("GOLD_WATCHLIST", "GOLD")
+try:
+    US_SYMBOLS.update(set(US_WATCHLIST))
+except Exception:
+    pass
+
+_V22_GROUP_CURSOR = 0
+
+def v22_alert_groups():
+    groups = []
+    for name, symbols in V22_US_SCAN_GROUPS.items():
+        groups.append((name, dedupe_keep_order(symbols)))
+    for name, symbols in V22_GOLD_SCAN_GROUPS.items():
+        groups.append((name, dedupe_keep_order(symbols)))
+    return groups
+
+
+def build_v8_scan_watchlist():
+    """V22.8 override: auto scanner universe is US market leaders + gold only.
+    Thai stock manual analysis remains available but auto alerts are blocked.
+    """
+    out = []
+    for _, symbols in v22_alert_groups():
+        out.extend(symbols)
+    return dedupe_keep_order(out)
+
+
+def v22_next_scan_group():
+    global _V22_GROUP_CURSOR
+    groups = v22_alert_groups()
+    if not groups:
+        return "EMPTY", []
+    if SCAN_GROUP_MODE != "group_rotation":
+        return "ALL", build_v8_scan_watchlist()
+    name, symbols = groups[_V22_GROUP_CURSOR % len(groups)]
+    _V22_GROUP_CURSOR += 1
+    return name, symbols
+
+
+def v22_asset_allowed_for_auto_alert(asset):
+    atype = str(asset.get("asset_type", "")).upper()
+    if DISABLE_THAI_AUTO_ALERTS and atype == "THAI_STOCK":
+        return False, "Thai auto alerts disabled"
+    if ALERT_US_AND_GOLD_ONLY and atype not in {"US_STOCK", "GOLD"}:
+        return False, "Only US stocks and gold are allowed for auto alerts"
+    return True, "PASS"
+
+
+def v22_model_confidence(analysis, sig):
+    try:
+        # Prefer V22 model confidence/probability if available, then strict adjusted confidence.
+        if analysis.get("model_confidence") is not None:
+            return int(float(analysis.get("model_confidence")))
+        if analysis.get("probability") is not None:
+            return int(float(analysis.get("probability")))
+        if "adjusted_confidence" in globals():
+            return int(adjusted_confidence(analysis, sig))
+        return int(calculate_signal_confidence(analysis))
+    except Exception:
+        return 50
+
+
+def v22_setup_values(analysis, sig):
+    score = int(safe_float(analysis.get("score"), 50) or 50)
+    confidence = v22_model_confidence(analysis, sig)
+    trend = trend_strength_score(analysis) if "trend_strength_score" in globals() else int(safe_float((analysis.get("setup_quality") or {}).get("trend"), 5) or 5)
+    rvol = safe_float(analysis.get("rvol"), 1.0) or 1.0
+    rsi = safe_float(analysis.get("rsi"), 50) or 50
+    regime = str(analysis.get("regime", "")).upper()
+    bias = str(analysis.get("bias", "")).upper()
+    return score, confidence, trend, rvol, rsi, regime, bias
+
+
+def v22_strict_alert_gate(symbol, asset, analysis, sig):
+    allowed, reason = v22_asset_allowed_for_auto_alert(asset)
+    if not allowed:
+        return False, reason
+
+    atype = str(asset.get("asset_type", "")).upper()
+    score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
+
+    # Gold has a separate threshold because many feeds lack volume/RVOL.
+    if atype == "GOLD":
+        if sig in {"STRONG_CALL", "BUY"} and score < STRICT_ALERT_MIN_GOLD_SCORE:
+            return False, f"Gold score {score} < {STRICT_ALERT_MIN_GOLD_SCORE}"
+        if sig in {"STRONG_PUT", "SELL"} and score > (100 - STRICT_ALERT_MIN_GOLD_SCORE):
+            return False, f"Gold bearish score {score} not extreme enough"
+        if confidence < STRICT_ALERT_MIN_GOLD_CONFIDENCE:
+            return False, f"Gold confidence {confidence}% < {STRICT_ALERT_MIN_GOLD_CONFIDENCE}%"
+        if ("RANGE" in regime or "LOW VOL" in regime) and not STRICT_ALERT_ALLOW_GOLD_RANGE:
+            return False, "Gold range/low-vol blocked"
+    else:
+        if sig in {"STRONG_CALL", "BUY"} and score < STRICT_ALERT_SCORE_MIN:
+            return False, f"Score {score} < {STRICT_ALERT_SCORE_MIN}"
+        if sig in {"STRONG_PUT", "SELL"} and score > STRICT_ALERT_SCORE_MAX:
+            return False, f"Bearish score {score} > {STRICT_ALERT_SCORE_MAX}"
+        if confidence < STRICT_ALERT_CONFIDENCE_MIN:
+            return False, f"Confidence {confidence}% < {STRICT_ALERT_CONFIDENCE_MIN}%"
+        if trend < STRICT_ALERT_TREND_MIN:
+            return False, f"Trend {trend}/10 < {STRICT_ALERT_TREND_MIN}/10"
+        if rvol < STRICT_ALERT_RVOL_MIN:
+            return False, f"RVOL {rvol:.2f} < {STRICT_ALERT_RVOL_MIN:.2f}"
+        if STRICT_ALERT_SKIP_RANGE_US and ("RANGE" in regime or "LOW VOL" in regime):
+            return False, "US range/low-vol blocked"
+
+    # Do not fight the regime.
+    if sig in {"STRONG_CALL", "BUY"} and "DOWNTREND" in regime:
+        return False, "Long blocked in downtrend"
+    if sig in {"STRONG_PUT", "SELL"} and "UPTREND" in regime:
+        return False, "Short/put blocked in uptrend"
+
+    # RSI risk guard.
+    if sig in {"STRONG_CALL", "BUY"} and rsi >= 72:
+        return False, f"Long RSI too hot {rsi:.1f}"
+    if sig in {"STRONG_PUT", "SELL"} and rsi <= 28:
+        return False, f"Put RSI too stretched {rsi:.1f}"
+
+    # MTF confirmation if available.
+    if STRICT_REQUIRE_TF_CONFIRM:
+        try:
+            aligned, total = tf_confirm_counts(asset, analysis, sig)
+            if total >= 2 and aligned < total:
+                return False, f"TF Confirm {aligned}/{total}"
+        except Exception:
+            pass
+
+    return True, "PASS"
+
+
+def strict_signal_type_from_analysis(asset, analysis):
+    """V22.8 override: only return signal when truly strong."""
+    raw_sig = signal_type_from_analysis(asset, analysis)
+    if raw_sig == "NONE":
+        return "NONE", "No raw signal"
+    ok, reason = v22_strict_alert_gate(asset.get("symbol", ""), asset, analysis, raw_sig)
+    if not ok:
+        return "NONE", reason
+    return raw_sig, reason
+
+
+def v22_signature_key(symbol, sig, analysis):
+    score = int(safe_float(analysis.get("score"), 50) or 50)
+    regime = str(analysis.get("regime", "NA")).upper().replace(" ", "_")[:24]
+    bucket = int(score / 5) * 5
+    return f"V22SIG:{str(symbol).upper()}:{sig}:{regime}:{bucket}"
+
+
+def v22_cooldown_pass_minutes(key, minutes):
+    last = _cooldown_get(key)
+    return (time.time() - last) >= minutes * 60
+
+
+def should_send_alert_final(symbol, sig, analysis, asset):
+    allowed, reason = v22_asset_allowed_for_auto_alert(asset)
+    if not allowed:
+        return False, reason
+
+    market_ok, market_reason = market_guard_check(symbol, asset)
+    if not market_ok:
+        return False, market_reason
+
+    # Symbol-level anti-spam: usually 12h. This protects LINE free quota.
+    if not v22_cooldown_pass_minutes(symbol_cooldown_key(symbol), STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES):
+        return False, f"Strict symbol cooldown {STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES}m"
+
+    # Signature-level anti-repeat: do not resend same signal/regime/score bucket for a day.
+    skey = v22_signature_key(symbol, sig, analysis)
+    if not v22_cooldown_pass_minutes(skey, STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES):
+        return False, f"Same signal signature cooldown {STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES}m"
+
+    ok, reason = v22_strict_alert_gate(symbol, asset, analysis, sig)
+    if not ok:
+        return False, reason
+
+    return True, "PASS"
+
+
+def mark_alert_sent_final(symbol, sig, analysis=None):
+    mark_symbol_cooldown(symbol)
+    if analysis is not None:
+        _cooldown_set(v22_signature_key(symbol, sig, analysis))
+    else:
+        _cooldown_set(f"V22SIG:{str(symbol).upper()}:{sig}")
+
+
+def auto_alert_loop():
+    """V22.8 group-rotation scanner.
+    Each cycle scans one industry group, ranks candidates, and sends only the best strict signal.
+    """
+    while True:
+        try:
+            # Optional daily/top5 messages are disabled by default in V22.8 to preserve quota.
+            maybe_send_premarket_and_top5()
+
+            if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+                group_name, symbols = v22_next_scan_group()
+                candidates = []
+
+                for symbol in symbols:
+                    try:
+                        if v8_skip_symbol(symbol):
+                            continue
+                        asset = normalize_asset(symbol)
+
+                        allowed, _ = v22_asset_allowed_for_auto_alert(asset)
+                        if not allowed:
+                            continue
+                        if not should_scan_symbol_by_session(asset):
+                            continue
+
+                        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+                        analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+                        sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
+                        if sig == "NONE":
+                            continue
+
+                        ok_final, reason_final = should_send_alert_final(symbol, sig, analysis, asset)
+                        if not ok_final:
+                            continue
+
+                        score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
+                        rank = score + confidence + trend * 2 + min(rvol, 3.0) * 4
+                        if sig in {"STRONG_PUT", "SELL"}:
+                            rank = (100 - score) + confidence + trend * 2 + min(rvol, 3.0) * 4
+                        candidates.append((rank, symbol, asset, analysis, sig))
+                        time.sleep(1)
+                    except Exception as e:
+                        msg = str(e)
+                        if V8_SKIP_INVALID_SYMBOLS and ("possibly delisted" in msg.lower() or "no price data" in msg.lower()):
+                            if V8_LOG_SKIPPED_SYMBOLS:
+                                print(f"V22.9 skipped invalid/no-data symbol {symbol}: {e}")
+                        else:
+                            print(f"V22.9 group scan error for {symbol}: {e}")
+
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                sent = 0
+                for _, symbol, asset, analysis, sig in candidates[:STRICT_ALERT_MAX_PER_GROUP]:
+                    if sent >= STRICT_ALERT_MAX_PER_SCAN_CYCLE:
+                        break
+                    message = build_auto_signal_message(symbol, asset, analysis)
+                    if not message:
+                        continue
+                    prefix = f"🚨 V22.9 STRICT OPTIONS ALERT\nกลุ่มสแกน: {group_name}\nส่งเฉพาะสัญญาณเข้มจริง เพื่อลดการใช้โควตา LINE\n\n"
+                    for user_id in ALERT_USER_IDS:
+                        line_push(user_id, prefix + message)
+                    mark_alert_sent_final(symbol, sig, analysis)
+                    save_signal(
+                        asset["symbol"],
+                        asset["asset_type"],
+                        analysis.get("price"),
+                        analysis.get("score"),
+                        analysis.get("bias"),
+                        sig,
+                        analysis.get("regime"),
+                        analysis.get("probability"),
+                        message,
+                    )
+                    sent += 1
+
+                print(f"V22.9 scanned group={group_name}, symbols={len(symbols)}, candidates={len(candidates)}, sent={sent}")
+
+            time.sleep(max(60, SIGNAL_SCAN_SECONDS))
+
+        except Exception as e:
+            print(f"V22.9 auto alert loop error: {e}")
+            time.sleep(60)
+
+
+@app.route("/v22/alert-policy", methods=["GET"])
+def v22_alert_policy():
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "thai_auto_alerts_disabled": DISABLE_THAI_AUTO_ALERTS,
+        "alert_us_and_gold_only": ALERT_US_AND_GOLD_ONLY,
+        "scan_group_mode": SCAN_GROUP_MODE,
+        "groups": {name: symbols for name, symbols in v22_alert_groups()},
+        "thresholds": {
+            "us_score_min": STRICT_ALERT_SCORE_MIN,
+            "us_score_max_for_put": STRICT_ALERT_SCORE_MAX,
+            "us_confidence_min": STRICT_ALERT_CONFIDENCE_MIN,
+            "us_rvol_min": STRICT_ALERT_RVOL_MIN,
+            "trend_min": STRICT_ALERT_TREND_MIN,
+            "gold_score_min": STRICT_ALERT_MIN_GOLD_SCORE,
+            "gold_confidence_min": STRICT_ALERT_MIN_GOLD_CONFIDENCE,
+            "symbol_cooldown_minutes": STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES,
+            "signature_cooldown_minutes": STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES,
+            "max_per_scan_cycle": STRICT_ALERT_MAX_PER_SCAN_CYCLE,
+            "max_per_group": STRICT_ALERT_MAX_PER_GROUP,
+            "premarket_reminder_enabled": ENABLE_PREMARKET_REMINDER,
+            "top5_daily_enabled": ENABLE_TOP5_DAILY,
+        },
+        "line_quota_strategy": "Strict signals only; one industry group per scan cycle; no Thai stock auto alerts; no repeated same signature."
+    })
 
 init_db()
 v10_init_db()
