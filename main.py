@@ -96,8 +96,8 @@ STRICT_REQUIRE_4H_CONFIRM = os.getenv("STRICT_REQUIRE_4H_CONFIRM", "true").lower
 MIN_POSITION_RISK_LEVEL = os.getenv("MIN_POSITION_RISK_LEVEL", "MEDIUM").upper()
 
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
-AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
-AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
+AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "88"))
+AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "12"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
@@ -109,13 +109,13 @@ STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
-STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
-STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
-STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "0.85"))
+STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "78"))
+STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "7"))
+STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "1.20"))
 STRICT_REQUIRE_TF_CONFIRM = os.getenv("STRICT_REQUIRE_TF_CONFIRM", "true").lower() == "true"
 STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() == "true"
-STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
-STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
+STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "90"))
+STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "10"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
@@ -809,7 +809,7 @@ def get_goldtraders_price():
             "gold_spot": safe_float(m.group(8)),
             "usd_thb_ref": safe_float(m.group(9)),
             "change": safe_float(m.group(10), 0),
-            "source": "สมาคมค้าทองคำ / GoldTraders UpdatePriceList",
+            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
             "updated_at": f"{date_th} {time_th} ครั้งที่ {round_no}",
             "raw_url": url,
             "is_estimate": False,
@@ -841,7 +841,7 @@ def get_goldtraders_price():
             "gold_spot": None,
             "usd_thb_ref": None,
             "change": None,
-            "source": "สมาคมค้าทองคำ / GoldTraders DailyPrices",
+            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
             "updated_at": now_text(),
             "raw_url": url,
             "is_estimate": False,
@@ -871,7 +871,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำ / GoldTraders Homepage",
+                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -891,7 +891,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำ / GoldTraders GTA BidAsk",
+                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -1390,13 +1390,78 @@ def dividend_yield_text(value):
     if value is None:
         return "N/A"
     try:
-        # Yahoo often returns 0.0285 for 2.85%.
+        # Providers are inconsistent:
+        # - Yahoo may return 0.0839 for 8.39%
+        # - Some APIs return 0.35 for 0.35% already
+        # Treat only very small decimals as ratios; avoid turning AAPL 0.35 into 35%.
         val = float(value)
-        if val <= 1:
+        if 0 <= val <= 0.20:
             val *= 100
         return f"{val:.2f}%"
     except Exception:
         return "N/A"
+
+
+def v22_risk_grade(analysis):
+    score = int(analysis.get("score") or 50)
+    rsi = safe_float(analysis.get("rsi"), 50) or 50
+    rvol = safe_float(analysis.get("rvol"), 1) or 1
+    regime = str(analysis.get("regime", "")).upper()
+    penalty = 0
+    if "RANGE" in regime or "LOW VOL" in regime:
+        penalty += 1
+    if "DOWNTREND" in regime and score >= 60:
+        penalty += 1
+    if rsi >= 70 or rsi <= 30:
+        penalty += 1
+    if rvol < 1.0:
+        penalty += 1
+    base = "A" if score >= 88 else "B" if score >= 75 else "C" if score >= 55 else "D"
+    grades = ["A", "B", "C", "D"]
+    return grades[min(grades.index(base) + penalty, 3)]
+
+
+def v22_setup_quality(analysis):
+    score = int(analysis.get("score") or 50)
+    rsi = safe_float(analysis.get("rsi"), 50) or 50
+    rvol = safe_float(analysis.get("rvol"), 1) or 1
+    regime = str(analysis.get("regime", "")).upper()
+    alignment = str(analysis.get("alignment", "")).upper()
+    trend = 10 if "2/2" in alignment or "STRONG" in regime else 7 if "UPTREND" in regime or "DOWNTREND" in regime else 5
+    momentum = max(1, min(10, int(round(10 - abs(55 - rsi) / 7))))
+    volume = max(1, min(10, int(round(rvol * 4))))
+    regime_q = 8 if "STRONG" in regime else 6 if "UPTREND" in regime or "DOWNTREND" in regime else 4
+    if "LOW VOL" in regime or "RANGE" in regime:
+        regime_q = min(regime_q, 5)
+    return {"trend": trend, "momentum": momentum, "volume": volume, "regime": regime_q}
+
+
+def v22_model_confidence(analysis):
+    score = int(analysis.get("score") or 50)
+    rsi = safe_float(analysis.get("rsi"), 50) or 50
+    rvol = safe_float(analysis.get("rvol"), 1) or 1
+    regime = str(analysis.get("regime", "")).upper()
+    conf = 50 + abs(score - 50) * 0.45
+    if rsi >= 70 or rsi <= 30:
+        conf -= 8
+    if rvol < 1.0:
+        conf -= 5
+    if "RANGE" in regime or "LOW VOL" in regime:
+        conf -= 8
+    return max(35, min(88, int(round(conf))))
+
+
+def v22_quality_block(analysis):
+    q = v22_setup_quality(analysis)
+    rg = v22_risk_grade(analysis)
+    return f"""Risk Grade: {rg}
+
+🧪 Setup Quality V22
+Trend: {q['trend']}/10
+Momentum: {q['momentum']}/10
+Volume: {q['volume']}/10
+Regime: {q['regime']}/10
+Risk Grade: {rg}"""
 
 
 def valuation_engine(asset, analysis, fundamentals):
@@ -1511,7 +1576,7 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
     return text, status
 
 # ============================================================
-# OPTIONS HYBRID MAX FREE
+# OPTIONS RISK ENGINE V22
 # ============================================================
 def options_hybrid_engine(asset, analysis):
     if asset["asset_type"] != "US_STOCK":
@@ -1543,10 +1608,10 @@ def options_hybrid_engine(asset, analysis):
     put_sl = price + atr * 0.90
 
     if score >= 70:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: CALL / Bullish
 Strike แนะนำ: {fmt_num(call_strike, 2)}C
-Probability ประมาณ: {prob}%
+Model Confidence: {v22_model_confidence(analysis)}%
 
 Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 TP1: {fmt_num(tp1)}
@@ -1558,12 +1623,12 @@ Bull Call Spread
 Buy {fmt_num(call_strike, 2)}C
 Sell {fmt_num(call_sell, 2)}C
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + V22 Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
     elif score <= 35:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: PUT / Bearish
 Strike แนะนำ: {fmt_num(put_strike, 2)}P
-Probability ประมาณ: {prob}%
+Model Confidence: {v22_model_confidence(analysis)}%
 
 Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
 TP1: {fmt_num(put_tp1)}
@@ -1575,11 +1640,11 @@ Bear Put Spread
 Buy {fmt_num(put_strike, 2)}P
 Sell {fmt_num(put_sell, 2)}P
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + V22 Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
     else:
-        setup = f"""🧠 Options Hybrid Max Free
+        setup = f"""🧠 Options Risk Engine V22
 Setup: WAIT / Neutral
-Probability ประมาณ: {prob}%
+Model Confidence: {v22_model_confidence(analysis)}%
 
 ยังไม่ควรรีบซื้อ CALL/PUT
 รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
@@ -1673,7 +1738,9 @@ def build_gold_report(asset, analysis, news_text, reasons):
     def gold_level(value):
         return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿" if thai_factor else "N/A"
 
-    note = "ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
+    note = "อ้างอิงสมาคมค้าทองคำแห่งประเทศไทย" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
+    confidence = v22_model_confidence(analysis)
+    quality_block = v22_quality_block(analysis)
 
     return f"""📊 วิเคราะห์ทองคำ
 
@@ -1690,11 +1757,12 @@ XAUUSD
 แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-AI Score V3: {analysis['score']}/100
-Probability ประมาณ: {analysis['probability']}%
+V22 Market Score: {analysis['score']}/100
+Model Confidence: {confidence}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
+{quality_block}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -1720,7 +1788,7 @@ R3: {gold_level(r3)}
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ราคาทองไทย{note}"""
 
 
 def build_asset_report(user_text):
@@ -1741,6 +1809,8 @@ def build_asset_report(user_text):
 
     fundamentals = get_fundamental_data(asset)
     valuation_text, valuation_status = valuation_engine(asset, analysis, fundamentals)
+    confidence = v22_model_confidence(analysis)
+    quality_block = v22_quality_block(analysis)
 
     mtf_lines = "\n".join([f"- {label}: {state}" for label, state in analysis["mtf_states"]]) or "- N/A"
 
@@ -1751,11 +1821,12 @@ def build_asset_report(user_text):
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
 
-AI Score V3: {analysis['score']}/100
-Probability ประมาณ: {analysis['probability']}%
+V22 Market Score: {analysis['score']}/100
+Model Confidence: {confidence}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
+{quality_block}
 
 Multi Timeframe:
 {mtf_lines}
@@ -1786,7 +1857,7 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ใช้ข้อมูลฟรี + Strict Risk Engine และประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
@@ -2302,7 +2373,7 @@ def dashboard():
         f"<tr><td>{r['created_at']}</td><td>{r['symbol']}</td><td>{r['asset_type']}</td><td>{fmt_num(r['price'])}</td><td>{r['score']}</td><td>{r['probability']}%</td><td>{r['signal_type']}</td><td>{r['regime']}</td><td>{r['bias']}</td></tr>"
         for r in rows
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V22 Professional Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
 </head><body><h1>AI Market LINE Bot V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix.2 US Premarket Alert Fix.1 Market Hours Guard</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
