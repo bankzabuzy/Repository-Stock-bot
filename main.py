@@ -11,6 +11,8 @@ import html as html_lib
 from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
+
+TH_TZ = ZoneInfo("Asia/Bangkok")
 except Exception:
     ZoneInfo = None
 
