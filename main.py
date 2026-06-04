@@ -255,6 +255,7 @@ THAI_SYMBOLS = {
 
 GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAUUSD", "XAU/USD"}
 US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
+US_ETF_SYMBOLS = {"QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ", "SOXL", "SOXS"}
 
 CACHE = {}
 
@@ -590,7 +591,7 @@ def normalize_asset(user_text):
             "symbol": key,
             "yf_symbol": key,
             "currency": "USD",
-            "asset_type": "US_STOCK",
+            "asset_type": "ETF" if key in US_ETF_SYMBOLS else "US_STOCK",
             "news_symbol": key,
         }
 
@@ -612,7 +613,7 @@ def normalize_asset(user_text):
         "symbol": key,
         "yf_symbol": key,
         "currency": "USD",
-        "asset_type": "US_STOCK",
+        "asset_type": "ETF" if key in US_ETF_SYMBOLS else "US_STOCK",
         "news_symbol": key,
     }
 
@@ -1247,7 +1248,7 @@ def get_market_data(asset):
                 except Exception as e2:
                     result = fallback_market_data(asset, f"Thai stock data unavailable: {e1} | {e2}")
 
-        elif asset["asset_type"] == "US_STOCK":
+        elif asset["asset_type"] in ("US_STOCK", "ETF"):
             if ENABLE_MULTI_API_FALLBACK:
                 result = multi_api_get_us_market_data(asset)
             else:
@@ -1416,6 +1417,78 @@ def mtf_alignment(asset):
     return summary, states
 
 
+def strict_score_probability_guard(asset, score, probability, rsi=None, alignment="", regime="", rvol=None, reasons=None):
+    """Institutional-style guardrail to avoid over-confident entries.
+    - ETF conviction is capped.
+    - MIXED multi-timeframe reduces score/probability.
+    - RSI overbought reduces long-side conviction.
+    - Low relative volume reduces conviction.
+    """
+    reasons = reasons or []
+    s = int(max(0, min(100, safe_float(score, 50))))
+    p = int(max(20, min(95, safe_float(probability, 50))))
+    asset_type = (asset or {}).get("asset_type", "")
+    al = str(alignment or "").upper()
+    reg = str(regime or "").upper()
+    rv = safe_float(rvol)
+    r = safe_float(rsi)
+
+    if asset_type == "ETF":
+        if s > 85:
+            s = 85
+            reasons.append("ETF ถูกจำกัดคะแนนสูงสุดเพื่อไม่ให้ over-confidence")
+        if r is not None and r >= 70:
+            s = min(s, 78)
+            p = min(p, 64)
+            reasons.append("ETF RSI สูงกว่า 70 จึงลดความมั่นใจในการไล่ราคา")
+        if "MIXED" in al:
+            s = min(s, 80)
+            p = min(p, 65)
+            reasons.append("Multi Timeframe เป็น MIXED จึงจำกัด Probability")
+    else:
+        if r is not None and r >= 74:
+            s = max(0, s - 8)
+            p = min(p, 68)
+            reasons.append("RSI สูงมาก จึงลดความมั่นใจในการเข้าไม้")
+        elif r is not None and r >= 70:
+            s = max(0, s - 5)
+            p = min(p, 72)
+            reasons.append("RSI เริ่มสูง จึงลดความมั่นใจในการไล่ราคา")
+
+    if "MIXED" in al:
+        p = min(p, 65)
+        if s >= 85:
+            s = 82
+        reasons.append("Trend Alignment ยังไม่พร้อมทุก Timeframe")
+
+    if rv is not None and rv < 0.80:
+        s = max(0, s - 5)
+        p = min(p, 60)
+        reasons.append("RVOL ต่ำกว่า 0.8 จึงลดความมั่นใจ")
+
+    if "RANGE" in reg and s >= 80:
+        s = min(s, 78)
+        p = min(p, 62)
+        reasons.append("ตลาดเป็น RANGE จึงไม่ออกไม้เชิงรุก")
+
+    p = int(max(20, min(95, p)))
+    s = int(max(0, min(100, s)))
+    return s, p, reasons
+
+
+def strict_entry_grade(analysis, asset_type=None):
+    """Return trade strictness level for entries/options."""
+    score = safe_float(analysis.get("score"), 0)
+    prob = safe_float(analysis.get("probability"), 0)
+    alignment = str(analysis.get("alignment", "")).upper()
+    rsi = safe_float(analysis.get("rsi"))
+    rvol = safe_float(analysis.get("rvol"))
+    if score >= 82 and prob >= 70 and "MIXED" not in alignment and (rsi is None or rsi < 70) and (rvol is None or rvol >= 1.0):
+        return "A"
+    if score >= 72 and prob >= 62 and (rsi is None or rsi < 74):
+        return "B"
+    return "WAIT"
+
 def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     quote = quote or {}
     price = safe_float(quote.get("close"))
@@ -1512,7 +1585,18 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
     else:
         support = resistance = stop_loss = take_profit = None
 
-    probability = max(40, min(78, 50 + int((score - 50) * 0.55)))
+    probability = int(max(20, min(95, 20 + (score * 0.75))))
+    score, probability, reasons = strict_score_probability_guard(
+        asset, score, probability,
+        rsi=rsi, alignment=alignment, regime=regime, rvol=rvol, reasons=reasons
+    )
+
+    if score >= 75:
+        bias = "BULLISH / ฝั่งซื้อได้เปรียบ"
+    elif score <= 35:
+        bias = "BEARISH / ฝั่งขายได้เปรียบ"
+    else:
+        bias = "NEUTRAL / รอดูจังหวะ"
 
     if provider_is_fallback:
         # Do not output BUY/SELL confidence from fake/fallback data.
@@ -1784,35 +1868,50 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
 # OPTIONS HYBRID MAX FREE
 # ============================================================
 def options_hybrid_engine(asset, analysis):
-    if asset["asset_type"] != "US_STOCK":
+    if asset["asset_type"] not in ("US_STOCK", "ETF"):
         return ""
 
-    price = analysis["price"]
-    atr = analysis["atr"] or (price * 0.015 if price else None)
+    price = analysis.get("price")
+    atr = analysis.get("atr") or (price * 0.015 if price else None)
     if not price or not atr:
         return ""
 
-    score = analysis["score"]
-    prob = analysis["probability"]
+    score = safe_float(analysis.get("score"), 0)
+    prob = int(safe_float(analysis.get("probability"), 0))
     today_th = datetime.now(TH_TZ).date()
-
-    # Practical option timing from free data only.
-    # For US regular-session signals in Thailand, this normally means tonight.
     entry_date = today_th.strftime("%d/%m/%Y")
-    if score >= 70:
-        side = "CALL / Bullish"
+    alignment = str(analysis.get("alignment", "")).upper()
+    rsi = safe_float(analysis.get("rsi"))
+    rvol = safe_float(analysis.get("rvol"))
+    grade = strict_entry_grade(analysis, asset.get("asset_type"))
+
+    # Strict options gate: no directional option when TF is mixed or overbought/weak volume.
+    if grade == "WAIT":
+        call_trigger = analysis.get("resistance") or (price + atr)
+        put_trigger = analysis.get("support") or (price - atr)
+        call_strike = round_strike(call_trigger + atr * 0.30)
+        put_strike = round_strike(put_trigger - atr * 0.30)
+        return f"""🧠 Options Hybrid Max Free
+Setup: WAIT / รอจังหวะ
+เข้าวันที่: {entry_date} เฉพาะเมื่อราคาเลือกทางชัดเจน
+CALL: เข้าเมื่อยืนเหนือ {fmt_num(call_trigger)} และ 15m/1h ต้องเปลี่ยนเป็น BULLISH | Strike เฝ้าดู {fmt_num(call_strike, 2)}C
+PUT: เข้าเมื่อหลุดต่ำกว่า {fmt_num(put_trigger)} และ 15m/1h ต้องเปลี่ยนเป็น BEARISH | Strike เฝ้าดู {fmt_num(put_strike, 2)}P
+Probability ประมาณ: {prob}%
+เหตุผลที่ยังไม่ออกไม้จริง: ต้องการยืนยัน Timeframe/Volume ก่อน"""
+
+    if score >= 78:
         strike = round_strike(price + atr * 0.60)
         sell_strike = round_strike(price + atr * 1.70)
         trigger = analysis.get("resistance") or (price + atr)
-        entry_low = max(price, trigger - atr * 0.20)
-        entry_high = trigger + atr * 0.15
+        entry_low = max(price, trigger - atr * 0.15)
+        entry_high = trigger + atr * 0.10
         tp1 = trigger + atr * 0.70
-        tp2 = trigger + atr * 1.30
-        sl = trigger - atr * 0.80
+        tp2 = trigger + atr * 1.25
+        sl = trigger - atr * 0.70
         return f"""🧠 Options Hybrid Max Free
-Setup: {side}
+Setup: CALL / Bullish แบบเข้มงวด
 เข้าวันที่: {entry_date}
-เงื่อนไขเข้า: รอราคายืนเหนือ {fmt_num(trigger)}
+เงื่อนไขเข้า: รอราคายืนเหนือ {fmt_num(trigger)} และแท่ง 15m ปิดเหนือระดับนี้
 ช่วงราคาเข้าอ้างอิงหุ้นแม่: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 Strike แนะนำ: {fmt_num(strike, 2)}C
 Probability ประมาณ: {prob}%
@@ -1821,20 +1920,19 @@ TP2 อ้างอิงหุ้นแม่: {fmt_num(tp2)}
 SL อ้างอิงหุ้นแม่: {fmt_num(sl)}
 Spread Scanner: Bull Call Spread Buy {fmt_num(strike, 2)}C / Sell {fmt_num(sell_strike, 2)}C"""
 
-    if score <= 35:
-        side = "PUT / Bearish"
+    if score <= 30:
         strike = round_strike(price - atr * 0.60)
         sell_strike = round_strike(price - atr * 1.70)
         trigger = analysis.get("support") or (price - atr)
-        entry_low = trigger - atr * 0.15
-        entry_high = min(price, trigger + atr * 0.20)
+        entry_low = trigger - atr * 0.10
+        entry_high = min(price, trigger + atr * 0.15)
         tp1 = trigger - atr * 0.70
-        tp2 = trigger - atr * 1.30
-        sl = trigger + atr * 0.80
+        tp2 = trigger - atr * 1.25
+        sl = trigger + atr * 0.70
         return f"""🧠 Options Hybrid Max Free
-Setup: {side}
+Setup: PUT / Bearish แบบเข้มงวด
 เข้าวันที่: {entry_date}
-เงื่อนไขเข้า: รอราคาหลุดต่ำกว่า {fmt_num(trigger)}
+เงื่อนไขเข้า: รอราคาหลุดต่ำกว่า {fmt_num(trigger)} และแท่ง 15m ปิดต่ำกว่าระดับนี้
 ช่วงราคาเข้าอ้างอิงหุ้นแม่: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 Strike แนะนำ: {fmt_num(strike, 2)}P
 Probability ประมาณ: {prob}%
@@ -1843,16 +1941,7 @@ TP2 อ้างอิงหุ้นแม่: {fmt_num(tp2)}
 SL อ้างอิงหุ้นแม่: {fmt_num(sl)}
 Spread Scanner: Bear Put Spread Buy {fmt_num(strike, 2)}P / Sell {fmt_num(sell_strike, 2)}P"""
 
-    call_trigger = analysis.get("resistance") or (price + atr)
-    put_trigger = analysis.get("support") or (price - atr)
-    call_strike = round_strike(call_trigger + atr * 0.30)
-    put_strike = round_strike(put_trigger - atr * 0.30)
-    return f"""🧠 Options Hybrid Max Free
-Setup: WAIT / Neutral
-เข้าวันที่: {entry_date} เฉพาะเมื่อราคาเลือกทางชัดเจน
-CALL: เข้าเมื่อยืนเหนือ {fmt_num(call_trigger)} | Strike เฝ้าดู {fmt_num(call_strike, 2)}C
-PUT: เข้าเมื่อหลุดต่ำกว่า {fmt_num(put_trigger)} | Strike เฝ้าดู {fmt_num(put_strike, 2)}P
-Probability ประมาณ: {prob}%"""
+    return ""
 
 
 # ============================================================
@@ -1905,30 +1994,34 @@ def fetch_news(asset):
 
 
 def plan_confidence_values(probability, asset_type=None, rsi=None):
-    """Return confidence for 3 entry levels and 3 take-profit levels.
-    Values are capped for ETFs and overbought conditions to avoid unrealistic conviction.
+    """Strict confidence for 3 entry levels and TP levels.
+    Confidence is intentionally conservative: no blind averaging down.
     """
     base = safe_float(probability) or 50.0
     if asset_type == "ETF":
-        base = min(base, 85.0)
-    if rsi is not None and safe_float(rsi) and safe_float(rsi) >= 70:
-        base = max(20.0, base - 8.0)
-    buy1 = int(max(20, min(95, round(base + 6))))
-    buy2 = int(max(20, min(95, round(base))))
-    buy3 = int(max(20, min(95, round(base - 12))))
-    tp1 = int(max(10, min(95, round(base))))
-    tp2 = int(max(10, min(95, round(base - 14))))
-    tp3 = int(max(10, min(95, round(base - 28))))
+        base = min(base, 78.0)
+    if rsi is not None and safe_float(rsi):
+        r = safe_float(rsi)
+        if r >= 74:
+            base = max(20.0, base - 14.0)
+        elif r >= 70:
+            base = max(20.0, base - 10.0)
+    buy1 = int(max(20, min(88, round(base + 4))))
+    buy2 = int(max(20, min(82, round(base - 4))))
+    buy3 = int(max(20, min(75, round(base - 16))))
+    tp1 = int(max(10, min(85, round(base - 2))))
+    tp2 = int(max(10, min(75, round(base - 16))))
+    tp3 = int(max(10, min(65, round(base - 30))))
     return buy1, buy2, buy3, tp1, tp2, tp3
 
 
 def position_size_text(b1, b2, b3):
-    """Simple capital allocation suggestion based on confidence spread."""
-    if b1 >= 70:
+    """Capital allocation suggestion; strict mode avoids overweighting weak dips."""
+    if b1 >= 76:
         return "แนะนำแบ่งเงิน: ไม้1 50% / ไม้2 30% / ไม้3 20%"
-    if b1 >= 55:
+    if b1 >= 62:
         return "แนะนำแบ่งเงิน: ไม้1 40% / ไม้2 35% / ไม้3 25%"
-    return "แนะนำแบ่งเงิน: ไม้1 30% / ไม้2 30% / ไม้3 40% เฉพาะเมื่อรับความเสี่ยงได้"
+    return "แนะนำแบ่งเงิน: ไม้1 30% / ไม้2 30% / ไม้3 40% เฉพาะเมื่อราคายืนยัน ไม่ควรรีบถัว"
 
 
 def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None, probability=50, rsi=None):
@@ -1956,7 +2049,8 @@ def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None, probab
 ขาย/ทำกำไร 3: {fmt_level(sell3)} | โอกาสถึงเป้า {tp3c}%
 
 จุดคุมความเสี่ยง: {fmt_level(stop)}
-{position_size_text(b1c, b2c, b3c)}"""
+{position_size_text(b1c, b2c, b3c)}
+เงื่อนไขเข้มงวด: ถ้าราคาไม่ยืน/ไม่เด้งตามแผน ห้ามเพิ่มไม้ถัดไปอัตโนมัติ"""
 
 def build_gold_report(asset, analysis, news_text, reasons):
     # Gold report intentionally uses Thai Gold Traders Association only.
@@ -2032,17 +2126,28 @@ def build_asset_report(user_text):
 
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-    # ETF score guard: avoid over-confident ETF calls when short timeframes are mixed or RSI is stretched.
+    # Extra strict ETF guard: avoid over-confident ETF calls when TFs are mixed, RSI stretched, or volume is weak.
     if asset.get("asset_type") == "ETF":
         score_cap = 85
+        prob_cap = 70
         if analysis.get("rsi") is not None and safe_float(analysis.get("rsi")) and safe_float(analysis.get("rsi")) >= 70:
             score_cap = min(score_cap, 78)
+            prob_cap = min(prob_cap, 64)
         if "MIXED" in str(analysis.get("alignment", "")).upper():
             score_cap = min(score_cap, 80)
+            prob_cap = min(prob_cap, 65)
+        if safe_float(analysis.get("rvol")) is not None and safe_float(analysis.get("rvol")) < 1.0:
+            score_cap = min(score_cap, 76)
+            prob_cap = min(prob_cap, 62)
         if safe_float(analysis.get("score")) and analysis.get("score") > score_cap:
             analysis["score"] = score_cap
-            analysis["probability"] = min(int(analysis.get("probability") or 50), max(45, score_cap - 15))
-            analysis["bias"] = "BULLISH / ฝั่งซื้อได้เปรียบ" if score_cap >= 70 else "NEUTRAL / รอดูจังหวะ"
+        analysis["probability"] = min(int(analysis.get("probability") or 50), prob_cap)
+        if analysis["score"] >= 75:
+            analysis["bias"] = "BULLISH / ฝั่งซื้อได้เปรียบ"
+        elif analysis["score"] <= 35:
+            analysis["bias"] = "BEARISH / ฝั่งขายได้เปรียบ"
+        else:
+            analysis["bias"] = "NEUTRAL / รอดูจังหวะ"
     news_text, _ = fetch_news(asset)
     reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
