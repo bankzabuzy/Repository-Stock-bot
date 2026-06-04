@@ -253,7 +253,7 @@ def resolve_delisted_symbol(symbol):
 # DATABASE
 # ============================================================
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(os.getenv("DB_PATH", "/data/signals.db"))
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1855,7 +1855,7 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
