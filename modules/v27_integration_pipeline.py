@@ -47,3 +47,10 @@ class AlertIntegrationPipeline:
 
     def run(self, signal):
         return self.process(signal)
+demo_signal = {
+    "symbol": "SPY",
+    "signal_type": "WATCH",
+    "score": 0,
+    "price": 0,
+    "metadata": {}
+}
