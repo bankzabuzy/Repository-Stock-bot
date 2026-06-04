@@ -198,7 +198,7 @@ DB_PATH = os.getenv("DB_PATH", "signals.db")
 # Production-safe fallback values. These prevent Railway from crashing when
 # API keys, network providers, or the persistent volume are temporarily unavailable.
 ENABLE_YFINANCE_FALLBACK = os.getenv("ENABLE_YFINANCE_FALLBACK", "false").lower() == "true"
-ENABLE_GOLDTRADERS_FETCH = os.getenv("ENABLE_GOLDTRADERS_FETCH", "false").lower() == "true"
+ENABLE_GOLDTRADERS_FETCH = os.getenv("ENABLE_GOLDTRADERS_FETCH", "true").lower() == "true"
 ENABLE_THAI_OIL_FETCH = os.getenv("ENABLE_THAI_OIL_FETCH", "false").lower() == "true"
 
 FALLBACK_MARKET_PRICES = {
@@ -4915,6 +4915,208 @@ def auto_alert_loop():
             print(f"Auto Signal Pro loop error: {e}")
             time.sleep(60)
 
+
+
+
+
+# ============================================================
+# PRODUCTION FIX: AUTO SCAN + SIGNAL SEED + GOLDTRADERS DEFAULT
+# ============================================================
+# This block is intentionally independent from LINE alerts.
+# Railway/Gunicorn imports this file as `main:app`, so code inside
+# if __name__ == "__main__" is NOT executed in production.  The old
+# version therefore stayed online but never generated rows in `signals`.
+# This patch starts a safe background scanner on import and also exposes
+# manual routes for immediate testing.
+
+AUTO_SIGNAL_SCAN_ENABLED = os.getenv("AUTO_SIGNAL_SCAN_ENABLED", "true").lower() == "true"
+AUTO_SIGNAL_SCAN_INTERVAL_SECONDS = int(os.getenv("AUTO_SIGNAL_SCAN_INTERVAL_SECONDS", "900"))
+AUTO_SIGNAL_SCAN_LIMIT = int(os.getenv("AUTO_SIGNAL_SCAN_LIMIT", "8"))
+AUTO_SIGNAL_SCAN_ON_STARTUP = os.getenv("AUTO_SIGNAL_SCAN_ON_STARTUP", "true").lower() == "true"
+AUTO_SIGNAL_SCAN_SYMBOLS = env_list(
+    "AUTO_SIGNAL_SCAN_SYMBOLS",
+    os.getenv("WATCHLIST", "GOLD,NVDA,AAPL,TSLA,QQQ,SPY,AMD,META")
+)
+_STARTUP_WORKERS_STARTED = False
+
+
+def _production_signal_type(score):
+    try:
+        score = int(score or 50)
+    except Exception:
+        score = 50
+    if score >= AUTO_ALERT_MIN_SCORE:
+        return "BUY"
+    if score <= AUTO_ALERT_MAX_SCORE:
+        return "SELL"
+    if score >= 60:
+        return "WATCH_BUY"
+    if score <= 40:
+        return "WATCH_SELL"
+    return "NEUTRAL"
+
+
+def _production_build_scan_report(symbol, asset, analysis, quote=None):
+    quote = quote or {}
+    lines = [
+        f"AUTO SCAN: {symbol}",
+        f"เวลา: {now_text()}",
+        f"ประเภท: {asset.get('asset_type')}",
+        f"ราคา: {fmt_num(analysis.get('price'))}",
+        f"Score: {analysis.get('score')}",
+        f"Probability: {analysis.get('probability')}%",
+        f"Signal: {_production_signal_type(analysis.get('score'))}",
+        f"Regime: {analysis.get('regime')}",
+        f"Bias: {analysis.get('bias')}",
+    ]
+    if asset.get("asset_type") == "GOLD":
+        try:
+            usdthb = get_usd_thb_rate()
+            thai_gold = get_thai_gold_price_or_estimate(analysis.get("price"), usdthb)
+            lines += [
+                "",
+                "ราคาทองไทยอ้างอิงสมาคมค้าทองคำ:",
+                f"ทองแท่งรับซื้อ: {fmt_num(thai_gold.get('bar_buy'), 0)} บาท",
+                f"ทองแท่งขายออก: {fmt_num(thai_gold.get('bar_sell'), 0)} บาท",
+                f"ทองรูปพรรณขายออก: {fmt_num(thai_gold.get('ornament_sell'), 0)} บาท",
+                f"แหล่งข้อมูล: {thai_gold.get('source')}",
+                f"อัปเดต: {thai_gold.get('updated_at')}",
+            ]
+        except Exception as e:
+            lines.append(f"Thai gold block error: {e}")
+    reasons = analysis.get("reasons") or []
+    if reasons:
+        lines += ["", "เหตุผล:"] + [f"- {r}" for r in reasons[:8]]
+    return "\n".join(lines)
+
+
+def production_scan_once(symbols=None, save_all=True):
+    """Run one safe scan and save rows to signals.
+
+    This is designed for Railway production: every symbol is isolated so
+    one provider/network failure cannot crash the whole worker.
+    """
+    init_db()
+    symbols = symbols or AUTO_SIGNAL_SCAN_SYMBOLS or WATCHLIST
+    symbols = [str(x).strip().upper() for x in symbols if str(x).strip()]
+    results = []
+    print(f"AUTO_SCAN start count={len(symbols[:AUTO_SIGNAL_SCAN_LIMIT])} symbols={symbols[:AUTO_SIGNAL_SCAN_LIMIT]}")
+    for symbol in symbols[:AUTO_SIGNAL_SCAN_LIMIT]:
+        try:
+            if v8_skip_symbol(symbol):
+                results.append({"symbol": symbol, "ok": False, "skipped": True, "reason": "v8_skip_symbol"})
+                continue
+            asset = normalize_asset(symbol)
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            sig = _production_signal_type(analysis.get("score"))
+            report = _production_build_scan_report(symbol, asset, analysis, quote)
+            if save_all or sig not in {"NEUTRAL"}:
+                save_signal(
+                    asset.get("symbol", symbol),
+                    asset.get("asset_type"),
+                    analysis.get("price"),
+                    analysis.get("score"),
+                    analysis.get("bias"),
+                    sig,
+                    analysis.get("regime"),
+                    analysis.get("probability"),
+                    report,
+                )
+            results.append({
+                "symbol": asset.get("symbol", symbol),
+                "asset_type": asset.get("asset_type"),
+                "ok": True,
+                "price": analysis.get("price"),
+                "score": analysis.get("score"),
+                "signal": sig,
+                "probability": analysis.get("probability"),
+                "provider": quote.get("source") if isinstance(quote, dict) else None,
+            })
+            print(f"AUTO_SCAN saved symbol={symbol} signal={sig} score={analysis.get('score')}")
+        except Exception as e:
+            print(f"AUTO_SCAN error symbol={symbol}: {e}")
+            results.append({"symbol": symbol, "ok": False, "error": str(e)})
+    return results
+
+
+@app.route("/status", methods=["GET"])
+def production_status_alias():
+    try:
+        conn = db()
+        row = conn.execute("SELECT COUNT(*) AS c FROM signals").fetchone()
+        count = int(row["c"] if row else 0)
+        conn.close()
+    except Exception as e:
+        count = None
+        print("status count error:", e)
+    return jsonify({
+        "ok": True,
+        "service": "Repository-Stock-bot",
+        "time_th": now_text(),
+        "signals_count": count,
+        "auto_signal_scan_enabled": AUTO_SIGNAL_SCAN_ENABLED,
+        "auto_signal_scan_interval_seconds": AUTO_SIGNAL_SCAN_INTERVAL_SECONDS,
+        "auto_signal_scan_symbols": AUTO_SIGNAL_SCAN_SYMBOLS,
+        "goldtraders_fetch_enabled": ENABLE_GOLDTRADERS_FETCH,
+        "routes": ["/health", "/status", "/dashboard", "/api/signals", "/scan-now", "/gold-test"],
+    })
+
+
+@app.route("/scan-now", methods=["GET", "POST"])
+def production_scan_now_route():
+    if not require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    raw_symbols = request.args.get("symbols", "").strip()
+    if raw_symbols:
+        symbols = [x.strip().upper() for x in raw_symbols.split(",") if x.strip()]
+    else:
+        symbols = AUTO_SIGNAL_SCAN_SYMBOLS
+    results = production_scan_once(symbols=symbols, save_all=True)
+    return jsonify({"ok": True, "time_th": now_text(), "saved_or_checked": len(results), "results": results})
+
+
+@app.route("/seed-signal", methods=["GET", "POST"])
+def production_seed_signal_route():
+    if not require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    results = production_scan_once(symbols=["GOLD", "NVDA", "AAPL", "TSLA", "QQQ"], save_all=True)
+    return jsonify({"ok": True, "message": "seed scan completed", "results": results})
+
+
+def _production_scan_loop():
+    if AUTO_SIGNAL_SCAN_ON_STARTUP:
+        try:
+            time.sleep(5)
+            production_scan_once(save_all=True)
+        except Exception as e:
+            print("AUTO_SCAN startup error:", e)
+    while True:
+        try:
+            time.sleep(max(60, AUTO_SIGNAL_SCAN_INTERVAL_SECONDS))
+            production_scan_once(save_all=True)
+        except Exception as e:
+            print("AUTO_SCAN loop error:", e)
+            time.sleep(60)
+
+
+def start_production_workers_once():
+    global _STARTUP_WORKERS_STARTED
+    if _STARTUP_WORKERS_STARTED:
+        return
+    _STARTUP_WORKERS_STARTED = True
+    try:
+        init_db()
+    except Exception as e:
+        print("init_db startup warning:", e)
+    if AUTO_SIGNAL_SCAN_ENABLED:
+        threading.Thread(target=_production_scan_loop, daemon=True, name="auto-signal-scan").start()
+        print("AUTO_SCAN worker started")
+    # Optional LINE alert loop remains separate.  It only starts when both
+    # ENABLE_AUTO_ALERTS=true and ALERT_USER_IDS are configured.
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        threading.Thread(target=auto_alert_loop, daemon=True, name="line-auto-alert-loop").start()
+        print("LINE auto alert worker started")
 
 
 # ============================================================
@@ -11474,7 +11676,8 @@ except Exception as e:
 # V31 FINAL MAIN RUNNER
 # Keep this at the end so every appended route/gate is loaded before Flask starts.
 # ============================================================
+# Start background workers when imported by Gunicorn/Railway.
+start_production_workers_once()
+
 if __name__ == "__main__":
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        threading.Thread(target=auto_alert_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
