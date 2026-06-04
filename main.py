@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
 
-TH_TZ = ZoneInfo("Asia/Bangkok")
+    TH_TZ = ZoneInfo("Asia/Bangkok")
 except Exception:
     TH_TZ = timezone(timedelta(hours=7))
 
