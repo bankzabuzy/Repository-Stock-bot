@@ -39,3 +39,36 @@ class OutcomeTracker:
             "time_stop": age_minutes >= max_minutes,
             "reason": "หมดเวลา signal" if age_minutes >= max_minutes else "ยังไม่หมดเวลา",
         }
+class DataQualityGuard:
+
+    def __init__(self):
+        self.errors = []
+
+    def check_price(self, symbol, price):
+        ok = price is not None and price > 0
+        return {
+            "symbol": symbol,
+            "ok": ok,
+            "reason": None if ok else "invalid_price",
+        }
+
+    def check_series(self, symbol, closes):
+        ok = bool(closes) and len(closes) >= 20
+        return {
+            "symbol": symbol,
+            "ok": ok,
+            "reason": None if ok else "not_enough_data",
+        }
+
+    def validate(self, symbol, price=None, closes=None):
+        price_check = self.check_price(symbol, price)
+        series_check = self.check_series(symbol, closes or [])
+        ok = price_check["ok"] and series_check["ok"]
+        return {
+            "symbol": symbol,
+            "ok": ok,
+            "checks": {
+                "price": price_check,
+                "series": series_check,
+            },
+        }
