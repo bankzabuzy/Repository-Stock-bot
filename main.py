@@ -14,7 +14,7 @@ try:
 
 TH_TZ = ZoneInfo("Asia/Bangkok")
 except Exception:
-    ZoneInfo = None
+    TH_TZ = timezone(timedelta(hours=7))
 
 import requests
 try:
