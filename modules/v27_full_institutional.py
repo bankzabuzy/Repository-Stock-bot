@@ -40,3 +40,17 @@ def register_v27_integration_routes(app):
             "pipeline": "Data Quality -> Capital Protection -> Conviction -> Adaptive Weight -> Forward Test -> LINE",
             "forward_test_days": 30,
         })
+class AlertAuditLogEngine:
+
+    def __init__(self):
+        self.logs = []
+
+    def record(self, alert):
+        self.logs.append(alert)
+        return True
+
+    def get_logs(self):
+        return self.logs
+
+    def count(self):
+        return len(self.logs)
