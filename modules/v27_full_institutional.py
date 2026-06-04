@@ -98,3 +98,21 @@ class StrategyRankingEngine:
     def top_strategy(self):
         ranked = self.rank()
         return ranked[0] if ranked else None
+class MarketRegimeAI:
+
+    def __init__(self):
+        self.current_regime = "neutral"
+
+    def detect_regime(self, market_data=None):
+
+        if market_data is None:
+            return self.current_regime
+
+        return self.current_regime
+
+    def get_regime_score(self):
+
+        return {
+            "regime": self.current_regime,
+            "score": 50
+        }
