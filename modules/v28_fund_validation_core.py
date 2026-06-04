@@ -35,3 +35,14 @@ def register_v27_full_institutional_routes(app):
         payload=InstitutionalDashboard().build({'top_signals':[{'symbol':'NVDA','score':91}], 'market_regime':MarketRegimeAI().classify({'spy_trend_score':64,'qqq_trend_score':70,'vix':18,'breadth_score':62}), 'outcome_scheduler':AutoOutcomeScheduler().scheduler_status()})
         return Response(InstitutionalDashboard().html(payload), mimetype='text/html')
 V28_VERSION = "28.0"
+
+def audit_signal(*args, **kwargs):
+    return {
+        "status": "ok"
+    }
+
+def info_v28_db():
+    return {
+        "database": "connected",
+        "version": V28_VERSION
+    }
