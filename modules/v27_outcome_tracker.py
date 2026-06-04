@@ -32,3 +32,29 @@ class ForwardTestEngine:
             "open": total - closed,
             "win_rate_pct": round((wins / closed * 100) if closed else 0, 2),
         }
+class OutcomeTracker:
+
+    def __init__(self):
+        self.outcomes = []
+
+    def record_outcome(self, symbol, signal_type=None, entry_price=None, exit_price=None, result=None, metadata=None):
+        row = {
+            "symbol": symbol,
+            "signal_type": signal_type,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "result": result,
+            "metadata": metadata or {},
+        }
+        self.outcomes.append(row)
+        return row
+
+    def summary(self):
+        total = len(self.outcomes)
+        wins = sum(1 for x in self.outcomes if str(x.get("result", "")).upper() in ["WIN", "PROFIT", "TP"])
+        return {
+            "total_outcomes": total,
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate": round((wins / total) * 100, 2) if total else 0.0,
+        }
