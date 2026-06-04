@@ -51,3 +51,15 @@ def init_v28_db():
         "status": "initialized",
         "version": V28_VERSION
     }
+def portfolio_gate(*args, **kwargs):
+    return {
+        "allowed": True,
+        "reason": "pass"
+    }
+
+
+def evaluate_portfolio_risk(*args, **kwargs):
+    return {
+        "risk_score": 50,
+        "risk_level": "medium"
+    }
