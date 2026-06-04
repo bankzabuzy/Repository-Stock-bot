@@ -26,3 +26,24 @@ def register_v27_stability_routes(app):
     @app.route("/v27/position-multiplier", methods=["POST"])
     def v27_position_multiplier():
         return jsonify(CapitalProtection().position_size_multiplier(request.get_json(silent=True) or {}))
+class AlertIntegrationPipeline:
+
+    def __init__(self):
+        self.enabled = True
+
+    def process(self, signal):
+        return {
+            "allowed": True,
+            "signal": signal,
+            "reason": "pipeline_passed",
+        }
+
+    def validate(self, signal):
+        return {
+            "ok": True,
+            "signal": signal,
+            "errors": [],
+        }
+
+    def run(self, signal):
+        return self.process(signal)
