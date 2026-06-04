@@ -7,14 +7,72 @@ import base64
 import hashlib
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone, timezone, timezone
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 import requests
-import yfinance as yf
+try:
+    import yfinance as yf
+except Exception as _yf_import_error:
+    yf = None
+    print("yfinance not loaded:", _yf_import_error)
 from bs4 import BeautifulSoup
 from flask import Flask, request, abort, jsonify, Response
 
 app = Flask(__name__)
+
+# V27.2-V27.7 Full Institutional Integration Routes
+try:
+    from modules.v27_full_institutional_routes import register_v27_full_institutional_routes
+    register_v27_full_institutional_routes(app)
+except Exception as e:
+    print('V27.7 full institutional routes not loaded:', e)
+
+
+
+# V28 Fund Validation Core routes
+try:
+    from modules.v28_fund_validation_routes import register_v28_fund_validation_routes
+    register_v28_fund_validation_routes(app)
+except Exception as e:
+    print('V28 fund validation routes not loaded:', e)
+
+
+
+# V29 Production Hardening & Governance Core routes
+try:
+    from modules.v29_governance_routes import register_v29_governance_routes
+    register_v29_governance_routes(app)
+except Exception as e:
+    print('V29 governance routes not loaded:', e)
+
+
+
+# V30 Institutional Model Validation & Paper Trading Core routes
+try:
+    from modules.v30_model_validation_routes import register_v30_model_validation_routes
+    register_v30_model_validation_routes(app)
+except Exception as e:
+    print('V30 model validation routes not loaded:', e)
+
+
+
+# V31 Alpha Research & Performance Attribution Core routes
+try:
+    from modules.v31_alpha_attribution_routes import register_v31_alpha_attribution_routes
+    register_v31_alpha_attribution_routes(app)
+except Exception as e:
+    print('V31 alpha attribution routes not loaded:', e)
+
+# V27.1 Integration Phase routes
+try:
+    from modules.v27_integration_routes_snippet import register_v27_integration_routes
+    register_v27_integration_routes(app)
+except Exception as e:
+    print('V27.1 integration routes not loaded:', e)
 
 # ============================================================
 # V7 HYBRID MAX FREE CONFIG
@@ -86,7 +144,11 @@ TH_MARKET_MORNING_END = os.getenv("TH_MARKET_MORNING_END", "12:30")
 TH_MARKET_AFTERNOON_START = os.getenv("TH_MARKET_AFTERNOON_START", "14:30")
 TH_MARKET_AFTERNOON_END = os.getenv("TH_MARKET_AFTERNOON_END", "16:45")
 US_PREMARKET_START_TH = os.getenv("US_PREMARKET_START_TH", "15:00")
-US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "true").lower() == "true"
+US_ALLOW_PREMARKET_ALERTS = os.getenv("US_ALLOW_PREMARKET_ALERTS", "false").lower() == "true"
+ENABLE_THAI_STOCK_ALERTS = os.getenv("ENABLE_THAI_STOCK_ALERTS", "false").lower() == "true"
+ENABLE_US_STOCK_ALERTS = os.getenv("ENABLE_US_STOCK_ALERTS", "true").lower() == "true"
+ENABLE_US_REGULAR_SESSION_ONLY = os.getenv("ENABLE_US_REGULAR_SESSION_ONLY", "true").lower() == "true"
+USE_US_EXCHANGE_TIME = os.getenv("USE_US_EXCHANGE_TIME", "true").lower() == "true"
 US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
 US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:30")
 SYMBOL_COOLDOWN_MINUTES = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "240"))
@@ -96,31 +158,32 @@ STRICT_REQUIRE_4H_CONFIRM = os.getenv("STRICT_REQUIRE_4H_CONFIRM", "true").lower
 MIN_POSITION_RISK_LEVEL = os.getenv("MIN_POSITION_RISK_LEVEL", "MEDIUM").upper()
 
 ALERT_EVERY_MINUTES = int(os.getenv("ALERT_EVERY_MINUTES", "60"))
-AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "88"))
-AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "12"))
+AUTO_ALERT_MIN_SCORE = int(os.getenv("AUTO_ALERT_MIN_SCORE", "80"))
+AUTO_ALERT_MAX_SCORE = int(os.getenv("AUTO_ALERT_MAX_SCORE", "25"))
 
 # Auto Signal Pro
 ENABLE_US_SESSION_ONLY = os.getenv("ENABLE_US_SESSION_ONLY", "true").lower() == "true"
-US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "21:30")
-US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "04:00")
+# V13 bugfix: keep US regular session aligned with current DST Thai time. Do not override 20:30 with 21:30.
+US_SESSION_START_TH = os.getenv("US_SESSION_START_TH", "20:30")
+US_SESSION_END_TH = os.getenv("US_SESSION_END_TH", "03:00")
 SIGNAL_SCAN_SECONDS = int(os.getenv("SIGNAL_SCAN_SECONDS", str(ALERT_EVERY_MINUTES * 60)))
 STRONG_CALL_SCORE = int(os.getenv("STRONG_CALL_SCORE", "85"))
 STRONG_PUT_SCORE = int(os.getenv("STRONG_PUT_SCORE", "20"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
 STRICT_ALERT_MODE = os.getenv("STRICT_ALERT_MODE", "true").lower() == "true"
-STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "78"))
-STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "7"))
-STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "1.20"))
+STRICT_MIN_CONFIDENCE = int(os.getenv("STRICT_MIN_CONFIDENCE", "72"))
+STRICT_MIN_TREND_STRENGTH = int(os.getenv("STRICT_MIN_TREND_STRENGTH", "5"))
+STRICT_MIN_RVOL = float(os.getenv("STRICT_MIN_RVOL", "0.85"))
 STRICT_REQUIRE_TF_CONFIRM = os.getenv("STRICT_REQUIRE_TF_CONFIRM", "true").lower() == "true"
 STRICT_ALLOW_RANGE_GOLD = os.getenv("STRICT_ALLOW_RANGE_GOLD", "false").lower() == "true"
-STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "90"))
-STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "10"))
+STRICT_CALL_SCORE = int(os.getenv("STRICT_CALL_SCORE", "88"))
+STRICT_PUT_SCORE = int(os.getenv("STRICT_PUT_SCORE", "15"))
 
 # V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix
-PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "21:15")
-ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "true").lower() == "true"
-TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "21:15")
+PREMARKET_REMINDER_TH = os.getenv("PREMARKET_REMINDER_TH", "20:20")
+ENABLE_PREMARKET_REMINDER = os.getenv("ENABLE_PREMARKET_REMINDER", "false").lower() == "true"
+TOP5_DAILY_TIME_TH = os.getenv("TOP5_DAILY_TIME_TH", "20:45")
 ENABLE_TOP5_DAILY = os.getenv("ENABLE_TOP5_DAILY", "true").lower() == "true"
 TOP5_UNIVERSE = [
     x.strip().upper()
@@ -240,6 +303,12 @@ def save_signal(symbol, asset_type, price, score, bias, signal_type, regime, pro
         )
         conn.commit()
         conn.close()
+        # V13 Signal Quality Layer: audit every emitted signal for future win-rate evaluation.
+        try:
+            if "save_signal_audit" in globals():
+                save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report)
+        except Exception as audit_error:
+            print("save_signal_audit error:", audit_error)
     except Exception as e:
         print("save_signal error:", e)
 
@@ -809,7 +878,7 @@ def get_goldtraders_price():
             "gold_spot": safe_float(m.group(8)),
             "usd_thb_ref": safe_float(m.group(9)),
             "change": safe_float(m.group(10), 0),
-            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+            "source": "สมาคมค้าทองคำ / GoldTraders UpdatePriceList",
             "updated_at": f"{date_th} {time_th} ครั้งที่ {round_no}",
             "raw_url": url,
             "is_estimate": False,
@@ -841,7 +910,7 @@ def get_goldtraders_price():
             "gold_spot": None,
             "usd_thb_ref": None,
             "change": None,
-            "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+            "source": "สมาคมค้าทองคำ / GoldTraders DailyPrices",
             "updated_at": now_text(),
             "raw_url": url,
             "is_estimate": False,
@@ -871,7 +940,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+                "source": "สมาคมค้าทองคำ / GoldTraders Homepage",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -891,7 +960,7 @@ def get_goldtraders_price():
                 "gold_spot": None,
                 "usd_thb_ref": None,
                 "change": None,
-                "source": "สมาคมค้าทองคำแห่งประเทศไทย / Gold Traders Association",
+                "source": "สมาคมค้าทองคำ / GoldTraders GTA BidAsk",
                 "updated_at": now_text(),
                 "raw_url": url,
                 "is_estimate": False,
@@ -1390,78 +1459,13 @@ def dividend_yield_text(value):
     if value is None:
         return "N/A"
     try:
-        # Providers are inconsistent:
-        # - Yahoo may return 0.0839 for 8.39%
-        # - Some APIs return 0.35 for 0.35% already
-        # Treat only very small decimals as ratios; avoid turning AAPL 0.35 into 35%.
+        # Yahoo often returns 0.0285 for 2.85%.
         val = float(value)
-        if 0 <= val <= 0.20:
+        if val <= 1:
             val *= 100
         return f"{val:.2f}%"
     except Exception:
         return "N/A"
-
-
-def v22_risk_grade(analysis):
-    score = int(analysis.get("score") or 50)
-    rsi = safe_float(analysis.get("rsi"), 50) or 50
-    rvol = safe_float(analysis.get("rvol"), 1) or 1
-    regime = str(analysis.get("regime", "")).upper()
-    penalty = 0
-    if "RANGE" in regime or "LOW VOL" in regime:
-        penalty += 1
-    if "DOWNTREND" in regime and score >= 60:
-        penalty += 1
-    if rsi >= 70 or rsi <= 30:
-        penalty += 1
-    if rvol < 1.0:
-        penalty += 1
-    base = "A" if score >= 88 else "B" if score >= 75 else "C" if score >= 55 else "D"
-    grades = ["A", "B", "C", "D"]
-    return grades[min(grades.index(base) + penalty, 3)]
-
-
-def v22_setup_quality(analysis):
-    score = int(analysis.get("score") or 50)
-    rsi = safe_float(analysis.get("rsi"), 50) or 50
-    rvol = safe_float(analysis.get("rvol"), 1) or 1
-    regime = str(analysis.get("regime", "")).upper()
-    alignment = str(analysis.get("alignment", "")).upper()
-    trend = 10 if "2/2" in alignment or "STRONG" in regime else 7 if "UPTREND" in regime or "DOWNTREND" in regime else 5
-    momentum = max(1, min(10, int(round(10 - abs(55 - rsi) / 7))))
-    volume = max(1, min(10, int(round(rvol * 4))))
-    regime_q = 8 if "STRONG" in regime else 6 if "UPTREND" in regime or "DOWNTREND" in regime else 4
-    if "LOW VOL" in regime or "RANGE" in regime:
-        regime_q = min(regime_q, 5)
-    return {"trend": trend, "momentum": momentum, "volume": volume, "regime": regime_q}
-
-
-def v22_model_confidence(analysis):
-    score = int(analysis.get("score") or 50)
-    rsi = safe_float(analysis.get("rsi"), 50) or 50
-    rvol = safe_float(analysis.get("rvol"), 1) or 1
-    regime = str(analysis.get("regime", "")).upper()
-    conf = 50 + abs(score - 50) * 0.45
-    if rsi >= 70 or rsi <= 30:
-        conf -= 8
-    if rvol < 1.0:
-        conf -= 5
-    if "RANGE" in regime or "LOW VOL" in regime:
-        conf -= 8
-    return max(35, min(88, int(round(conf))))
-
-
-def v22_quality_block(analysis):
-    q = v22_setup_quality(analysis)
-    rg = v22_risk_grade(analysis)
-    return f"""Risk Grade: {rg}
-
-🧪 Setup Quality V22
-Trend: {q['trend']}/10
-Momentum: {q['momentum']}/10
-Volume: {q['volume']}/10
-Regime: {q['regime']}/10
-Risk Grade: {rg}"""
 
 
 def valuation_engine(asset, analysis, fundamentals):
@@ -1576,7 +1580,7 @@ XD / Ex-dividend: {fundamentals.get('ex_dividend_date', 'N/A')}
     return text, status
 
 # ============================================================
-# OPTIONS RISK ENGINE V22
+# OPTIONS HYBRID MAX FREE
 # ============================================================
 def options_hybrid_engine(asset, analysis):
     if asset["asset_type"] != "US_STOCK":
@@ -1608,10 +1612,10 @@ def options_hybrid_engine(asset, analysis):
     put_sl = price + atr * 0.90
 
     if score >= 70:
-        setup = f"""🧠 Options Risk Engine V22
+        setup = f"""🧠 Options Hybrid Max Free
 Setup: CALL / Bullish
 Strike แนะนำ: {fmt_num(call_strike, 2)}C
-Model Confidence: {v22_model_confidence(analysis)}%
+Probability ประมาณ: {prob}%
 
 Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
 TP1: {fmt_num(tp1)}
@@ -1623,12 +1627,12 @@ Bull Call Spread
 Buy {fmt_num(call_strike, 2)}C
 Sell {fmt_num(call_sell, 2)}C
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + V22 Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
     elif score <= 35:
-        setup = f"""🧠 Options Risk Engine V22
+        setup = f"""🧠 Options Hybrid Max Free
 Setup: PUT / Bearish
 Strike แนะนำ: {fmt_num(put_strike, 2)}P
-Model Confidence: {v22_model_confidence(analysis)}%
+Probability ประมาณ: {prob}%
 
 Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
 TP1: {fmt_num(put_tp1)}
@@ -1640,11 +1644,11 @@ Bear Put Spread
 Buy {fmt_num(put_strike, 2)}P
 Sell {fmt_num(put_sell, 2)}P
 
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + V22 Score แบบเข้มงวด ไม่ไล่ราคาเมื่อ RSI สูง"""
+ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
     else:
-        setup = f"""🧠 Options Risk Engine V22
+        setup = f"""🧠 Options Hybrid Max Free
 Setup: WAIT / Neutral
-Model Confidence: {v22_model_confidence(analysis)}%
+Probability ประมาณ: {prob}%
 
 ยังไม่ควรรีบซื้อ CALL/PUT
 รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
@@ -1738,9 +1742,7 @@ def build_gold_report(asset, analysis, news_text, reasons):
     def gold_level(value):
         return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿" if thai_factor else "N/A"
 
-    note = "อ้างอิงสมาคมค้าทองคำแห่งประเทศไทย" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
-    confidence = v22_model_confidence(analysis)
-    quality_block = v22_quality_block(analysis)
+    note = "ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
 
     return f"""📊 วิเคราะห์ทองคำ
 
@@ -1757,12 +1759,11 @@ XAUUSD
 แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-V22 Market Score: {analysis['score']}/100
-Model Confidence: {confidence}%
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
-{quality_block}
 
 📈 Technical
 EMA6: {fmt_num(analysis['ema6'])}
@@ -1788,7 +1789,7 @@ R3: {gold_level(r3)}
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ราคาทองไทย{note}"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
 
 
 def build_asset_report(user_text):
@@ -1809,8 +1810,6 @@ def build_asset_report(user_text):
 
     fundamentals = get_fundamental_data(asset)
     valuation_text, valuation_status = valuation_engine(asset, analysis, fundamentals)
-    confidence = v22_model_confidence(analysis)
-    quality_block = v22_quality_block(analysis)
 
     mtf_lines = "\n".join([f"- {label}: {state}" for label, state in analysis["mtf_states"]]) or "- N/A"
 
@@ -1821,12 +1820,11 @@ def build_asset_report(user_text):
 ราคา: {price_label}{fmt_num(analysis['price'])}
 เปลี่ยนแปลง: {fmt_num(analysis['change'])} ({fmt_num(analysis['percent_change'])}%)
 
-V22 Market Score: {analysis['score']}/100
-Model Confidence: {confidence}%
+AI Score V3: {analysis['score']}/100
+Probability ประมาณ: {analysis['probability']}%
 มุมมอง: {analysis['bias']}
 Market Regime: {analysis['regime']}
 Trend Alignment: {analysis['alignment']}
-{quality_block}
 
 Multi Timeframe:
 {mtf_lines}
@@ -1857,7 +1855,7 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 📰 ข่าว/บริบท:
 {news_text}
 
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V22 Professional ใช้ข้อมูลฟรี + Strict Risk Engine และประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
@@ -2373,7 +2371,7 @@ def dashboard():
         f"<tr><td>{r['created_at']}</td><td>{r['symbol']}</td><td>{r['asset_type']}</td><td>{fmt_num(r['price'])}</td><td>{r['score']}</td><td>{r['probability']}%</td><td>{r['signal_type']}</td><td>{r['regime']}</td><td>{r['bias']}</td></tr>"
         for r in rows
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V22 Professional Dashboard</title>
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
 <style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
 </head><body><h1>AI Market LINE Bot V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix.2 US Premarket Alert Fix.1 Market Hours Guard</h1><p>Time TH: {now_text()}</p>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
@@ -2986,6 +2984,19 @@ def classify_watchlist_symbol(symbol):
     return "US_STOCK"
 
 
+def asset_type_alert_enabled(asset_type):
+    """Global asset enable/disable switch for auto alerts.
+
+    Defaults: Thai stock auto alerts OFF, US stock auto alerts ON.
+    Manual LINE commands still work unless blocked elsewhere.
+    """
+    if asset_type == "THAI_STOCK":
+        return bool(globals().get("ENABLE_THAI_STOCK_ALERTS", False))
+    if asset_type == "US_STOCK":
+        return bool(globals().get("ENABLE_US_STOCK_ALERTS", True))
+    return True
+
+
 def build_v8_scan_watchlist():
     if ENABLE_SEPARATE_WATCHLISTS:
         base = []
@@ -2994,14 +3005,20 @@ def build_v8_scan_watchlist():
         base.extend(TIER_B_WATCHLIST)
         base.extend(TIER_C_WATCHLIST)
         base.extend(GOLD_WATCHLIST)
-        base.extend(US_WATCHLIST)
-        base.extend(TH_WATCHLIST)
+        if ENABLE_US_STOCK_ALERTS:
+            base.extend(US_WATCHLIST)
+        if ENABLE_THAI_STOCK_ALERTS:
+            base.extend(TH_WATCHLIST)
         if ENABLE_EXPANDED_SECTOR_WATCHLIST:
-            base.extend(EXPANDED_US_WATCHLIST)
-            base.extend(EXPANDED_TH_WATCHLIST)
+            if ENABLE_US_STOCK_ALERTS:
+                base.extend(EXPANDED_US_WATCHLIST)
+            if ENABLE_THAI_STOCK_ALERTS:
+                base.extend(EXPANDED_TH_WATCHLIST)
         if ENABLE_MARKET_LEADER_WATCHLIST:
-            base.extend(MARKET_LEADER_US_WATCHLIST)
-            base.extend(MARKET_LEADER_TH_WATCHLIST)
+            if ENABLE_US_STOCK_ALERTS:
+                base.extend(MARKET_LEADER_US_WATCHLIST)
+            if ENABLE_THAI_STOCK_ALERTS:
+                base.extend(MARKET_LEADER_TH_WATCHLIST)
         base = [resolve_delisted_symbol(x).replace(".BK", "").replace(".SET", "") for x in base]
         return dedupe_keep_order(base)
 
@@ -3009,7 +3026,7 @@ def build_v8_scan_watchlist():
     valid = []
     for s in WATCHLIST:
         asset_class = classify_watchlist_symbol(s)
-        if asset_class:
+        if asset_class and asset_type_alert_enabled(asset_class):
             valid.append(s)
     return dedupe_keep_order(valid)
 
@@ -3029,6 +3046,10 @@ def v8_skip_symbol(symbol):
 def v8_watchlist_status_dict():
     return {
         "enable_separate_watchlists": ENABLE_SEPARATE_WATCHLISTS,
+        "enable_thai_stock_alerts": ENABLE_THAI_STOCK_ALERTS,
+        "enable_us_stock_alerts": ENABLE_US_STOCK_ALERTS,
+        "us_regular_session_only": ENABLE_US_REGULAR_SESSION_ONLY,
+        "use_us_exchange_time": USE_US_EXCHANGE_TIME,
         "scan_watchlist": build_v8_scan_watchlist(),
         "us_watchlist": US_WATCHLIST,
         "th_watchlist": TH_WATCHLIST,
@@ -3080,9 +3101,14 @@ def is_in_time_window(now_dt, start_hhmm, end_hhmm):
 
 
 def should_scan_symbol_by_session(asset):
-    if not globals().get("ENABLE_US_SESSION_ONLY", False):
-        return True
-    if asset.get("asset_type") == "US_STOCK":
+    atype = asset.get("asset_type")
+    if not asset_type_alert_enabled(atype):
+        return False
+    if atype == "THAI_STOCK":
+        return bool(globals().get("ENABLE_THAI_STOCK_ALERTS", False)) and is_th_market_open_now()
+    if atype == "US_STOCK":
+        if not globals().get("ENABLE_US_SESSION_ONLY", False):
+            return True
         return is_us_market_open_now_th() if "is_us_market_open_now_th" in globals() else True
     return True
 
@@ -4533,12 +4559,36 @@ def is_th_market_open_now():
 
 
 def is_us_market_open_now_th():
+    """US equity alert window.
+
+    Preferred mode uses New York exchange time, so Thai overnight sessions and
+    daylight saving time are handled correctly. Fallback uses configured Thai
+    HH:MM windows for environments without zoneinfo.
+    """
+    if not ENABLE_US_STOCK_ALERTS:
+        return False
+
+    if USE_US_EXCHANGE_TIME and ZoneInfo is not None:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return False
+        now_m = now_et.hour * 60 + now_et.minute
+        regular_start = 9 * 60 + 30
+        regular_end = 16 * 60
+        premarket_start = 4 * 60
+        if regular_start <= now_m <= regular_end:
+            return True
+        if (not ENABLE_US_REGULAR_SESSION_ONLY) and US_ALLOW_PREMARKET_ALERTS and premarket_start <= now_m < regular_start:
+            return True
+        return False
+
+    # Legacy Thai-time fallback. Use this only if USE_US_EXCHANGE_TIME=false.
     if not is_weekday_th():
         return False
     regular_or_after = time_in_range_th(US_SESSION_START_TH, US_SESSION_END_TH)
     premarket = False
     try:
-        premarket = US_ALLOW_PREMARKET_ALERTS and time_in_range_th(US_PREMARKET_START_TH, US_SESSION_START_TH)
+        premarket = (not ENABLE_US_REGULAR_SESSION_ONLY) and US_ALLOW_PREMARKET_ALERTS and time_in_range_th(US_PREMARKET_START_TH, US_SESSION_START_TH)
     except Exception:
         premarket = False
     return regular_or_after or premarket
@@ -4550,10 +4600,14 @@ def asset_market_open_for_alert(asset):
 
     atype = asset.get("asset_type")
     if atype == "THAI_STOCK":
+        if not ENABLE_THAI_STOCK_ALERTS:
+            return False, "Thai stock alerts disabled"
         return is_th_market_open_now(), "Thai market closed"
 
     if atype == "US_STOCK":
-        return is_us_market_open_now_th(), "US market closed"
+        if not ENABLE_US_STOCK_ALERTS:
+            return False, "US stock alerts disabled"
+        return is_us_market_open_now_th(), "US market closed or outside regular session"
 
     if atype == "GOLD":
         return bool(ALLOW_GOLD_24H_ALERTS), "Gold 24H alerts disabled"
@@ -4617,6 +4671,10 @@ def market_hours_status():
     return jsonify({
         "time_th": now_text(),
         "guard_enabled": ENABLE_MARKET_HOURS_GUARD,
+        "thai_stock_alerts_enabled": ENABLE_THAI_STOCK_ALERTS,
+        "us_stock_alerts_enabled": ENABLE_US_STOCK_ALERTS,
+        "us_regular_session_only": ENABLE_US_REGULAR_SESSION_ONLY,
+        "use_us_exchange_time": USE_US_EXCHANGE_TIME,
         "thai_market_open": is_th_market_open_now(),
         "us_market_open": is_us_market_open_now_th(),
         "allow_gold_24h": ALLOW_GOLD_24H_ALERTS,
@@ -4664,6 +4722,22 @@ def auto_alert_loop():
                         sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
 
                         ok_final, reason_final = should_send_alert_final(symbol, sig, analysis, asset)
+                        try:
+                            from modules.v28_fund_validation_core import audit_signal as v28_audit_signal
+                            if sig != "NONE":
+                                v28_audit_signal(
+                                    symbol=asset.get("symbol", symbol),
+                                    asset_type=asset.get("asset_type"),
+                                    sig=sig,
+                                    analysis=analysis,
+                                    decision="PASS" if ok_final else "FAIL",
+                                    reason=reason_final,
+                                    portfolio_gate=analysis.get("v28_portfolio_gate") if isinstance(analysis, dict) else None,
+                                    market_open=asset_market_open_for_alert(asset)[0],
+                                )
+                        except Exception as e:
+                            print("V28 audit warning:", e)
+
                         if sig != "NONE" and ok_final:
                             message = build_auto_signal_message(symbol, asset, analysis)
                             if message:
@@ -4683,6 +4757,21 @@ def auto_alert_loop():
                                     analysis.get("probability"),
                                     message,
                                 )
+                                try:
+                                    from modules.v28_fund_validation_core import audit_signal as v28_audit_signal
+                                    v28_audit_signal(
+                                        symbol=asset.get("symbol", symbol),
+                                        asset_type=asset.get("asset_type"),
+                                        sig=sig,
+                                        analysis=analysis,
+                                        decision="SENT",
+                                        reason="LINE_SENT",
+                                        portfolio_gate=analysis.get("v28_portfolio_gate") if isinstance(analysis, dict) else None,
+                                        market_open=asset_market_open_for_alert(asset)[0],
+                                        message=message,
+                                    )
+                                except Exception as e:
+                                    print("V28 sent audit warning:", e)
 
                         time.sleep(3)
 
@@ -6303,205 +6392,4963 @@ def v121_ranking_route():
     return jsonify(v121_opportunity_ranking(request.args.get("limit")))
 
 
+
 # ============================================================
-# V22.10 STRICT SIGNAL ALERT PATCH — PRESERVE ORIGINAL MONOLITH
-# Added without removing original engines.
-# - /json health snapshot
-# - /scan/dry-run test strict scanner without LINE send
-# - /scan/send send only if strict gate passes
-# - background auto alert loop starts safely under both python main.py and gunicorn
+# V13 SIGNAL QUALITY LAYER - FREE 100%
+# Purpose: convert the bot from a scanner into a measurable research engine.
+# Adds: signal audit, historical win-rate, false signal detector, adaptive scoring,
+# multi-timeframe consensus, relative strength ranking, strategy leaderboard, dashboard.
 # ============================================================
-_AUTO_ALERT_THREAD_STARTED = False
+V13_ENABLED = os.getenv("V13_ENABLED", "true").lower() == "true"
+V13_SIGNAL_HORIZONS = [int(x) for x in os.getenv("V13_SIGNAL_HORIZONS", "1,3,5,10").split(",") if str(x).strip().isdigit()]
+V13_DEFAULT_UNIVERSE = env_list("V13_UNIVERSE", "NVDA,AAPL,TSLA,AMD,MSFT,META,GOOGL,AMZN,QQQ,SPY,PLTR,AVGO,SMCI,MU,ARM,COIN,MSTR,RKLB,AAOI,IREN,CRWD,SNOW,NET,DDOG,HOOD")
+V13_RS_BENCHMARK = os.getenv("V13_RS_BENCHMARK", "QQQ")
+V13_MIN_CLOSED_FOR_STATS = int(os.getenv("V13_MIN_CLOSED_FOR_STATS", "20"))
 
-def v2210_scan_once(send=False, limit=None):
-    """Scan one rotated V22 group. If send=False, never pushes LINE.
-    Returns a compact JSON-safe summary.
-    """
-    group_name, symbols = v22_next_scan_group() if "v22_next_scan_group" in globals() else ("WATCHLIST", build_v8_scan_watchlist())
-    limit = int(limit or len(symbols))
-    candidates = []
-    checked = 0
-    skipped = 0
-    errors = []
 
-    for symbol in symbols[:limit]:
-        try:
-            if v8_skip_symbol(symbol):
-                skipped += 1
-                continue
+def v13_init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v13_signal_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc TEXT NOT NULL,
+            created_at_th TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            asset_type TEXT,
+            side TEXT,
+            strategy TEXT,
+            entry_price REAL,
+            score INTEGER,
+            adaptive_score INTEGER,
+            probability INTEGER,
+            bias TEXT,
+            regime TEXT,
+            breadth_regime TEXT,
+            mtf_consensus TEXT,
+            rs_score REAL,
+            quality_score INTEGER,
+            false_risk_score INTEGER,
+            explanation_json TEXT,
+            result_json TEXT,
+            status TEXT DEFAULT 'OPEN',
+            evaluated_at_utc TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_symbol ON v13_signal_audit(symbol)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_created ON v13_signal_audit(created_at_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_v13_signal_side ON v13_signal_audit(side)")
+    conn.commit()
+    conn.close()
 
-            asset = normalize_asset(symbol)
-            allowed, allow_reason = v22_asset_allowed_for_auto_alert(asset) if "v22_asset_allowed_for_auto_alert" in globals() else (True, "PASS")
-            if not allowed:
-                skipped += 1
-                continue
 
-            if not should_scan_symbol_by_session(asset):
-                skipped += 1
-                continue
+def v13_side_from_signal(signal_type, score=None, bias=None):
+    text = f"{signal_type or ''} {bias or ''}".upper()
+    if "CALL" in text or "BUY" in text or "BULL" in text:
+        return "CALL"
+    if "PUT" in text or "SELL" in text or "BEAR" in text:
+        return "PUT"
+    try:
+        sc = int(score)
+        if sc >= 75:
+            return "CALL"
+        if sc <= 35:
+            return "PUT"
+    except Exception:
+        pass
+    return "WAIT"
 
-            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
-            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
-            analysis = v22_cap_score_by_market_reality(analysis) if "v22_cap_score_by_market_reality" in globals() else analysis
-            sig, gate_reason = strict_signal_type_from_analysis(asset, analysis)
 
-            checked += 1
+def v13_detect_strategy(report, side, score=None):
+    text = str(report or "").upper()
+    if "VWAP" in text:
+        return "VWAP_RECLAIM" if side == "CALL" else "VWAP_REJECT"
+    if "PULLBACK" in text or "ย่อ" in text:
+        return "PULLBACK"
+    if "BREAKOUT" in text or "เบรก" in text:
+        return "BREAKOUT"
+    if "OPTIONS" in text or "OPTION" in text:
+        return "OPTIONS_HYBRID"
+    if score is not None and score >= 88:
+        return "HIGH_MOMENTUM"
+    if score is not None and score <= 15:
+        return "HIGH_BEARISH_MOMENTUM"
+    return "CORE_SIGNAL"
 
-            if sig == "NONE":
-                candidates.append({
-                    "symbol": symbol,
-                    "asset_type": asset.get("asset_type"),
-                    "status": "blocked",
-                    "reason": gate_reason,
-                    "score": analysis.get("score"),
-                    "confidence": analysis.get("probability"),
-                    "risk_grade": v22_risk_grade(analysis) if "v22_risk_grade" in globals() else None,
-                    "regime": analysis.get("regime"),
-                    "rvol": analysis.get("rvol"),
-                    "rsi": analysis.get("rsi"),
-                })
-                continue
 
-            ok_final, final_reason = should_send_alert_final(symbol, sig, analysis, asset)
-            item = {
-                "symbol": symbol,
-                "asset_type": asset.get("asset_type"),
-                "status": "pass" if ok_final else "blocked",
-                "signal": sig,
-                "reason": final_reason,
-                "score": analysis.get("score"),
-                "confidence": analysis.get("probability"),
-                "risk_grade": v22_risk_grade(analysis) if "v22_risk_grade" in globals() else None,
-                "regime": analysis.get("regime"),
-                "rvol": analysis.get("rvol"),
-                "rsi": analysis.get("rsi"),
-                "price": analysis.get("price"),
-            }
+def v13_safe_breadth_summary():
+    try:
+        if "v10_true_market_breadth" in globals():
+            b = v10_true_market_breadth()
+            return b.get("breadth_regime") or b.get("regime") or "UNKNOWN"
+    except Exception:
+        pass
+    try:
+        if "v121_market_internals" in globals():
+            i = v121_market_internals()
+            return i.get("internals_regime") or "UNKNOWN"
+    except Exception:
+        pass
+    return "UNKNOWN"
 
-            if ok_final:
-                score, confidence, trend, rvol, rsi, regime, bias = v22_setup_values(analysis, sig)
-                rank = score + confidence + trend * 2 + min(float(rvol or 1), 3.0) * 4
-                item["rank"] = rank
-                item["_asset"] = asset
-                item["_analysis"] = analysis
-                candidates.append(item)
+
+def v13_relative_strength_score(symbol, benchmark=None, period="6mo"):
+    benchmark = benchmark or V13_RS_BENCHMARK
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    try:
+        s1 = v12_yf_symbol(sym) if "v12_yf_symbol" in globals() else normalize_asset(sym)["yf_symbol"]
+        s2 = v12_yf_symbol(benchmark) if "v12_yf_symbol" in globals() else benchmark
+        data = yf.download([s1, s2], period=period, interval="1d", progress=False, auto_adjust=True, threads=False)
+        if data is None or data.empty:
+            return None
+        close = data["Close"] if "Close" in data else data
+        c1 = close[s1].dropna() if s1 in close else close.iloc[:, 0].dropna()
+        c2 = close[s2].dropna() if s2 in close else close.iloc[:, -1].dropna()
+        if len(c1) < 30 or len(c2) < 30:
+            return None
+        r1_20 = c1.iloc[-1] / c1.iloc[-20] - 1
+        r2_20 = c2.iloc[-1] / c2.iloc[-20] - 1
+        r1_60 = c1.iloc[-1] / c1.iloc[-60] - 1 if len(c1) >= 60 else r1_20
+        r2_60 = c2.iloc[-1] / c2.iloc[-60] - 1 if len(c2) >= 60 else r2_20
+        raw = ((r1_20 - r2_20) * 0.6 + (r1_60 - r2_60) * 0.4) * 100
+        return round(max(0, min(100, 50 + raw * 5)), 2)
+    except Exception:
+        return None
+
+
+def v13_mtf_consensus(symbol):
+    try:
+        asset = normalize_asset(symbol)
+        quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+        analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+        alignment = analysis.get("alignment") or "N/A"
+        states = analysis.get("mtf_states") or []
+        bulls = sum(1 for _, s in states if str(s).upper() == "BULLISH")
+        bears = sum(1 for _, s in states if str(s).upper() == "BEARISH")
+        total = len(states)
+        pct = round(max(bulls, bears) / total * 100, 2) if total else 0
+        direction = "BULLISH" if bulls > bears else "BEARISH" if bears > bulls else "MIXED"
+        return {"alignment": alignment, "states": states, "direction": direction, "consensus_pct": pct}
+    except Exception as e:
+        return {"alignment": "N/A", "states": [], "direction": "UNKNOWN", "consensus_pct": 0, "error": str(e)[:120]}
+
+
+def v13_adaptive_score(symbol, base_score, side, regime=None, breadth=None, rs_score=None, mtf=None):
+    try:
+        score = int(base_score or 50)
+    except Exception:
+        score = 50
+    notes = []
+    reg = str(regime or "").upper()
+    br = str(breadth or "").upper()
+    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
+    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
+
+    if side == "CALL":
+        if "RISK_ON" in reg or "UPTREND" in reg:
+            score += 5; notes.append("Regime supports CALL")
+        if "RISK_OFF" in reg or "DOWNTREND" in reg:
+            score -= 8; notes.append("Regime fights CALL")
+        if "BEAR" in br:
+            score -= 6; notes.append("Breadth weak for CALL")
+        if direction == "BULLISH" and consensus >= 60:
+            score += 5; notes.append("MTF confirms CALL")
+        if direction == "BEARISH" and consensus >= 60:
+            score -= 7; notes.append("MTF rejects CALL")
+        if rs_score is not None:
+            if rs_score >= 65: score += 5; notes.append("Relative strength positive")
+            elif rs_score <= 40: score -= 5; notes.append("Relative strength weak")
+    elif side == "PUT":
+        if "RISK_OFF" in reg or "DOWNTREND" in reg:
+            score = 100 - max(0, 100 - score - 5); notes.append("Regime supports PUT")
+        if "RISK_ON" in reg or "UPTREND" in reg:
+            score += 6; notes.append("Risk-on market reduces PUT quality")
+        if direction == "BEARISH" and consensus >= 60:
+            score -= 5; notes.append("MTF confirms PUT")
+        if direction == "BULLISH" and consensus >= 60:
+            score += 7; notes.append("MTF rejects PUT")
+        if rs_score is not None and rs_score >= 65:
+            score += 5; notes.append("Strong RS makes PUT riskier")
+    return {"adaptive_score": int(max(0, min(100, score))), "notes": notes}
+
+
+def v13_false_signal_risk(side, regime=None, breadth=None, mtf=None, rs_score=None):
+    risk = 20
+    notes = []
+    reg = str(regime or "").upper()
+    br = str(breadth or "").upper()
+    direction = str((mtf or {}).get("direction", "")).upper() if isinstance(mtf, dict) else ""
+    consensus = float((mtf or {}).get("consensus_pct", 0) or 0) if isinstance(mtf, dict) else 0
+    if side == "CALL":
+        if "BEAR" in br or "RISK_OFF" in reg:
+            risk += 25; notes.append("CALL against weak breadth/regime")
+        if direction == "BEARISH" and consensus >= 60:
+            risk += 25; notes.append("CALL against MTF bearish consensus")
+        if rs_score is not None and rs_score < 40:
+            risk += 15; notes.append("CALL with weak relative strength")
+    elif side == "PUT":
+        if "BULL" in br or "RISK_ON" in reg:
+            risk += 20; notes.append("PUT against risk-on/bullish breadth")
+        if direction == "BULLISH" and consensus >= 60:
+            risk += 25; notes.append("PUT against MTF bullish consensus")
+        if rs_score is not None and rs_score > 65:
+            risk += 15; notes.append("PUT against strong relative strength")
+    else:
+        risk += 15; notes.append("WAIT/unclear side")
+    return {"false_risk_score": int(max(0, min(100, risk))), "notes": notes}
+
+
+def v13_signal_quality_score(adaptive_score, false_risk, side):
+    if side == "CALL":
+        base = adaptive_score
+    elif side == "PUT":
+        base = 100 - adaptive_score
+    else:
+        base = 40
+    return int(max(0, min(100, base * 0.75 + (100 - false_risk) * 0.25)))
+
+
+def save_signal_audit(symbol, asset_type, price, score, bias, signal_type, regime, probability, report):
+    if not V13_ENABLED:
+        return False
+    side = v13_side_from_signal(signal_type, score, bias)
+    if side == "WAIT":
+        return False
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    mtf = v13_mtf_consensus(sym)
+    rs = v13_relative_strength_score(sym) if asset_type == "US_STOCK" else None
+    breadth = v13_safe_breadth_summary() if asset_type == "US_STOCK" else "N/A"
+    adaptive = v13_adaptive_score(sym, score, side, regime, breadth, rs, mtf)
+    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
+    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
+    strategy = v13_detect_strategy(report, side, score)
+    explanation = {
+        "signal_type": signal_type,
+        "adaptive_notes": adaptive["notes"],
+        "false_risk_notes": false_risk["notes"],
+        "report_excerpt": str(report or "")[:1000]
+    }
+    conn = db()
+    conn.execute("""
+        INSERT INTO v13_signal_audit(
+            created_at_utc, created_at_th, symbol, asset_type, side, strategy, entry_price,
+            score, adaptive_score, probability, bias, regime, breadth_regime, mtf_consensus,
+            rs_score, quality_score, false_risk_score, explanation_json, result_json, status
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        datetime.now(timezone.utc).isoformat(), now_text(), sym, asset_type, side, strategy,
+        safe_float(price), int(score or 50), adaptive["adaptive_score"], int(probability or 0), bias,
+        regime, breadth, json.dumps(mtf, ensure_ascii=False), rs, quality, false_risk["false_risk_score"],
+        json.dumps(explanation, ensure_ascii=False), json.dumps({}, ensure_ascii=False), "OPEN"
+    ))
+    conn.commit(); conn.close()
+    return True
+
+
+def v13_price_at_or_after(symbol, target_dt):
+    try:
+        yf_symbol = v12_yf_symbol(symbol) if "v12_yf_symbol" in globals() else normalize_asset(symbol)["yf_symbol"]
+        start = (target_dt - timedelta(days=5)).date().isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
+        data = yf.Ticker(yf_symbol).history(start=start, end=end, interval="1d", auto_adjust=False)
+        if data is None or data.empty:
+            return None, None
+        data = data.dropna()
+        for idx, row in data.iterrows():
+            idx_dt = idx.to_pydatetime()
+            if idx_dt.tzinfo is None:
+                idx_dt = idx_dt.replace(tzinfo=timezone.utc)
             else:
-                candidates.append(item)
+                idx_dt = idx_dt.astimezone(timezone.utc)
+            if idx_dt >= target_dt:
+                return float(row["Close"]), idx_dt.isoformat()
+        row = data.iloc[-1]
+        return float(row["Close"]), data.index[-1].to_pydatetime().isoformat()
+    except Exception:
+        return None, None
 
-            time.sleep(0.35)
-        except Exception as e:
-            errors.append({"symbol": symbol, "error": str(e)[:200]})
-            skipped += 1
 
-    pass_items = [x for x in candidates if x.get("status") == "pass"]
-    pass_items.sort(key=lambda x: x.get("rank", 0), reverse=True)
-
-    sent = 0
-    if send and ALERT_USER_IDS:
-        for item in pass_items[:STRICT_ALERT_MAX_PER_SCAN_CYCLE]:
-            asset = item.pop("_asset", None)
-            analysis = item.pop("_analysis", None)
-            sig = item.get("signal")
-            symbol = item.get("symbol")
-            if not asset or not analysis:
+def v13_update_audit_results(limit=200):
+    conn = db(); cur = conn.cursor()
+    rows = cur.execute("SELECT * FROM v13_signal_audit WHERE status!='CLOSED' ORDER BY id ASC LIMIT ?", (int(limit),)).fetchall()
+    updated = 0
+    now_utc = datetime.now(timezone.utc)
+    for r in rows:
+        try:
+            created = datetime.fromisoformat(str(r["created_at_utc"]).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            entry = safe_float(r["entry_price"])
+            if not entry:
                 continue
-            msg = build_auto_signal_message(symbol, asset, analysis)
-            prefix = f"🚨 V22.10 STRICT SIGNAL ALERT\nกลุ่มสแกน: {group_name}\nส่งเฉพาะสัญญาณเข้มจริงเท่านั้น\n\n"
-            for user_id in ALERT_USER_IDS:
-                line_push(user_id, prefix + msg)
-            mark_alert_sent_final(symbol, sig, analysis)
-            save_signal(
-                asset.get("symbol"),
-                asset.get("asset_type"),
-                analysis.get("price"),
-                analysis.get("score"),
-                analysis.get("bias"),
-                sig,
-                analysis.get("regime"),
-                analysis.get("probability"),
-                msg,
-            )
-            sent += 1
+            results = json.loads(r["result_json"] or "{}")
+            closed_all = True
+            for h in V13_SIGNAL_HORIZONS:
+                key = f"{h}d"
+                if key in results:
+                    continue
+                if now_utc < created + timedelta(days=h):
+                    closed_all = False
+                    continue
+                px, px_time = v13_price_at_or_after(r["symbol"], created + timedelta(days=h))
+                if px is None:
+                    closed_all = False
+                    continue
+                ret = (px / entry - 1) * 100
+                side = str(r["side"] or "").upper()
+                win = 1 if (side == "CALL" and ret > 0) or (side == "PUT" and ret < 0) else 0
+                results[key] = {"price": round(px, 4), "price_time": px_time, "return_pct": round(ret, 3), "win": win}
+            status = "CLOSED" if closed_all else "OPEN"
+            cur.execute("UPDATE v13_signal_audit SET result_json=?, status=?, evaluated_at_utc=? WHERE id=?", (json.dumps(results, ensure_ascii=False), status, now_utc.isoformat(), r["id"]))
+            updated += 1
+        except Exception as e:
+            print("v13_update_audit_results row error:", e)
+            continue
+    conn.commit(); conn.close()
+    return updated
 
-    # Remove private objects before JSON response.
-    for item in candidates:
-        item.pop("_asset", None)
-        item.pop("_analysis", None)
 
+def v13_winrate_stats(symbol=None, horizon="5d"):
+    v13_update_audit_results()
+    conn = db(); cur = conn.cursor()
+    params = []
+    where = "WHERE side IN ('CALL','PUT')"
+    if symbol:
+        where += " AND symbol=?"; params.append(resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", ""))
+    rows = cur.execute(f"SELECT * FROM v13_signal_audit {where} ORDER BY id DESC LIMIT 2000", params).fetchall()
+    conn.close()
+    closed = []
+    for r in rows:
+        res = json.loads(r["result_json"] or "{}")
+        if horizon in res:
+            d = dict(r); d["horizon_result"] = res[horizon]; closed.append(d)
+    total = len(closed)
+    wins = sum(1 for r in closed if int(r["horizon_result"].get("win", 0)) == 1)
+    avg_ret = sum(float(r["horizon_result"].get("return_pct", 0)) for r in closed) / total if total else 0
+    by_side = {}
+    by_strategy = {}
+    for bucket_name, key in [("by_side", "side"), ("by_strategy", "strategy")]:
+        target = by_side if key == "side" else by_strategy
+        for r in closed:
+            k = r.get(key) or "UNKNOWN"
+            target.setdefault(k, []).append(r)
+        for k, arr in list(target.items()):
+            target[k] = {
+                "signals": len(arr),
+                "win_rate_pct": round(sum(1 for x in arr if int(x["horizon_result"].get("win", 0)) == 1) / len(arr) * 100, 2),
+                "avg_return_pct": round(sum(float(x["horizon_result"].get("return_pct", 0)) for x in arr) / len(arr), 3),
+                "avg_quality_score": round(sum(float(x["quality_score"] or 0) for x in arr) / len(arr), 2),
+            }
     return {
-        "ok": True,
-        "version": APP_VERSION,
-        "mode": "send" if send else "dry-run",
-        "group": group_name,
-        "symbols_in_group": len(symbols),
-        "checked": checked,
-        "skipped": skipped,
-        "passed": len(pass_items),
-        "sent": sent,
-        "line_quota_safe": True,
-        "thai_auto_alerts_disabled": DISABLE_THAI_AUTO_ALERTS,
-        "alert_us_and_gold_only": ALERT_US_AND_GOLD_ONLY,
-        "thresholds": {
-            "score_min": STRICT_ALERT_SCORE_MIN,
-            "confidence_min": STRICT_ALERT_CONFIDENCE_MIN,
-            "rvol_min": STRICT_ALERT_RVOL_MIN,
-            "trend_min": STRICT_ALERT_TREND_MIN,
-            "symbol_cooldown_minutes": STRICT_ALERT_SYMBOL_COOLDOWN_MINUTES,
-            "signature_cooldown_minutes": STRICT_ALERT_SIGNATURE_COOLDOWN_MINUTES,
-        },
-        "top_pass_candidates": pass_items[:5],
-        "sample_blocked": [x for x in candidates if x.get("status") == "blocked"][:10],
-        "errors": errors[:10],
+        "version": "V13 Historical Win Rate Engine",
+        "symbol": symbol.upper() if symbol else "ALL",
+        "horizon": horizon,
+        "closed_signals": total,
+        "win_rate_pct": round(wins / total * 100, 2) if total else 0,
+        "avg_return_pct": round(avg_ret, 3),
+        "by_side": by_side,
+        "by_strategy": by_strategy,
+        "sample_warning": "ต้องมี closed signals อย่างน้อยประมาณ %s รายการก่อนใช้สถิติตัดสินใจจริง" % V13_MIN_CLOSED_FOR_STATS,
+        "latest_closed": [{k: r[k] for k in ["id", "created_at_th", "symbol", "side", "strategy", "entry_price", "score", "adaptive_score", "quality_score", "false_risk_score"] if k in r} | {"result": r["horizon_result"]} for r in closed[:25]]
     }
 
-@app.route("/json", methods=["GET"])
-def v2210_json_route():
+
+def v13_false_signal_detector(horizon="5d"):
+    stats = v13_winrate_stats(None, horizon)
+    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit WHERE side IN ('CALL','PUT') ORDER BY id DESC LIMIT 2000").fetchall(); conn.close()
+    groups = {}
+    for r in rows:
+        res = json.loads(r["result_json"] or "{}")
+        if horizon not in res:
+            continue
+        key_parts = [str(r["side"]), str(r["strategy"]), str(r["regime"] or "UNKNOWN"), str(r["breadth_regime"] or "UNKNOWN")]
+        try:
+            mtf = json.loads(r["mtf_consensus"] or "{}")
+            key_parts.append(mtf.get("direction", "UNKNOWN"))
+        except Exception:
+            key_parts.append("UNKNOWN")
+        key = " | ".join(key_parts)
+        groups.setdefault(key, []).append(r)
+    rows_out = []
+    for key, arr in groups.items():
+        if len(arr) < 3:
+            continue
+        losses = sum(1 for x in arr if int(json.loads(x["result_json"] or "{}")[horizon].get("win", 0)) == 0)
+        loss_rate = losses / len(arr) * 100
+        avg_false_risk = sum(float(x["false_risk_score"] or 0) for x in arr) / len(arr)
+        rows_out.append({"pattern": key, "signals": len(arr), "loss_rate_pct": round(loss_rate, 2), "avg_false_risk_score": round(avg_false_risk, 2)})
+    rows_out = sorted(rows_out, key=lambda x: (x["loss_rate_pct"], x["signals"]), reverse=True)
+    return {"version": "V13 False Signal Detector", "horizon": horizon, "overall": {"closed_signals": stats["closed_signals"], "win_rate_pct": stats["win_rate_pct"]}, "high_risk_patterns": rows_out[:30], "rule": "patterns need at least 3 closed samples; treat early results as exploratory"}
+
+
+def v13_strategy_leaderboard(horizon="5d"):
+    stats = v13_winrate_stats(None, horizon)
+    rows = []
+    for strategy, v in stats.get("by_strategy", {}).items():
+        expectancy = v["avg_return_pct"] * (v["win_rate_pct"] / 100)
+        rows.append({"strategy": strategy, **v, "expectancy_score": round(expectancy, 3)})
+    rows = sorted(rows, key=lambda x: (x["expectancy_score"], x["win_rate_pct"], x["signals"]), reverse=True)
+    return {"version": "V13 Strategy Leaderboard", "horizon": horizon, "leaderboard": rows, "note": "จัดอันดับจากผลลัพธ์ที่ปิดแล้วใน signal_audit ไม่ใช่การคาดเดา"}
+
+
+def v13_rs_ranking(limit=None):
+    try:
+        n = max(5, min(50, int(limit or request.args.get("limit", 20))))
+    except Exception:
+        n = 20
+    out = []
+    for sym in V13_DEFAULT_UNIVERSE[:max(n, 20)]:
+        try:
+            s = resolve_delisted_symbol(sym).upper().replace(".BK", "").replace(".SET", "")
+            rs = v13_relative_strength_score(s)
+            if rs is None:
+                continue
+            out.append({"symbol": s, "benchmark": V13_RS_BENCHMARK, "rs_score": rs})
+        except Exception:
+            continue
+    out = sorted(out, key=lambda x: x["rs_score"], reverse=True)[:n]
+    return {"version": "V13 Relative Strength Ranking", "ranking": out}
+
+
+def v13_quality_snapshot(symbol):
+    sym = resolve_delisted_symbol(symbol).upper().replace(".BK", "").replace(".SET", "")
+    ex = None
+    try:
+        ex = v10_explainable_score(sym) if "v10_explainable_score" in globals() else None
+    except Exception as e:
+        ex = {"error": str(e)[:160]}
+    base_score = ex.get("final_score") if isinstance(ex, dict) else 50
+    decision = ex.get("decision", "WAIT") if isinstance(ex, dict) else "WAIT"
+    side = "CALL" if "CALL" in decision else "PUT" if "PUT" in decision else v13_side_from_signal(decision, base_score)
+    regime = (ex.get("regime") or {}).get("label") if isinstance(ex, dict) and isinstance(ex.get("regime"), dict) else None
+    mtf = v13_mtf_consensus(sym)
+    rs = v13_relative_strength_score(sym)
+    breadth = v13_safe_breadth_summary()
+    adaptive = v13_adaptive_score(sym, base_score, side, regime, breadth, rs, mtf)
+    false_risk = v13_false_signal_risk(side, regime, breadth, mtf, rs)
+    quality = v13_signal_quality_score(adaptive["adaptive_score"], false_risk["false_risk_score"], side)
+    return {"version": "V13 Signal Quality Snapshot", "symbol": sym, "side": side, "base_explainable_score": base_score, "adaptive_score": adaptive, "false_signal_risk": false_risk, "signal_quality_score": quality, "mtf_consensus": mtf, "relative_strength_score": rs, "breadth_regime": breadth, "source_explainable_score": ex}
+
+
+def v13_dashboard():
+    horizon = request.args.get("horizon", "5d") if "request" in globals() else "5d"
+    winrate = v13_winrate_stats(None, horizon)
+    false_signals = v13_false_signal_detector(horizon)
+    leaderboard = v13_strategy_leaderboard(horizon)
+    rs = v13_rs_ranking(10)
+    return {
+        "version": "V13 Signal Quality Layer Free 100%",
+        "time": now_text(),
+        "executive_summary": {
+            "closed_signals": winrate.get("closed_signals"),
+            "win_rate_pct": winrate.get("win_rate_pct"),
+            "avg_return_pct": winrate.get("avg_return_pct"),
+            "best_strategy": (leaderboard.get("leaderboard") or [{}])[0],
+            "highest_false_signal_pattern": (false_signals.get("high_risk_patterns") or [{}])[0],
+            "top_relative_strength": (rs.get("ranking") or [{}])[:5]
+        },
+        "winrate": winrate,
+        "strategy_leaderboard": leaderboard,
+        "false_signal_detector": false_signals,
+        "relative_strength_ranking": rs,
+        "routes": ["/v13/status", "/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
+    }
+
+
+@app.route("/v13/status", methods=["GET"])
+def v13_status_route():
     return jsonify({
-        "ok": True,
-        "status": "running",
-        "version": APP_VERSION,
-        "time_th": now_text(),
-        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
-        "database_url_exists": bool(DATABASE_URL),
-        "line_ready": bool(LINE_CHANNEL_ACCESS_TOKEN),
-        "alert_users": len(ALERT_USER_IDS),
-        "auto_alerts_enabled": ENABLE_AUTO_ALERTS,
-        "thai_auto_alerts_disabled": DISABLE_THAI_AUTO_ALERTS,
-        "alert_us_and_gold_only": ALERT_US_AND_GOLD_ONLY,
-        "routes": ["/", "/health", "/json", "/v22/alert-policy", "/scan/dry-run", "/scan/send"]
+        "version": "V13 Signal Quality Layer Free 100%",
+        "enabled": V13_ENABLED,
+        "bugfixes": {
+            "us_session_start_th": US_SESSION_START_TH,
+            "us_session_end_th": US_SESSION_END_TH,
+            "us_allow_premarket_alerts": US_ALLOW_PREMARKET_ALERTS,
+            "premarket_reminder_enabled": ENABLE_PREMARKET_REMINDER,
+            "premarket_reminder_th": PREMARKET_REMINDER_TH,
+            "top5_daily_time_th": TOP5_DAILY_TIME_TH,
+            "intuch_alias": DELISTED_SYMBOL_ALIASES.get("INTUCH")
+        },
+        "modules": ["Signal Audit Engine", "Historical Win Rate Engine", "False Signal Detector", "Adaptive Scoring", "Multi-Timeframe Consensus", "Relative Strength Ranking", "Strategy Leaderboard", "Signal Quality Dashboard"],
+        "routes": ["/v13/dashboard", "/v13/audit", "/v13/winrate", "/v13/false-signals", "/v13/adaptive/<symbol>", "/v13/mtf/<symbol>", "/v13/rs-ranking", "/v13/leaderboard"]
     })
 
-@app.route("/scan/dry-run", methods=["GET"])
-def v2210_scan_dry_run_route():
-    limit = request.args.get("limit")
-    return jsonify(v2210_scan_once(send=False, limit=limit))
 
-@app.route("/scan/send", methods=["GET", "POST"])
-def v2210_scan_send_route():
-    if not require_admin():
-        return jsonify({"ok": False, "error": "ADMIN_TOKEN required"}), 403
-    limit = request.args.get("limit")
-    return jsonify(v2210_scan_once(send=True, limit=limit))
+@app.route("/v13/dashboard", methods=["GET"])
+def v13_dashboard_route():
+    return jsonify(v13_dashboard())
 
-def start_auto_alert_thread_once():
-    global _AUTO_ALERT_THREAD_STARTED
-    if _AUTO_ALERT_THREAD_STARTED:
-        return False
-    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
-        threading.Thread(target=auto_alert_loop, daemon=True).start()
-        _AUTO_ALERT_THREAD_STARTED = True
-        print("V22.10 auto alert thread started")
-        return True
-    return False
 
+@app.route("/v13/audit", methods=["GET"])
+def v13_audit_route():
+    v13_update_audit_results()
+    conn = db(); rows = conn.execute("SELECT * FROM v13_signal_audit ORDER BY id DESC LIMIT 100").fetchall(); conn.close()
+    return jsonify({"version": "V13 Signal Audit Engine", "count": len(rows), "latest": [dict(r) for r in rows]})
+
+
+@app.route("/v13/winrate", methods=["GET"])
+def v13_winrate_route():
+    return jsonify(v13_winrate_stats(request.args.get("symbol"), request.args.get("horizon", "5d")))
+
+
+@app.route("/v13/false-signals", methods=["GET"])
+def v13_false_signals_route():
+    return jsonify(v13_false_signal_detector(request.args.get("horizon", "5d")))
+
+
+@app.route("/v13/adaptive/<symbol>", methods=["GET"])
+def v13_adaptive_route(symbol):
+    return jsonify(v13_quality_snapshot(symbol))
+
+
+@app.route("/v13/mtf/<symbol>", methods=["GET"])
+def v13_mtf_route(symbol):
+    return jsonify(v13_mtf_consensus(symbol))
+
+
+@app.route("/v13/rs-ranking", methods=["GET"])
+def v13_rs_ranking_route():
+    return jsonify(v13_rs_ranking(request.args.get("limit")))
+
+
+@app.route("/v13/leaderboard", methods=["GET"])
+def v13_leaderboard_route():
+    return jsonify(v13_strategy_leaderboard(request.args.get("horizon", "5d")))
 
 init_db()
 v10_init_db()
 v11_init_db()
+v13_init_db()
 
-# Start background alert loop on import too, so it works with Gunicorn/Railway web process.
-start_auto_alert_thread_once()
+# __main__ runner moved to end by V30 so all appended institutional layers are registered before app.run.
 
+# ============================================================
+# V24 PROFESSIONAL QUANT PLATFORM
+# Walk Forward / Monte Carlo / Expectancy / Sharpe / Profit Factor
+# Kelly Position Sizing / Auto Portfolio Allocation
+# Appended as a non-destructive layer on top of the latest monolith.
+# ============================================================
+
+V24_VERSION = "V24.0 Professional Quant Platform"
+
+V24_DEFAULT_STARTING_CAPITAL = float(os.getenv("V24_STARTING_CAPITAL", "10000"))
+V24_MAX_ALLOC_PER_SYMBOL = float(os.getenv("V24_MAX_ALLOC_PER_SYMBOL", "0.18"))
+V24_MAX_ALLOC_PER_SECTOR = float(os.getenv("V24_MAX_ALLOC_PER_SECTOR", "0.35"))
+V24_MAX_KELLY_FRACTION = float(os.getenv("V24_MAX_KELLY_FRACTION", "0.25"))
+V24_MONTE_CARLO_RUNS = int(os.getenv("V24_MONTE_CARLO_RUNS", "1000"))
+V24_MONTE_CARLO_TRADES = int(os.getenv("V24_MONTE_CARLO_TRADES", "100"))
+V24_RISK_FREE_RATE = float(os.getenv("V24_RISK_FREE_RATE", "0.00"))
+
+V24_SECTOR_MAP = {
+    "NVDA":"Semiconductor", "AMD":"Semiconductor", "AVGO":"Semiconductor", "TSM":"Semiconductor",
+    "MRVL":"Semiconductor", "AMKR":"Semiconductor", "INTC":"Semiconductor", "MU":"Semiconductor",
+    "AAOI":"Semiconductor", "AEHR":"Semiconductor", "WDC":"Semiconductor", "AXTI":"Semiconductor",
+    "AAPL":"Mega Cap Tech", "MSFT":"Mega Cap Tech", "AMZN":"Mega Cap Tech", "META":"Mega Cap Tech",
+    "GOOG":"Mega Cap Tech", "GOOGL":"Mega Cap Tech", "NFLX":"Mega Cap Tech",
+    "TSLA":"EV / High Beta", "PLTR":"AI / Data", "CRWD":"Cybersecurity", "SNOW":"Cloud", "NET":"Cloud",
+    "RKLB":"Space / Aerospace", "ASTS":"Space / Telecom", "AVAV":"Defense / Drone", "KTOS":"Defense",
+    "OKLO":"Nuclear / Energy", "CEG":"Nuclear / Energy", "VST":"Energy", "LEU":"Uranium", "UUUU":"Uranium",
+    "HOOD":"Fintech", "COIN":"Crypto", "MSTR":"Crypto", "IREN":"Crypto", "CIFR":"Crypto",
+    "IONQ":"Quantum", "RGTI":"Quantum", "QBTS":"Quantum", "QUBT":"Quantum",
+    "QQQ":"ETF", "SPY":"ETF", "IWM":"ETF", "TQQQ":"ETF", "SOXL":"ETF", "SQQQ":"ETF",
+    "GOLD":"Gold", "XAUUSD":"Gold", "XAU/USD":"Gold",
+}
+
+
+def v24_safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v24_now():
+    try:
+        return now_text()
+    except Exception:
+        return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
+
+
+def v24_conn_execute(sql, params=(), fetch="none"):
+    conn = db()
+    try:
+        cur = conn.execute(sql, params or ())
+        if fetch == "one":
+            row = cur.fetchone()
+            return dict(row) if row else None
+        if fetch == "all":
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
+def v24_init_db():
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS quant_signal_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            sector TEXT,
+            strategy TEXT,
+            side TEXT,
+            score REAL,
+            risk_grade TEXT,
+            entry REAL,
+            tp1 REAL,
+            tp2 REAL,
+            sl REAL,
+            outcome TEXT DEFAULT 'PENDING',
+            exit_price REAL,
+            r_multiple REAL DEFAULT 0,
+            pnl REAL DEFAULT 0,
+            holding_minutes INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'v24',
+            notes TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS quant_portfolio_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            sector TEXT,
+            weight REAL,
+            kelly_fraction REAL,
+            score REAL,
+            reason TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS quant_walk_forward_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            train_count INTEGER,
+            test_count INTEGER,
+            train_expectancy REAL,
+            test_expectancy REAL,
+            test_hit_rate REAL,
+            notes TEXT
+        )
+    """)
+
+
+def v24_sector(symbol):
+    return V24_SECTOR_MAP.get(str(symbol or "").upper(), "Other")
+
+
+def v24_read_outcomes(limit=1000):
+    """Read outcome records from V24 table first, then fall back to legacy tables when present."""
+    rows = []
+    try:
+        rows = v24_conn_execute(
+            "SELECT * FROM quant_signal_outcomes WHERE outcome!='PENDING' ORDER BY id DESC LIMIT ?",
+            (int(limit),), "all"
+        ) or []
+    except Exception:
+        rows = []
+    if rows:
+        return list(reversed(rows))
+
+    # Fallback 1: closed_outcomes if journal module exists.
+    try:
+        rows = v24_conn_execute(
+            "SELECT symbol, strategy, side, r_multiple, pnl, result AS outcome, closed_at AS created_at FROM closed_outcomes ORDER BY id DESC LIMIT ?",
+            (int(limit),), "all"
+        ) or []
+        if rows:
+            for r in rows:
+                r.setdefault("sector", v24_sector(r.get("symbol")))
+            return list(reversed(rows))
+    except Exception:
+        pass
+
+    # Fallback 2: signals table has no outcome, so return empty rather than inventing results.
+    return []
+
+
+def v24_metric_summary(rows):
+    rs = [v24_safe_float(r.get("r_multiple"), 0.0) for r in rows]
+    wins = [x for x in rs if x > 0]
+    losses = [x for x in rs if x < 0]
+    n = len(rs)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    expectancy = (sum(rs) / n) if n else 0.0
+    hit_rate = (len(wins) / n * 100.0) if n else 0.0
+    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (gross_win if gross_win > 0 else 0.0)
+    avg_win = (sum(wins) / len(wins)) if wins else 0.0
+    avg_loss = (abs(sum(losses)) / len(losses)) if losses else 0.0
+    kelly = 0.0
+    if avg_win > 0 and avg_loss > 0 and n > 0:
+        p = len(wins) / n
+        b = avg_win / avg_loss
+        kelly = p - ((1 - p) / b)
+        kelly = max(0.0, min(V24_MAX_KELLY_FRACTION, kelly))
+    sharpe = 0.0
+    if len(rs) >= 2:
+        mean = sum(rs) / len(rs)
+        var = sum((x - mean) ** 2 for x in rs) / (len(rs) - 1)
+        sd = var ** 0.5
+        sharpe = ((mean - V24_RISK_FREE_RATE) / sd) if sd else 0.0
+    return {
+        "signals": n,
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakeven": n - len(wins) - len(losses),
+        "hit_rate": round(hit_rate, 2),
+        "expectancy_r": round(expectancy, 4),
+        "profit_factor": round(profit_factor, 4),
+        "avg_win_r": round(avg_win, 4),
+        "avg_loss_r": round(avg_loss, 4),
+        "kelly_fraction": round(kelly, 4),
+        "sharpe_ratio": round(sharpe, 4),
+        "total_r": round(sum(rs), 4),
+    }
+
+
+def v24_group_metrics(rows, key):
+    groups = {}
+    for r in rows:
+        k = str(r.get(key) or "UNKNOWN").upper() if key == "symbol" else str(r.get(key) or "UNKNOWN")
+        groups.setdefault(k, []).append(r)
+    out = []
+    for k, vals in groups.items():
+        m = v24_metric_summary(vals)
+        m[key] = k
+        out.append(m)
+    out.sort(key=lambda x: (x.get("profit_factor", 0), x.get("expectancy_r", 0), x.get("signals", 0)), reverse=True)
+    return out
+
+
+def v24_monte_carlo(rows=None, runs=None, trades=None):
+    rows = rows if rows is not None else v24_read_outcomes()
+    returns = [v24_safe_float(r.get("r_multiple"), 0.0) for r in rows if r.get("r_multiple") is not None]
+    runs = int(runs or V24_MONTE_CARLO_RUNS)
+    trades = int(trades or V24_MONTE_CARLO_TRADES)
+    if len(returns) < 5:
+        return {"ok": False, "message": "Need at least 5 closed outcomes", "closed_outcomes": len(returns)}
+    finals, max_dds = [], []
+    for _ in range(max(1, runs)):
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for _ in range(max(1, trades)):
+            equity += random.choice(returns)
+            peak = max(peak, equity)
+            max_dd = min(max_dd, equity - peak)
+        finals.append(equity)
+        max_dds.append(max_dd)
+    finals.sort(); max_dds.sort()
+    def pct(arr, p):
+        if not arr: return 0.0
+        idx = min(len(arr)-1, max(0, int(len(arr) * p)))
+        return round(arr[idx], 4)
+    return {
+        "ok": True,
+        "runs": runs,
+        "trades_per_run": trades,
+        "final_r_p10": pct(finals, 0.10),
+        "final_r_p50": pct(finals, 0.50),
+        "final_r_p90": pct(finals, 0.90),
+        "max_dd_r_p10": pct(max_dds, 0.10),
+        "max_dd_r_p50": pct(max_dds, 0.50),
+        "max_dd_r_p90": pct(max_dds, 0.90),
+    }
+
+
+def v24_walk_forward(train_ratio=0.70):
+    rows = v24_read_outcomes(2000)
+    if len(rows) < 20:
+        return {"ok": False, "message": "Need at least 20 closed outcomes for walk-forward", "closed_outcomes": len(rows)}
+    split = max(1, min(len(rows)-1, int(len(rows) * float(train_ratio))))
+    train = rows[:split]
+    test = rows[split:]
+    train_m = v24_metric_summary(train)
+    test_m = v24_metric_summary(test)
+    try:
+        v24_conn_execute(
+            "INSERT INTO quant_walk_forward_runs (created_at, train_count, test_count, train_expectancy, test_expectancy, test_hit_rate, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (v24_now(), len(train), len(test), train_m.get("expectancy_r"), test_m.get("expectancy_r"), test_m.get("hit_rate"), "auto run")
+        )
+    except Exception:
+        pass
+    return {"ok": True, "train": train_m, "test": test_m, "train_count": len(train), "test_count": len(test)}
+
+
+def v24_auto_portfolio_allocation(candidates=None, max_positions=5):
+    """Rank and allocate candidate alerts/signals using expectancy + Kelly + sector caps."""
+    candidates = candidates or []
+    rows = v24_read_outcomes(2000)
+    symbol_stats = {r.get("symbol"): r for r in v24_group_metrics(rows, "symbol")}
+    sector_alloc = {}
+    chosen = []
+
+    normalized = []
+    for c in candidates:
+        symbol = str(c.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        sector = c.get("sector") or v24_sector(symbol)
+        base_score = v24_safe_float(c.get("score"), 50)
+        stat = symbol_stats.get(symbol, {})
+        expectancy = v24_safe_float(stat.get("expectancy_r"), 0)
+        pf = v24_safe_float(stat.get("profit_factor"), 0)
+        kelly = v24_safe_float(stat.get("kelly_fraction"), 0.03)
+        rank_score = base_score + expectancy * 8 + min(pf, 3) * 3 + kelly * 40
+        normalized.append({**c, "symbol": symbol, "sector": sector, "rank_score": round(rank_score, 4), "kelly_fraction": round(kelly, 4)})
+
+    normalized.sort(key=lambda x: x.get("rank_score", 0), reverse=True)
+    for c in normalized:
+        if len(chosen) >= int(max_positions):
+            break
+        sector = c.get("sector") or "Other"
+        if sector_alloc.get(sector, 0) >= V24_MAX_ALLOC_PER_SECTOR:
+            c["rejected_reason"] = "sector cap"
+            continue
+        weight = min(V24_MAX_ALLOC_PER_SYMBOL, max(0.02, c.get("kelly_fraction", 0.03)))
+        if sector_alloc.get(sector, 0) + weight > V24_MAX_ALLOC_PER_SECTOR:
+            weight = max(0.0, V24_MAX_ALLOC_PER_SECTOR - sector_alloc.get(sector, 0))
+        if weight <= 0:
+            continue
+        sector_alloc[sector] = sector_alloc.get(sector, 0) + weight
+        c["weight"] = round(weight, 4)
+        chosen.append(c)
+        try:
+            v24_conn_execute(
+                "INSERT INTO quant_portfolio_allocations (created_at, symbol, sector, weight, kelly_fraction, score, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (v24_now(), c.get("symbol"), sector, c.get("weight"), c.get("kelly_fraction"), c.get("score"), "v24 auto allocation")
+            )
+        except Exception:
+            pass
+    return {"ok": True, "selected": chosen, "sector_allocation": {k: round(v, 4) for k, v in sector_alloc.items()}, "candidates": len(candidates)}
+
+
+def v24_quant_snapshot():
+    rows = v24_read_outcomes(2000)
+    return {
+        "ok": True,
+        "version": V24_VERSION,
+        "overall": v24_metric_summary(rows),
+        "by_symbol": v24_group_metrics(rows, "symbol")[:20],
+        "by_sector": v24_group_metrics([{**r, "sector": r.get("sector") or v24_sector(r.get("symbol"))} for r in rows], "sector")[:20],
+        "by_strategy": v24_group_metrics(rows, "strategy")[:20],
+        "monte_carlo": v24_monte_carlo(rows),
+    }
+
+
+def v24_html_table(rows, cols):
+    if not rows:
+        return "<p>No data yet.</p>"
+    th = "".join(f"<th>{c}</th>" for c in cols)
+    trs = []
+    for r in rows:
+        trs.append("<tr>" + "".join(f"<td>{r.get(c, '')}</td>" for c in cols) + "</tr>")
+    return f"<table border='1' cellpadding='6' cellspacing='0'><tr>{th}</tr>{''.join(trs)}</table>"
+
+
+@app.route('/v24')
+@app.route('/v24/dashboard')
+def v24_dashboard():
+    s = v24_quant_snapshot()
+    html = f"""
+    <html><head><meta charset='utf-8'><title>{V24_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+    <h1>{V24_VERSION}</h1>
+    <h2>Overall Quant Metrics</h2>
+    <pre>{json.dumps(s['overall'], ensure_ascii=False, indent=2)}</pre>
+    <h2>Top Option Symbols</h2>
+    {v24_html_table(s['by_symbol'], ['symbol','signals','hit_rate','profit_factor','expectancy_r','kelly_fraction','sharpe_ratio'])}
+    <h2>Sector Ranking</h2>
+    {v24_html_table(s['by_sector'], ['sector','signals','hit_rate','profit_factor','expectancy_r','kelly_fraction','sharpe_ratio'])}
+    <h2>Strategy Ranking</h2>
+    {v24_html_table(s['by_strategy'], ['strategy','signals','hit_rate','profit_factor','expectancy_r','kelly_fraction','sharpe_ratio'])}
+    <h2>Monte Carlo</h2>
+    <pre>{json.dumps(s['monte_carlo'], ensure_ascii=False, indent=2)}</pre>
+    <p><a href='/v24/json'>JSON</a> | <a href='/v24/monte-carlo'>Monte Carlo</a> | <a href='/v24/walk-forward'>Walk Forward</a></p>
+    </body></html>
+    """
+    return Response(html, mimetype='text/html')
+
+
+@app.route('/v24/json')
+def v24_json():
+    return jsonify(v24_quant_snapshot())
+
+
+@app.route('/v24/monte-carlo')
+def v24_route_monte_carlo():
+    runs = request.args.get('runs')
+    trades = request.args.get('trades')
+    return jsonify(v24_monte_carlo(runs=int(runs) if runs else None, trades=int(trades) if trades else None))
+
+
+@app.route('/v24/walk-forward')
+def v24_route_walk_forward():
+    ratio = v24_safe_float(request.args.get('train_ratio'), 0.70)
+    return jsonify(v24_walk_forward(ratio))
+
+
+@app.route('/v24/expectancy')
+def v24_route_expectancy():
+    rows = v24_read_outcomes(2000)
+    return jsonify({"ok": True, "overall": v24_metric_summary(rows), "by_symbol": v24_group_metrics(rows, 'symbol')[:50], "by_strategy": v24_group_metrics(rows, 'strategy')[:50]})
+
+
+@app.route('/v24/portfolio/allocation-preview')
+def v24_route_allocation_preview():
+    # Optional query: symbols=NVDA,AAPL,TSLA&scores=91,88,86
+    symbols = [x.strip().upper() for x in str(request.args.get('symbols') or 'NVDA,AAPL,MSFT,TSLA,AMD,QQQ,SPY,GOLD').split(',') if x.strip()]
+    scores = [v24_safe_float(x, 80) for x in str(request.args.get('scores') or '').split(',') if x.strip()]
+    candidates = []
+    for i, sym in enumerate(symbols):
+        candidates.append({"symbol": sym, "sector": v24_sector(sym), "score": scores[i] if i < len(scores) else 80})
+    return jsonify(v24_auto_portfolio_allocation(candidates))
+
+
+@app.route('/v24/outcome/add', methods=['GET', 'POST'])
+def v24_route_add_outcome():
+    data = request.get_json(silent=True) or request.args
+    symbol = str(data.get('symbol') or '').upper()
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol required"}), 400
+    side = str(data.get('side') or 'CALL').upper()
+    strategy = str(data.get('strategy') or 'MANUAL').upper()
+    entry = v24_safe_float(data.get('entry'), 0)
+    tp1 = v24_safe_float(data.get('tp1'), 0)
+    tp2 = v24_safe_float(data.get('tp2'), 0)
+    sl = v24_safe_float(data.get('sl'), 0)
+    outcome = str(data.get('outcome') or 'PENDING').upper()
+    exit_price = v24_safe_float(data.get('exit_price'), 0)
+    r_multiple = v24_safe_float(data.get('r_multiple'), 0)
+    pnl = v24_safe_float(data.get('pnl'), 0)
+    score = v24_safe_float(data.get('score'), 0)
+    risk_grade = str(data.get('risk_grade') or '')
+    sector = str(data.get('sector') or v24_sector(symbol))
+    v24_conn_execute(
+        "INSERT INTO quant_signal_outcomes (created_at, symbol, sector, strategy, side, score, risk_grade, entry, tp1, tp2, sl, outcome, exit_price, r_multiple, pnl, source, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (v24_now(), symbol, sector, strategy, side, score, risk_grade, entry, tp1, tp2, sl, outcome, exit_price, r_multiple, pnl, 'manual', str(data.get('notes') or ''))
+    )
+    return jsonify({"ok": True, "message": "V24 outcome saved", "symbol": symbol, "outcome": outcome})
+
+
+try:
+    v24_init_db()
+except Exception as e:
+    print('v24 init error:', e)
+
+# ============================================================
+# END V24 PROFESSIONAL QUANT PLATFORM
+# ============================================================
+
+
+# ============================================================
+# V25.1 PROFESSIONAL EXECUTION INTELLIGENCE — MARKET CONTEXT AI
+# FOMC / Earnings / VIX / SPY EMA200 context layer before alerts.
+# Non-destructive layer appended on top of current production monolith.
+# ============================================================
+
+V25_VERSION = "V25.1 Professional Execution Intelligence — Market Context AI"
+V25_VIX_HIGH = float(os.getenv("V25_VIX_HIGH", "25"))
+V25_VIX_EXTREME = float(os.getenv("V25_VIX_EXTREME", "32"))
+V25_EARNINGS_BLOCK_DAYS = int(os.getenv("V25_EARNINGS_BLOCK_DAYS", "1"))
+V25_EARNINGS_CAUTION_DAYS = int(os.getenv("V25_EARNINGS_CAUTION_DAYS", "3"))
+V25_CONTEXT_STRICT = os.getenv("V25_CONTEXT_STRICT", "true").lower() in {"1", "true", "yes", "on"}
+V25_FOMC_DATES = {x.strip() for x in os.getenv("V25_FOMC_DATES", "").split(",") if x.strip()}
+V25_CACHE = {}
+
+
+def v25_today_th():
+    return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d")
+
+
+def v25_now_th():
+    return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def v25_cache_get(key, ttl=300):
+    item = V25_CACHE.get(key)
+    if not item:
+        return None
+    ts, val = item
+    if time.time() - ts > ttl:
+        V25_CACHE.pop(key, None)
+        return None
+    return val
+
+
+def v25_cache_set(key, val):
+    V25_CACHE[key] = (time.time(), val)
+    return val
+
+
+def v25_safe_float(x, default=None):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v25_yf_history(symbol, period="1y", interval="1d"):
+    key = f"v25_yf:{symbol}:{period}:{interval}"
+    cached = v25_cache_get(key, ttl=600)
+    if cached is not None:
+        return cached
+    try:
+        data = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
+        if data is None or data.empty:
+            return v25_cache_set(key, None)
+        return v25_cache_set(key, data.dropna())
+    except Exception as e:
+        print("v25_yf_history error", symbol, e)
+        return v25_cache_set(key, None)
+
+
+def v25_latest_close(symbol):
+    data = v25_yf_history(symbol, period="10d", interval="1d")
+    try:
+        if data is not None and not data.empty:
+            return float(data["Close"].dropna().iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def v25_ema(values, period):
+    vals = list(values or [])
+    if len(vals) < period:
+        return None
+    k = 2 / (period + 1)
+    ema_val = vals[0]
+    for price in vals[1:]:
+        ema_val = price * k + ema_val * (1 - k)
+    return ema_val
+
+
+def v25_spy_context():
+    data = v25_yf_history("SPY", period="2y", interval="1d")
+    if data is None or data.empty:
+        return {"ok": False, "symbol": "SPY", "reason": "no_data"}
+    closes = [float(x) for x in data["Close"].dropna().tolist()]
+    price = closes[-1] if closes else None
+    ema200 = v25_ema(closes, 200)
+    above = bool(price and ema200 and price >= ema200)
+    return {
+        "ok": True,
+        "symbol": "SPY",
+        "price": round(price, 2) if price else None,
+        "ema200": round(ema200, 2) if ema200 else None,
+        "above_ema200": above,
+        "bias": "RISK_ON" if above else "RISK_OFF",
+    }
+
+
+def v25_vix_context():
+    # Yahoo usually supports ^VIX. Fallback stays neutral if unavailable.
+    vix = v25_latest_close("^VIX")
+    status = "UNKNOWN"
+    penalty = 0
+    if vix is not None:
+        if vix >= V25_VIX_EXTREME:
+            status = "EXTREME_RISK"
+            penalty = -14
+        elif vix >= V25_VIX_HIGH:
+            status = "HIGH_RISK"
+            penalty = -9
+        elif vix >= 20:
+            status = "ELEVATED"
+            penalty = -4
+        else:
+            status = "NORMAL"
+            penalty = 0
+    return {"ok": vix is not None, "vix": round(vix, 2) if vix else None, "status": status, "call_score_adjustment": penalty}
+
+
+def v25_is_fomc_today():
+    today = v25_today_th()
+    if today in V25_FOMC_DATES:
+        return {"is_fomc": True, "source": "V25_FOMC_DATES", "date": today, "score_adjustment": -10}
+
+    # Optional lightweight Finnhub economic-calendar attempt. If unavailable, return neutral.
+    if FINNHUB_API_KEY:
+        try:
+            r = requests.get(
+                "https://finnhub.io/api/v1/calendar/economic",
+                params={"from": today, "to": today, "token": FINNHUB_API_KEY},
+                headers=REQUEST_HEADERS,
+                timeout=12,
+            )
+            data = r.json() if r is not None else {}
+            events = data.get("economicCalendar") or data.get("events") or []
+            hits = []
+            for ev in events:
+                title = str(ev.get("event") or ev.get("title") or ev.get("name") or "")
+                if any(k in title.upper() for k in ["FOMC", "FED INTEREST", "FEDERAL RESERVE", "RATE DECISION"]):
+                    hits.append(title)
+            if hits:
+                return {"is_fomc": True, "source": "Finnhub economic calendar", "date": today, "events": hits[:3], "score_adjustment": -10}
+        except Exception as e:
+            print("v25_fomc_finnhub error", e)
+
+    return {"is_fomc": False, "source": "none", "date": today, "score_adjustment": 0}
+
+
+def v25_parse_date(value):
+    if not value:
+        return None
+    try:
+        if isinstance(value, (list, tuple)) and value:
+            value = value[0]
+        s = str(value)
+        # Handles pandas Timestamp, date strings, ISO strings.
+        return datetime.fromisoformat(s[:10]).date()
+    except Exception:
+        try:
+            return value.date()
+        except Exception:
+            return None
+
+
+def v25_earnings_context(symbol):
+    sym = str(symbol or "").upper().strip()
+    if not sym or sym in {"SPY", "QQQ", "IWM", "GOLD", "XAUUSD", "XAU/USD"}:
+        return {"ok": False, "symbol": sym, "has_earnings": False, "reason": "not_applicable", "score_adjustment": 0}
+    key = f"v25_earn:{sym}"
+    cached = v25_cache_get(key, ttl=3600)
+    if cached is not None:
+        return cached
+    today = datetime.now(timezone.utc).date()
+    try:
+        t = yf.Ticker(sym)
+        dt = None
+        try:
+            ed = t.get_earnings_dates(limit=4)
+            if ed is not None and not ed.empty:
+                for idx in list(ed.index):
+                    d = v25_parse_date(idx)
+                    if d and d >= today:
+                        dt = d
+                        break
+        except Exception:
+            pass
+        if dt is None:
+            try:
+                info = t.get_info() or {}
+                raw = info.get("earningsDate") or info.get("earningsTimestamp")
+                if isinstance(raw, (int, float)):
+                    dt = datetime.utcfromtimestamp(int(raw)).date()
+                else:
+                    dt = v25_parse_date(raw)
+            except Exception:
+                pass
+        if not dt:
+            return v25_cache_set(key, {"ok": False, "symbol": sym, "has_earnings": False, "reason": "no_upcoming_earnings_found", "score_adjustment": 0})
+        days = (dt - today).days
+        if 0 <= days <= V25_EARNINGS_BLOCK_DAYS:
+            adj, risk = -18, "BLOCK_OR_REDUCE_SIZE"
+        elif 0 <= days <= V25_EARNINGS_CAUTION_DAYS:
+            adj, risk = -10, "CAUTION_REDUCE_SIZE"
+        else:
+            adj, risk = 0, "OK"
+        return v25_cache_set(key, {"ok": True, "symbol": sym, "has_earnings": True, "earnings_date": str(dt), "days_to_earnings": days, "risk": risk, "score_adjustment": adj})
+    except Exception as e:
+        return v25_cache_set(key, {"ok": False, "symbol": sym, "has_earnings": False, "reason": str(e), "score_adjustment": 0})
+
+
+def v25_symbol_type(symbol):
+    sym = str(symbol or "").upper().strip()
+    if sym in {"GOLD", "XAU", "XAUUSD", "XAU/USD"}:
+        return "GOLD"
+    if sym in {"QQQ", "SPY", "IWM", "TQQQ", "SOXL", "SQQQ"}:
+        return "ETF"
+    return "US_STOCK"
+
+
+def v25_market_context(symbol="NVDA"):
+    sym = str(symbol or "NVDA").upper().strip()
+    fomc = v25_is_fomc_today()
+    vix = v25_vix_context()
+    spy = v25_spy_context()
+    earnings = v25_earnings_context(sym)
+
+    context_score = 100
+    reasons = []
+    blockers = []
+
+    if fomc.get("is_fomc"):
+        context_score += int(fomc.get("score_adjustment") or -10)
+        reasons.append("FOMC / Fed event today: reduce conviction")
+        if V25_CONTEXT_STRICT:
+            blockers.append("FOMC_DAY")
+
+    if vix.get("status") in {"HIGH_RISK", "EXTREME_RISK"}:
+        context_score += int(vix.get("call_score_adjustment") or 0)
+        reasons.append(f"VIX {vix.get('vix')} = {vix.get('status')}: reduce CALL/high-beta score")
+        if vix.get("status") == "EXTREME_RISK":
+            blockers.append("VIX_EXTREME")
+
+    if spy.get("ok") and not spy.get("above_ema200"):
+        context_score -= 12
+        reasons.append("SPY below EMA200: market risk-off")
+        if V25_CONTEXT_STRICT:
+            blockers.append("SPY_BELOW_EMA200")
+    elif spy.get("ok") and spy.get("above_ema200"):
+        reasons.append("SPY above EMA200: market risk-on background")
+
+    if earnings.get("score_adjustment"):
+        context_score += int(earnings.get("score_adjustment") or 0)
+        reasons.append(f"Earnings risk in {earnings.get('days_to_earnings')} day(s): {earnings.get('risk')}")
+        if earnings.get("risk") == "BLOCK_OR_REDUCE_SIZE" and V25_CONTEXT_STRICT:
+            blockers.append("EARNINGS_NEAR")
+
+    context_score = max(0, min(100, int(context_score)))
+    return {
+        "ok": True,
+        "version": V25_VERSION,
+        "symbol": sym,
+        "asset_type": v25_symbol_type(sym),
+        "timestamp_th": v25_now_th(),
+        "context_score": context_score,
+        "risk_mode": "BLOCK" if blockers else "NORMAL" if context_score >= 80 else "CAUTION",
+        "blockers": blockers,
+        "reasons": reasons or ["No major market-context blocker detected"],
+        "fomc": fomc,
+        "earnings": earnings,
+        "vix": vix,
+        "spy": spy,
+    }
+
+
+def v25_adjust_score(symbol, base_score, side="CALL"):
+    base = int(v25_safe_float(base_score, 50) or 50)
+    ctx = v25_market_context(symbol)
+    adjusted = base
+    adjustments = []
+
+    # FOMC / earnings / SPY are already represented by context score gap.
+    context_gap = ctx.get("context_score", 100) - 100
+    if context_gap:
+        adjusted += int(context_gap)
+        adjustments.append({"source": "market_context", "points": int(context_gap)})
+
+    # Extra explicit CALL penalty on high VIX.
+    if str(side or "CALL").upper().startswith("CALL") and ctx.get("vix", {}).get("status") in {"HIGH_RISK", "EXTREME_RISK"}:
+        extra = -4 if ctx["vix"]["status"] == "HIGH_RISK" else -8
+        adjusted += extra
+        adjustments.append({"source": "vix_call_extra", "points": extra})
+
+    adjusted = max(0, min(100, int(adjusted)))
+    decision = "ALLOW"
+    if ctx.get("blockers"):
+        decision = "BLOCK"
+    elif adjusted < 85:
+        decision = "REJECT_SCORE_AFTER_CONTEXT"
+    elif ctx.get("context_score", 100) < 80:
+        decision = "CAUTION_REDUCE_SIZE"
+
+    result = {
+        "ok": True,
+        "symbol": str(symbol or "").upper(),
+        "side": str(side or "CALL").upper(),
+        "base_score": base,
+        "adjusted_score": adjusted,
+        "decision": decision,
+        "adjustments": adjustments,
+        "context": ctx,
+    }
+    v25_save_context_snapshot(result)
+    return result
+
+
+def v25_save_context_snapshot(result):
+    try:
+        v24_conn_execute("""
+            CREATE TABLE IF NOT EXISTS market_context_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT,
+                base_score REAL,
+                adjusted_score REAL,
+                decision TEXT,
+                context_score REAL,
+                blockers TEXT,
+                payload TEXT
+            )
+        """)
+        ctx = result.get("context", {}) or {}
+        v24_conn_execute(
+            "INSERT INTO market_context_snapshots (created_at, symbol, side, base_score, adjusted_score, decision, context_score, blockers, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (v25_now_th(), result.get("symbol"), result.get("side"), result.get("base_score"), result.get("adjusted_score"), result.get("decision"), ctx.get("context_score"), ",".join(ctx.get("blockers") or []), json.dumps(result, ensure_ascii=False)[:8000])
+        )
+    except Exception as e:
+        print("v25_save_context_snapshot error", e)
+
+
+def v25_context_dashboard_html(symbol="NVDA"):
+    ctx = v25_market_context(symbol)
+    sample = v25_adjust_score(symbol, request.args.get("score") or 91, request.args.get("side") or "CALL")
+    rows = []
+    try:
+        rows = v24_conn_execute("SELECT created_at, symbol, side, base_score, adjusted_score, decision, context_score, blockers FROM market_context_snapshots ORDER BY id DESC LIMIT 25", fetch="all") or []
+    except Exception:
+        rows = []
+    table = "<p>No context snapshots yet.</p>"
+    if rows:
+        table = "<table border='1' cellpadding='6' cellspacing='0'><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Base</th><th>Adjusted</th><th>Decision</th><th>Context</th><th>Blockers</th></tr>" + "".join(
+            f"<tr><td>{r.get('created_at')}</td><td>{r.get('symbol')}</td><td>{r.get('side')}</td><td>{r.get('base_score')}</td><td>{r.get('adjusted_score')}</td><td>{r.get('decision')}</td><td>{r.get('context_score')}</td><td>{r.get('blockers')}</td></tr>" for r in rows
+        ) + "</table>"
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V25_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+      <h1>{V25_VERSION}</h1>
+      <h2>Market Context: {symbol.upper()}</h2>
+      <pre>{json.dumps(ctx, ensure_ascii=False, indent=2)}</pre>
+      <h2>Sample Adjusted Score</h2>
+      <pre>{json.dumps(sample, ensure_ascii=False, indent=2)}</pre>
+      <h2>Recent Context Snapshots</h2>
+      {table}
+      <p><a href='/v25/context/{symbol.upper()}'>JSON Context</a> | <a href='/v25/adjust-score?symbol={symbol.upper()}&score=91&side=CALL'>Adjust Score JSON</a> | <a href='/v24'>V24 Quant</a></p>
+    </body></html>
+    """
+
+
+@app.route('/v25')
+@app.route('/v25/dashboard')
+def v25_dashboard():
+    symbol = request.args.get('symbol') or 'NVDA'
+    return Response(v25_context_dashboard_html(symbol), mimetype='text/html')
+
+
+@app.route('/v25/health')
+def v25_health():
+    return jsonify({"ok": True, "version": V25_VERSION})
+
+
+@app.route('/v25/context')
+def v25_route_context_default():
+    return jsonify(v25_market_context(request.args.get('symbol') or 'NVDA'))
+
+
+@app.route('/v25/context/<symbol>')
+def v25_route_context(symbol):
+    return jsonify(v25_market_context(symbol))
+
+
+@app.route('/v25/adjust-score')
+def v25_route_adjust_score():
+    return jsonify(v25_adjust_score(request.args.get('symbol') or 'NVDA', request.args.get('score') or 91, request.args.get('side') or 'CALL'))
+
+
+try:
+    # Ensure V25 table exists at import time under gunicorn.
+    v25_save_context_snapshot({"symbol": "INIT", "side": "NA", "base_score": 0, "adjusted_score": 0, "decision": "INIT", "context": {"context_score": 100, "blockers": []}})
+except Exception as e:
+    print('v25 init warning:', e)
+
+# ============================================================
+# END V25.1 MARKET CONTEXT AI
+# ============================================================
+
+# ============================================================
+# V25.2 EARNINGS INTELLIGENCE ENGINE
+# ต่อจาก V25.1 Market Context AI โดยไม่ลบระบบเดิม
+# ============================================================
+V25_2_VERSION = "V25.2 Earnings Intelligence Engine"
+V25_EARNINGS_BLOCK_DAYS = int(os.getenv("V25_EARNINGS_BLOCK_DAYS", "1"))
+V25_EARNINGS_CAUTION_DAYS = int(os.getenv("V25_EARNINGS_CAUTION_DAYS", "5"))
+V25_EARNINGS_LOOKAHEAD_DAYS = int(os.getenv("V25_EARNINGS_LOOKAHEAD_DAYS", "21"))
+V25_EARNINGS_REDUCE_SIZE_PCT = int(os.getenv("V25_EARNINGS_REDUCE_SIZE_PCT", "50"))
+V25_EARNINGS_STRICT_BLOCK = os.getenv("V25_EARNINGS_STRICT_BLOCK", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def v25_2_init_db():
+    try:
+        v24_conn_execute("""
+            CREATE TABLE IF NOT EXISTS earnings_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                earnings_date TEXT,
+                session TEXT,
+                days_to_earnings INTEGER,
+                risk_level TEXT,
+                action TEXT,
+                score_adjustment REAL DEFAULT 0,
+                position_size_factor REAL DEFAULT 1,
+                source TEXT,
+                payload TEXT
+            )
+        """)
+        v24_conn_execute("""
+            CREATE TABLE IF NOT EXISTS earnings_blocked_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT,
+                base_score REAL,
+                adjusted_score REAL,
+                reason TEXT,
+                earnings_date TEXT,
+                days_to_earnings INTEGER,
+                risk_level TEXT,
+                payload TEXT
+            )
+        """)
+    except Exception as e:
+        print("v25_2_init_db error", e)
+
+
+def v25_2_today_th_date():
+    return (datetime.now(timezone.utc) + timedelta(hours=7)).date()
+
+
+def v25_2_parse_date_any(x):
+    if not x:
+        return None
+    try:
+        if isinstance(x, datetime):
+            return x.date()
+        # pandas Timestamp also supports date()
+        if hasattr(x, "date"):
+            return x.date()
+        if isinstance(x, (int, float)):
+            return datetime.utcfromtimestamp(int(x)).date()
+        s = str(x).strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(s[:10], fmt).date()
+            except Exception:
+                pass
+        # ISO fallback
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def v25_2_finnhub_earnings(symbol):
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        today = v25_2_today_th_date()
+        to_date = today + timedelta(days=V25_EARNINGS_LOOKAHEAD_DAYS)
+        r = requests.get(
+            "https://finnhub.io/api/v1/calendar/earnings",
+            params={"from": str(today), "to": str(to_date), "symbol": str(symbol).upper(), "token": FINNHUB_API_KEY},
+            headers=REQUEST_HEADERS,
+            timeout=20,
+        )
+        data = r.json()
+        rows = data.get("earningsCalendar") if isinstance(data, dict) else None
+        if not rows:
+            return None
+        row = rows[0]
+        dt = v25_2_parse_date_any(row.get("date"))
+        if not dt:
+            return None
+        hour = str(row.get("hour") or "").lower()
+        if "amc" in hour or "after" in hour:
+            session = "After Market"
+        elif "bmo" in hour or "before" in hour:
+            session = "Before Open"
+        else:
+            session = row.get("hour") or "Unknown"
+        return {"date": dt, "session": session, "source": "Finnhub", "raw": row}
+    except Exception as e:
+        print("v25_2_finnhub_earnings error", symbol, e)
+        return None
+
+
+def v25_2_yahoo_earnings(symbol):
+    try:
+        t = yf.Ticker(str(symbol).upper())
+        # Best current yfinance method
+        try:
+            ed = t.get_earnings_dates(limit=4)
+            if ed is not None and not ed.empty:
+                idx = list(ed.index)
+                today = v25_2_today_th_date()
+                future = []
+                for x in idx:
+                    dt = v25_2_parse_date_any(x)
+                    if dt and dt >= today:
+                        future.append(dt)
+                if future:
+                    return {"date": min(future), "session": "Unknown", "source": "Yahoo Finance", "raw": "get_earnings_dates"}
+        except Exception:
+            pass
+        # info fallback
+        try:
+            info = t.get_info() or {}
+        except Exception:
+            info = getattr(t, "info", {}) or {}
+        for key in ("earningsTimestamp", "earningsDate", "earningsTimestampStart", "earningsTimestampEnd"):
+            raw = info.get(key)
+            if isinstance(raw, list) and raw:
+                raw = raw[0]
+            dt = v25_2_parse_date_any(raw)
+            if dt:
+                return {"date": dt, "session": "Unknown", "source": "Yahoo Finance info", "raw": {key: str(raw)}}
+    except Exception as e:
+        print("v25_2_yahoo_earnings error", symbol, e)
+    return None
+
+
+def v25_2_earnings_lookup(symbol):
+    sym = str(symbol or "").upper().strip()
+    if not sym or sym in {"GOLD", "XAU", "XAUUSD", "XAU/USD", "SPY", "QQQ", "IWM", "TQQQ", "SOXL", "SQQQ"}:
+        return {"ok": True, "symbol": sym, "has_earnings": False, "reason": "no_company_earnings_for_asset"}
+    cached = cache_get(f"V25_2_EARNINGS:{sym}")
+    if cached:
+        return cached
+    event = v25_2_finnhub_earnings(sym) or v25_2_yahoo_earnings(sym)
+    if not event:
+        result = {"ok": True, "symbol": sym, "has_earnings": False, "reason": "no_upcoming_earnings_found", "score_adjustment": 0, "position_size_factor": 1.0, "action": "ALLOW"}
+        cache_set(f"V25_2_EARNINGS:{sym}", result)
+        return result
+    today = v25_2_today_th_date()
+    days = (event["date"] - today).days
+    if days < 0:
+        risk_level = "PAST"
+        action = "ALLOW"
+        score_adj = 0
+        size_factor = 1.0
+    elif days <= V25_EARNINGS_BLOCK_DAYS:
+        risk_level = "EXTREME"
+        action = "BLOCK" if V25_EARNINGS_STRICT_BLOCK else "REDUCE_SIZE"
+        score_adj = -22
+        size_factor = 0.25
+    elif days <= 2:
+        risk_level = "HIGH"
+        action = "REDUCE_SIZE"
+        score_adj = -16
+        size_factor = V25_EARNINGS_REDUCE_SIZE_PCT / 100.0
+    elif days <= V25_EARNINGS_CAUTION_DAYS:
+        risk_level = "CAUTION"
+        action = "REDUCE_SIZE"
+        score_adj = -8
+        size_factor = 0.75
+    else:
+        risk_level = "NORMAL"
+        action = "ALLOW"
+        score_adj = 0
+        size_factor = 1.0
+    result = {
+        "ok": True,
+        "version": V25_2_VERSION,
+        "symbol": sym,
+        "has_earnings": True,
+        "earnings_date": str(event["date"]),
+        "session": event.get("session") or "Unknown",
+        "days_to_earnings": days,
+        "risk_level": risk_level,
+        "action": action,
+        "score_adjustment": score_adj,
+        "position_size_factor": round(size_factor, 2),
+        "source": event.get("source"),
+    }
+    try:
+        v24_conn_execute(
+            "INSERT INTO earnings_events (created_at, symbol, earnings_date, session, days_to_earnings, risk_level, action, score_adjustment, position_size_factor, source, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (v25_now_th(), sym, result.get("earnings_date"), result.get("session"), days, risk_level, action, score_adj, round(size_factor, 2), event.get("source"), json.dumps(result, ensure_ascii=False)[:8000])
+        )
+    except Exception as e:
+        print("v25_2 save earnings_event error", e)
+    cache_set(f"V25_2_EARNINGS:{sym}", result)
+    return result
+
+
+# Override V25.1 earnings context so Market Context AI uses the stronger V25.2 engine.
+def v25_earnings_context(symbol):
+    return v25_2_earnings_lookup(symbol)
+
+
+def v25_2_adjust_for_earnings(symbol, base_score, side="CALL"):
+    base = int(v25_safe_float(base_score, 50) or 50)
+    e = v25_2_earnings_lookup(symbol)
+    adjusted = max(0, min(100, base + int(e.get("score_adjustment") or 0)))
+    decision = "ALLOW"
+    reason = "NO_EARNINGS_BLOCKER"
+    if e.get("action") == "BLOCK":
+        decision = "BLOCK"
+        reason = f"EARNINGS_{e.get('risk_level')}_{e.get('days_to_earnings')}_DAYS"
+    elif e.get("action") == "REDUCE_SIZE":
+        decision = "REDUCE_SIZE"
+        reason = f"EARNINGS_{e.get('risk_level')}_{e.get('days_to_earnings')}_DAYS"
+    payload = {"ok": True, "version": V25_2_VERSION, "symbol": str(symbol).upper(), "side": str(side).upper(), "base_score": base, "adjusted_score": adjusted, "decision": decision, "reason": reason, "earnings": e}
+    if decision == "BLOCK":
+        try:
+            v24_conn_execute(
+                "INSERT INTO earnings_blocked_signals (created_at, symbol, side, base_score, adjusted_score, reason, earnings_date, days_to_earnings, risk_level, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (v25_now_th(), payload["symbol"], payload["side"], base, adjusted, reason, e.get("earnings_date"), e.get("days_to_earnings"), e.get("risk_level"), json.dumps(payload, ensure_ascii=False)[:8000])
+            )
+        except Exception as ex:
+            print("v25_2 save blocked error", ex)
+    return payload
+
+
+def v25_2_earnings_calendar(symbols=None):
+    if symbols is None:
+        symbols = ["NVDA", "AAPL", "TSLA", "AMD", "MSFT", "META", "AMZN", "GOOGL", "AVGO", "PLTR"]
+    out = []
+    for s in symbols:
+        try:
+            out.append(v25_2_earnings_lookup(s))
+        except Exception as e:
+            out.append({"ok": False, "symbol": s, "error": str(e)})
+    return out
+
+
+def v25_2_dashboard_html():
+    symbol = request.args.get("symbol") or "NVDA"
+    risk = v25_2_adjust_for_earnings(symbol, request.args.get("score") or 91, request.args.get("side") or "CALL")
+    cal = v25_2_earnings_calendar()
+    events = []
+    blocked = []
+    try:
+        events = v24_conn_execute("SELECT created_at, symbol, earnings_date, session, days_to_earnings, risk_level, action, score_adjustment, position_size_factor, source FROM earnings_events ORDER BY id DESC LIMIT 40", fetch="all") or []
+        blocked = v24_conn_execute("SELECT created_at, symbol, side, base_score, adjusted_score, reason, earnings_date, days_to_earnings, risk_level FROM earnings_blocked_signals ORDER BY id DESC LIMIT 25", fetch="all") or []
+    except Exception:
+        pass
+    def html_table(rows):
+        if not rows:
+            return "<p>No records yet.</p>"
+        keys = list(rows[0].keys())
+        return "<table border='1' cellpadding='6' cellspacing='0'><tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>" + "".join("<tr>" + "".join(f"<td>{r.get(k)}</td>" for k in keys) + "</tr>" for r in rows) + "</table>"
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V25_2_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+      <h1>{V25_2_VERSION}</h1>
+      <h2>Earnings Risk: {symbol.upper()}</h2>
+      <pre>{json.dumps(risk, ensure_ascii=False, indent=2)}</pre>
+      <h2>Upcoming Earnings Watchlist</h2>
+      <pre>{json.dumps(cal, ensure_ascii=False, indent=2)}</pre>
+      <h2>Recent Earnings Events</h2>{html_table(events)}
+      <h2>Blocked Signals</h2>{html_table(blocked)}
+      <p><a href='/v25/earnings/{symbol.upper()}'>Earnings JSON</a> | <a href='/v25/earnings-risk?symbol={symbol.upper()}&score=91&side=CALL'>Risk JSON</a> | <a href='/v25'>V25.1 Market Context</a></p>
+    </body></html>
+    """
+
+
+@app.route('/v25/earnings')
+def v25_2_route_earnings_calendar():
+    raw = request.args.get('symbols') or ''
+    symbols = [x.strip().upper() for x in raw.split(',') if x.strip()] or None
+    return jsonify({"ok": True, "version": V25_2_VERSION, "calendar": v25_2_earnings_calendar(symbols)})
+
+
+@app.route('/v25/earnings/<symbol>')
+def v25_2_route_earnings_symbol(symbol):
+    return jsonify(v25_2_earnings_lookup(symbol))
+
+
+@app.route('/v25/earnings-calendar')
+def v25_2_route_earnings_calendar_alias():
+    return v25_2_route_earnings_calendar()
+
+
+@app.route('/v25/earnings-risk')
+def v25_2_route_earnings_risk():
+    return jsonify(v25_2_adjust_for_earnings(request.args.get('symbol') or 'NVDA', request.args.get('score') or 91, request.args.get('side') or 'CALL'))
+
+
+@app.route('/v25/earnings-dashboard')
+def v25_2_route_dashboard():
+    return Response(v25_2_dashboard_html(), mimetype='text/html')
+
+
+try:
+    v25_2_init_db()
+except Exception as e:
+    print('v25.2 init warning:', e)
+
+# ============================================================
+# END V25.2 EARNINGS INTELLIGENCE ENGINE
+# ============================================================
+
+
+
+# ============================================================
+# V25.3 OPTION FLOW INTELLIGENCE ENGINE
+# Free-data implementation using yfinance option-chain snapshots.
+# Adds Put/Call Ratio, Open Interest magnet levels, unusual-volume proxy,
+# Flow Score, database persistence, dashboard, and alert filter hooks.
+# ============================================================
+
+V25_3_VERSION = "V25.3 Option Flow Intelligence"
+
+# Symbols where option-flow scoring is meaningful. Gold/Thai stocks are excluded.
+V25_3_OPTION_SYMBOLS = [
+    x.strip().upper()
+    for x in os.getenv(
+        "V25_3_OPTION_SYMBOLS",
+        "NVDA,AAPL,MSFT,AMZN,META,GOOGL,GOOG,TSLA,AMD,AVGO,PLTR,TSM,QQQ,SPY,IWM,SOXL,TQQQ,NFLX,MRVL,CRDO,HOOD,SMCI,COIN,MSTR,ARM,INTC"
+    ).split(",")
+    if x.strip()
+]
+
+V25_3_MIN_FLOW_SCORE = int(os.getenv("V25_3_MIN_FLOW_SCORE", "80"))
+V25_3_MIN_TECHNICAL_SCORE = int(os.getenv("V25_3_MIN_TECHNICAL_SCORE", "85"))
+V25_3_CHAIN_EXPIRY_INDEX = int(os.getenv("V25_3_CHAIN_EXPIRY_INDEX", "0"))
+
+
+def v25_3_now_iso():
+    try:
+        return datetime.now(timezone.utc).isoformat()
+    except Exception:
+        return datetime.utcnow().isoformat()
+
+
+def v25_3_num(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v25_3_init_db():
+    """Create V25.3 option-flow tables. Works with the existing db adapter."""
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS option_flow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            expiration TEXT,
+            call_volume REAL DEFAULT 0,
+            put_volume REAL DEFAULT 0,
+            put_call_ratio REAL DEFAULT 0,
+            bullish_score REAL DEFAULT 0,
+            bearish_score REAL DEFAULT 0,
+            option_flow_score REAL DEFAULT 0,
+            flow_bias TEXT,
+            technical_score REAL DEFAULT 0,
+            final_score REAL DEFAULT 0,
+            source TEXT DEFAULT 'yfinance',
+            notes TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS option_oi (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            expiration TEXT,
+            contract_type TEXT,
+            strike REAL,
+            open_interest REAL DEFAULT 0,
+            volume REAL DEFAULT 0,
+            last_price REAL,
+            implied_volatility REAL,
+            oi_rank INTEGER DEFAULT 0,
+            magnet_level REAL,
+            source TEXT DEFAULT 'yfinance'
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS option_unusual_volume (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            expiration TEXT,
+            contract_type TEXT,
+            strike REAL,
+            volume REAL DEFAULT 0,
+            open_interest REAL DEFAULT 0,
+            unusual_ratio REAL DEFAULT 0,
+            direction TEXT,
+            source TEXT DEFAULT 'yfinance'
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS option_flow_alert_filter (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            technical_score REAL,
+            flow_score REAL,
+            final_score REAL,
+            passed INTEGER DEFAULT 0,
+            reason TEXT,
+            side TEXT,
+            risk_grade TEXT
+        )
+    """)
+
+
+def v25_3_safe_option_rows(df, contract_type):
+    rows = []
+    if df is None:
+        return rows
+    try:
+        records = df.to_dict("records")
+    except Exception:
+        return rows
+    for r in records:
+        strike = v25_3_num(r.get("strike"))
+        volume = v25_3_num(r.get("volume"))
+        oi = v25_3_num(r.get("openInterest"))
+        last_price = v25_3_num(r.get("lastPrice"))
+        iv = v25_3_num(r.get("impliedVolatility"))
+        rows.append({
+            "contract_type": contract_type,
+            "strike": strike,
+            "volume": volume,
+            "open_interest": oi,
+            "last_price": last_price,
+            "implied_volatility": iv,
+            "contract_symbol": r.get("contractSymbol"),
+        })
+    return rows
+
+
+def v25_3_fetch_option_chain(symbol, expiry_index=None):
+    """Fetch current option chain using yfinance.
+
+    Note: free sources usually do not provide full historical average option volume,
+    so unusual volume is calculated as a conservative proxy from current volume vs OI
+    and chain median volume.
+    """
+    symbol = str(symbol or "NVDA").upper().strip()
+    expiry_index = V25_3_CHAIN_EXPIRY_INDEX if expiry_index is None else int(expiry_index)
+    t = yf.Ticker(symbol)
+    expirations = list(getattr(t, "options", []) or [])
+    if not expirations:
+        raise RuntimeError(f"No option expirations found for {symbol}")
+    expiry_index = max(0, min(expiry_index, len(expirations) - 1))
+    expiration = expirations[expiry_index]
+    chain = t.option_chain(expiration)
+    calls = v25_3_safe_option_rows(getattr(chain, "calls", None), "CALL")
+    puts = v25_3_safe_option_rows(getattr(chain, "puts", None), "PUT")
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "expiration": expiration,
+        "expirations": expirations[:12],
+        "calls": calls,
+        "puts": puts,
+        "source": "yfinance",
+    }
+
+
+def v25_3_calculate_flow(symbol, technical_score=0, side="CALL", expiry_index=None):
+    symbol = str(symbol or "NVDA").upper().strip()
+    technical_score = v25_3_num(technical_score, 0)
+    side = str(side or "CALL").upper()
+    chain = v25_3_fetch_option_chain(symbol, expiry_index)
+    calls = chain["calls"]
+    puts = chain["puts"]
+    expiration = chain["expiration"]
+
+    call_volume = sum(v25_3_num(x.get("volume")) for x in calls)
+    put_volume = sum(v25_3_num(x.get("volume")) for x in puts)
+    pcr = (put_volume / call_volume) if call_volume > 0 else 9.99
+
+    all_rows = calls + puts
+    sorted_oi = sorted(all_rows, key=lambda x: v25_3_num(x.get("open_interest")), reverse=True)
+    top_oi = sorted_oi[:20]
+    magnet = top_oi[0]["strike"] if top_oi else None
+
+    vols = sorted([v25_3_num(x.get("volume")) for x in all_rows if v25_3_num(x.get("volume")) > 0])
+    median_vol = vols[len(vols)//2] if vols else 1.0
+    unusual = []
+    for row in all_rows:
+        vol = v25_3_num(row.get("volume"))
+        oi = v25_3_num(row.get("open_interest"))
+        if vol <= 0:
+            continue
+        # Conservative free-data unusual proxy:
+        # 1) current volume vs chain median volume
+        # 2) current volume vs 10% of OI, avoiding false positives on tiny OI
+        ratio_vs_median = vol / max(median_vol, 1.0)
+        ratio_vs_oi = vol / max(oi * 0.10, 1.0)
+        unusual_ratio = round(max(ratio_vs_median, ratio_vs_oi), 2)
+        if unusual_ratio >= 3.0:
+            unusual.append({**row, "unusual_ratio": unusual_ratio})
+
+    unusual = sorted(unusual, key=lambda x: v25_3_num(x.get("unusual_ratio")), reverse=True)[:25]
+    max_unusual = v25_3_num(unusual[0].get("unusual_ratio")) if unusual else 0.0
+    top_call_oi = max([v25_3_num(x.get("open_interest")) for x in calls] or [0])
+    top_put_oi = max([v25_3_num(x.get("open_interest")) for x in puts] or [0])
+    oi_total = sum(v25_3_num(x.get("open_interest")) for x in all_rows)
+    oi_concentration = (v25_3_num(top_oi[0].get("open_interest")) / oi_total * 100.0) if top_oi and oi_total else 0.0
+
+    bullish_score = 50.0
+    bearish_score = 50.0
+    notes = []
+
+    # Put/Call Ratio interpretation
+    if pcr < 0.70:
+        bullish_score += 18
+        bearish_score -= 10
+        notes.append("PCR < 0.70: call demand leads / bullish flow")
+    elif pcr > 1.20:
+        bearish_score += 18
+        bullish_score -= 10
+        notes.append("PCR > 1.20: put demand leads / bearish flow")
+    else:
+        notes.append("PCR neutral")
+
+    # OI concentration / magnet
+    if oi_concentration >= 12:
+        bullish_score += 5
+        bearish_score += 5
+        notes.append("High OI concentration: magnet level detected")
+
+    if top_call_oi > top_put_oi * 1.2:
+        bullish_score += 8
+        notes.append("Call OI leads put OI")
+    elif top_put_oi > top_call_oi * 1.2:
+        bearish_score += 8
+        notes.append("Put OI leads call OI")
+
+    # Unusual option volume
+    call_unusual = sum(1 for x in unusual if x.get("contract_type") == "CALL")
+    put_unusual = sum(1 for x in unusual if x.get("contract_type") == "PUT")
+    if max_unusual >= 5:
+        if call_unusual > put_unusual:
+            bullish_score += 14
+            notes.append(f"Unusual call volume detected ({max_unusual}x proxy)")
+        elif put_unusual > call_unusual:
+            bearish_score += 14
+            notes.append(f"Unusual put volume detected ({max_unusual}x proxy)")
+        else:
+            bullish_score += 5
+            bearish_score += 5
+            notes.append(f"Unusual mixed option volume detected ({max_unusual}x proxy)")
+
+    flow_bias = "BULLISH" if bullish_score > bearish_score + 5 else "BEARISH" if bearish_score > bullish_score + 5 else "MIXED"
+    if side.startswith("PUT"):
+        option_flow_score = bearish_score
+    elif side.startswith("CALL"):
+        option_flow_score = bullish_score
+    else:
+        option_flow_score = max(bullish_score, bearish_score)
+
+    option_flow_score = int(max(0, min(100, round(option_flow_score))))
+    final_score = int(round((technical_score * 0.65) + (option_flow_score * 0.35))) if technical_score else option_flow_score
+
+    created_at = v25_3_now_iso()
+
+    # Persist snapshots
+    try:
+        v24_conn_execute("""
+            INSERT INTO option_flow
+            (created_at, symbol, expiration, call_volume, put_volume, put_call_ratio, bullish_score, bearish_score,
+             option_flow_score, flow_bias, technical_score, final_score, source, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (created_at, symbol, expiration, call_volume, put_volume, pcr, bullish_score, bearish_score,
+              option_flow_score, flow_bias, technical_score, final_score, "yfinance", "; ".join(notes)[:1000]))
+
+        for rank, row in enumerate(top_oi[:20], start=1):
+            v24_conn_execute("""
+                INSERT INTO option_oi
+                (created_at, symbol, expiration, contract_type, strike, open_interest, volume, last_price,
+                 implied_volatility, oi_rank, magnet_level, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (created_at, symbol, expiration, row.get("contract_type"), row.get("strike"), row.get("open_interest"),
+                  row.get("volume"), row.get("last_price"), row.get("implied_volatility"), rank, magnet, "yfinance"))
+
+        for row in unusual[:25]:
+            v24_conn_execute("""
+                INSERT INTO option_unusual_volume
+                (created_at, symbol, expiration, contract_type, strike, volume, open_interest, unusual_ratio, direction, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (created_at, symbol, expiration, row.get("contract_type"), row.get("strike"), row.get("volume"),
+                  row.get("open_interest"), row.get("unusual_ratio"), row.get("contract_type"), "yfinance"))
+    except Exception as e:
+        print("v25.3 option flow persist warning:", e)
+
+    return {
+        "ok": True,
+        "version": V25_3_VERSION,
+        "symbol": symbol,
+        "expiration": expiration,
+        "call_volume": int(call_volume),
+        "put_volume": int(put_volume),
+        "put_call_ratio": round(pcr, 3),
+        "pcr_interpretation": "BULLISH" if pcr < 0.70 else "BEARISH" if pcr > 1.20 else "NEUTRAL",
+        "top_oi": top_oi[:10],
+        "magnet_level": magnet,
+        "oi_concentration_pct": round(oi_concentration, 2),
+        "unusual_volume": unusual[:10],
+        "max_unusual_ratio": max_unusual,
+        "bullish_score": round(bullish_score, 2),
+        "bearish_score": round(bearish_score, 2),
+        "option_flow_score": option_flow_score,
+        "flow_bias": flow_bias,
+        "technical_score": technical_score,
+        "final_score": final_score,
+        "notes": notes,
+        "source": "yfinance",
+        "free_data_warning": "Unusual volume uses current-chain proxy because free APIs may not provide historical option-volume averages.",
+    }
+
+
+def v25_3_alert_filter(symbol, technical_score, side="CALL", risk_grade="B", market_context_pass=True):
+    """Return send/block decision using Technical Score + Option Flow Score."""
+    symbol = str(symbol or "NVDA").upper().strip()
+    side = str(side or "CALL").upper()
+    risk_grade = str(risk_grade or "B").upper()
+    technical_score = v25_3_num(technical_score, 0)
+
+    reasons = []
+    passed = True
+    flow = None
+
+    if technical_score < V25_3_MIN_TECHNICAL_SCORE:
+        passed = False
+        reasons.append(f"Technical Score ต่ำกว่า {V25_3_MIN_TECHNICAL_SCORE}")
+
+    if risk_grade not in {"A", "B", "B+"}:
+        passed = False
+        reasons.append("Risk Grade ไม่ผ่าน")
+
+    if not market_context_pass:
+        passed = False
+        reasons.append("Market Context ไม่ผ่าน")
+
+    try:
+        flow = v25_3_calculate_flow(symbol, technical_score, side)
+        if v25_3_num(flow.get("option_flow_score")) < V25_3_MIN_FLOW_SCORE:
+            passed = False
+            reasons.append(f"Flow Score ต่ำกว่า {V25_3_MIN_FLOW_SCORE}")
+    except Exception as e:
+        passed = False
+        reasons.append(f"Option Flow unavailable: {e}")
+
+    final_score = flow.get("final_score") if isinstance(flow, dict) else technical_score
+    if passed:
+        reasons.append("PASS: Technical + Flow + Risk + Context ผ่าน")
+
+    try:
+        v24_conn_execute("""
+            INSERT INTO option_flow_alert_filter
+            (created_at, symbol, technical_score, flow_score, final_score, passed, reason, side, risk_grade)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v25_3_now_iso(), symbol, technical_score,
+              flow.get("option_flow_score") if isinstance(flow, dict) else None,
+              final_score, 1 if passed else 0, "; ".join(reasons)[:1000], side, risk_grade))
+    except Exception as e:
+        print("v25.3 alert filter persist warning:", e)
+
+    return {
+        "ok": True,
+        "version": V25_3_VERSION,
+        "symbol": symbol,
+        "side": side,
+        "risk_grade": risk_grade,
+        "technical_score": technical_score,
+        "flow_score": flow.get("option_flow_score") if isinstance(flow, dict) else None,
+        "final_score": final_score,
+        "passed": passed,
+        "reasons": reasons,
+        "flow": flow,
+    }
+
+
+def v25_3_recent(table, limit=50):
+    allowed = {"option_flow", "option_oi", "option_unusual_volume", "option_flow_alert_filter"}
+    if table not in allowed:
+        return []
+    try:
+        return v24_conn_execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (int(limit),), fetch="all") or []
+    except Exception:
+        return []
+
+
+def v25_3_dashboard_html():
+    flows = v25_3_recent("option_flow", 30)
+    unusual = v25_3_recent("option_unusual_volume", 30)
+    oi = v25_3_recent("option_oi", 30)
+    filters = v25_3_recent("option_flow_alert_filter", 30)
+
+    def html_table(rows):
+        if not rows:
+            return "<p>No records yet.</p>"
+        keys = list(rows[0].keys())
+        return "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:13px;'><tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>" + "".join("<tr>" + "".join(f"<td>{r.get(k)}</td>" for k in keys) + "</tr>" for r in rows) + "</table>"
+
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V25_3_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+      <h1>{V25_3_VERSION}</h1>
+      <p>Put/Call Ratio · Open Interest Magnet · Unusual Volume Proxy · Flow Score</p>
+      <h2>Quick Test</h2>
+      <ul>
+        <li><a href='/v25/flow/NVDA?score=88&side=CALL'>NVDA Flow</a></li>
+        <li><a href='/v25/flow-alert?symbol=NVDA&technical_score=88&side=CALL&risk_grade=A'>Flow Alert Filter</a></li>
+      </ul>
+      <h2>Top Option Flow</h2>{html_table(flows)}
+      <h2>Highest Unusual Volume</h2>{html_table(unusual)}
+      <h2>Highest OI / Magnet Levels</h2>{html_table(oi)}
+      <h2>Flow Alert Decisions</h2>{html_table(filters)}
+    </body></html>
+    """
+
+
+@app.route('/v25/flow')
+def v25_3_route_flow_list():
+    raw = request.args.get("symbols") or "NVDA,AAPL,TSLA,AMD,QQQ,SPY"
+    symbols = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    out = []
+    for sym in symbols[:20]:
+        try:
+            out.append(v25_3_calculate_flow(sym, request.args.get("score") or 0, request.args.get("side") or "CALL"))
+        except Exception as e:
+            out.append({"ok": False, "symbol": sym, "error": str(e)})
+    return jsonify({"ok": True, "version": V25_3_VERSION, "results": out})
+
+
+@app.route('/v25/flow/<symbol>')
+def v25_3_route_flow_symbol(symbol):
+    return jsonify(v25_3_calculate_flow(symbol, request.args.get("score") or 0, request.args.get("side") or "CALL"))
+
+
+@app.route('/v25/oi')
+def v25_3_route_oi():
+    return jsonify({"ok": True, "version": V25_3_VERSION, "rows": v25_3_recent("option_oi", request.args.get("limit") or 50)})
+
+
+@app.route('/v25/unusual-volume')
+def v25_3_route_unusual():
+    return jsonify({"ok": True, "version": V25_3_VERSION, "rows": v25_3_recent("option_unusual_volume", request.args.get("limit") or 50)})
+
+
+@app.route('/v25/flow-score')
+def v25_3_route_flow_score():
+    symbol = request.args.get("symbol") or "NVDA"
+    return jsonify(v25_3_calculate_flow(symbol, request.args.get("score") or 0, request.args.get("side") or "CALL"))
+
+
+@app.route('/v25/flow-alert')
+def v25_3_route_flow_alert():
+    return jsonify(v25_3_alert_filter(
+        request.args.get("symbol") or "NVDA",
+        request.args.get("technical_score") or request.args.get("score") or 88,
+        request.args.get("side") or "CALL",
+        request.args.get("risk_grade") or "A",
+        str(request.args.get("market_context_pass", "true")).lower() not in {"0", "false", "no"}
+    ))
+
+
+@app.route('/v25/flow-dashboard')
+def v25_3_route_dashboard():
+    return Response(v25_3_dashboard_html(), mimetype='text/html')
+
+
+try:
+    v25_3_init_db()
+except Exception as e:
+    print('v25.3 init warning:', e)
+
+# ============================================================
+# END V25.3 OPTION FLOW INTELLIGENCE ENGINE
+# ============================================================
+
+# ============================================================
+# V25.4 CORRELATION MATRIX + THEME SELECTION ENGINE
+# ============================================================
+V25_4_VERSION = "V25.4 Correlation Matrix + Theme Selection"
+
+V25_4_THEME_MAP = {
+    # Mega cap / AI / semis
+    "NVDA": "Semiconductor", "AMD": "Semiconductor", "AVGO": "Semiconductor", "TSM": "Semiconductor",
+    "MRVL": "Semiconductor", "AMKR": "Semiconductor", "INTC": "Semiconductor", "MU": "Semiconductor",
+    "SMCI": "AI Infrastructure", "PLTR": "AI Software", "CRWV": "AI Infrastructure", "NBIS": "AI Infrastructure",
+    "MSFT": "Mega Cap Tech", "AAPL": "Mega Cap Tech", "AMZN": "Mega Cap Tech", "META": "Mega Cap Tech",
+    "GOOG": "Mega Cap Tech", "GOOGL": "Mega Cap Tech", "NFLX": "Mega Cap Tech",
+    # Growth / momentum
+    "TSLA": "EV Growth", "RBLX": "Growth", "SHOP": "Growth", "HOOD": "Fintech",
+    # Space / defense
+    "RKLB": "Space Defense", "ASTS": "Space Defense", "AVAV": "Defense Drone", "KTOS": "Defense Drone",
+    # Energy / nuclear / uranium
+    "OKLO": "Nuclear Energy", "CEG": "Power Energy", "VST": "Power Energy", "LEU": "Uranium", "UUUU": "Uranium",
+    # Crypto / quantum
+    "COIN": "Crypto", "MSTR": "Crypto", "IREN": "Crypto", "CIFR": "Crypto",
+    "IONQ": "Quantum", "RGTI": "Quantum", "QBTS": "Quantum", "QUBT": "Quantum",
+    # ETFs
+    "QQQ": "ETF Tech", "SPY": "ETF Broad", "IWM": "ETF Small Cap", "TQQQ": "ETF Leveraged", "SOXL": "ETF Leveraged Semi",
+    # Gold
+    "GOLD": "Gold", "XAUUSD": "Gold", "XAU/USD": "Gold",
+}
+
+V25_4_DEFAULT_UNIVERSE = [
+    "NVDA","AMD","AVGO","TSM","MRVL","AMKR","INTC","MU","SMCI","PLTR","CRWV","NBIS",
+    "AAPL","MSFT","AMZN","META","GOOGL","GOOG","TSLA","NFLX","QQQ","SPY","IWM",
+    "RKLB","ASTS","OKLO","CEG","VST","LEU","UUUU","IONQ","RGTI","QBTS","COIN","MSTR","HOOD","GOLD"
+]
+
+
+def v25_4_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def v25_4_sector(symbol):
+    sym = str(symbol or "").upper().replace(".BK", "")
+    return V25_4_THEME_MAP.get(sym, "Other")
+
+
+def v25_4_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v25_4_init_db():
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS correlation_matrix (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol_a TEXT NOT NULL,
+            symbol_b TEXT NOT NULL,
+            theme_a TEXT,
+            theme_b TEXT,
+            correlation REAL,
+            lookback_days INTEGER,
+            source TEXT DEFAULT 'yfinance'
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS correlation_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            group_name TEXT,
+            selected_symbol TEXT,
+            rejected_symbols TEXT,
+            reason TEXT,
+            selected_score REAL,
+            selected_flow_score REAL,
+            avg_correlation REAL,
+            portfolio_quality_score REAL
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS v25_4_signal_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            theme TEXT,
+            technical_score REAL,
+            flow_score REAL,
+            news_score REAL,
+            risk_grade TEXT,
+            side TEXT,
+            final_score REAL,
+            quality_score REAL,
+            rank_in_theme INTEGER,
+            selected INTEGER DEFAULT 0,
+            reject_reason TEXT
+        )
+    """)
+
+
+def v25_4_price_series(symbol, period="3mo", interval="1d"):
+    sym = str(symbol or "").upper().strip()
+    if sym in {"GOLD", "XAUUSD", "XAU/USD"}:
+        yf_symbol = "GC=F"
+    else:
+        yf_symbol = sym
+    try:
+        data = yf.Ticker(yf_symbol).history(period=period, interval=interval, auto_adjust=False)
+        if data is None or data.empty or "Close" not in data.columns:
+            return []
+        vals = [float(x) for x in data["Close"].dropna().tolist()]
+        return vals[-80:]
+    except Exception:
+        return []
+
+
+def v25_4_returns(values):
+    out = []
+    for i in range(1, len(values)):
+        prev = values[i-1]
+        cur = values[i]
+        if prev:
+            out.append((cur - prev) / prev)
+    return out
+
+
+def v25_4_corr(xs, ys):
+    n = min(len(xs), len(ys))
+    if n < 10:
+        return None
+    xs = xs[-n:]
+    ys = ys[-n:]
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    vx = sum((x-mx)**2 for x in xs)
+    vy = sum((y-my)**2 for y in ys)
+    if vx <= 0 or vy <= 0:
+        return None
+    cov = sum((xs[i]-mx)*(ys[i]-my) for i in range(n))
+    return round(cov / ((vx * vy) ** 0.5), 4)
+
+
+def v25_4_build_matrix(symbols=None, lookback_days=60):
+    symbols = [str(s).upper().strip() for s in (symbols or V25_4_DEFAULT_UNIVERSE) if str(s).strip()]
+    symbols = list(dict.fromkeys(symbols))[:80]
+    series = {s: v25_4_returns(v25_4_price_series(s)) for s in symbols}
+    rows = []
+    now = v25_4_now_iso()
+    for i, a in enumerate(symbols):
+        for b in symbols[i+1:]:
+            c = v25_4_corr(series.get(a, []), series.get(b, []))
+            if c is None:
+                continue
+            row = {"symbol_a": a, "symbol_b": b, "theme_a": v25_4_sector(a), "theme_b": v25_4_sector(b), "correlation": c}
+            rows.append(row)
+            try:
+                v24_conn_execute("""
+                    INSERT INTO correlation_matrix
+                    (created_at, symbol_a, symbol_b, theme_a, theme_b, correlation, lookback_days, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (now, a, b, row["theme_a"], row["theme_b"], c, int(lookback_days), "yfinance"))
+            except Exception as e:
+                print("v25.4 correlation insert warning:", e)
+    rows.sort(key=lambda x: abs(v25_4_float(x.get("correlation"))), reverse=True)
+    return {"ok": True, "version": V25_4_VERSION, "count": len(rows), "rows": rows[:500]}
+
+
+def v25_4_recent_correlations(limit=100):
+    try:
+        return v24_conn_execute("SELECT * FROM correlation_matrix ORDER BY id DESC LIMIT ?", (int(limit),), fetch="all") or []
+    except Exception:
+        return []
+
+
+def v25_4_pair_correlation(symbol_a, symbol_b):
+    a = str(symbol_a or "").upper().strip()
+    b = str(symbol_b or "").upper().strip()
+    ar = v25_4_returns(v25_4_price_series(a))
+    br = v25_4_returns(v25_4_price_series(b))
+    c = v25_4_corr(ar, br)
+    return {"ok": c is not None, "symbol_a": a, "symbol_b": b, "correlation": c, "theme_a": v25_4_sector(a), "theme_b": v25_4_sector(b)}
+
+
+def v25_4_quality_score(candidate):
+    technical = v25_4_float(candidate.get("technical_score") or candidate.get("score"), 0)
+    flow = v25_4_float(candidate.get("flow_score"), 50)
+    news = v25_4_float(candidate.get("news_score"), 50)
+    risk = str(candidate.get("risk_grade") or "C").upper()
+    side = str(candidate.get("side") or "CALL").upper()
+    grade_bonus = {"A": 10, "A+": 12, "B+": 6, "B": 4, "C+": 0, "C": -5, "D": -12}.get(risk, -4)
+    side_bonus = 2 if side in {"CALL", "PUT"} else 0
+    q = technical * 0.48 + flow * 0.32 + news * 0.12 + 50 * 0.08 + grade_bonus + side_bonus
+    return round(max(0, min(100, q)), 2)
+
+
+def v25_4_parse_candidates_from_query():
+    raw = request.args.get("candidates") or ""
+    out = []
+    if raw:
+        # Format: NVDA:91:88:A:CALL,AMD:87:82:B:CALL
+        for item in raw.split(","):
+            parts = [p.strip() for p in item.split(":")]
+            if not parts or not parts[0]:
+                continue
+            out.append({
+                "symbol": parts[0].upper(),
+                "technical_score": v25_4_float(parts[1], 85) if len(parts) > 1 else 85,
+                "flow_score": v25_4_float(parts[2], 75) if len(parts) > 2 else 75,
+                "risk_grade": parts[3].upper() if len(parts) > 3 else "B",
+                "side": parts[4].upper() if len(parts) > 4 else "CALL",
+                "news_score": v25_4_float(parts[5], 50) if len(parts) > 5 else 50,
+            })
+    if not out:
+        symbols = [x.strip().upper() for x in (request.args.get("symbols") or "NVDA,AMD,AVGO,TSM").split(",") if x.strip()]
+        for s in symbols:
+            out.append({"symbol": s, "technical_score": 88, "flow_score": 80, "risk_grade": "B", "side": "CALL", "news_score": 55})
+    return out
+
+
+def v25_4_select_best_candidate(candidates, correlation_threshold=0.75, max_per_theme=1):
+    prepared = []
+    for c in candidates:
+        item = dict(c)
+        item["symbol"] = str(item.get("symbol") or "").upper().strip()
+        item["theme"] = v25_4_sector(item["symbol"])
+        item["quality_score"] = v25_4_quality_score(item)
+        prepared.append(item)
+
+    prepared.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+    selected = []
+    rejected = []
+    theme_counts = {}
+    pair_cache = {}
+
+    for cand in prepared:
+        sym = cand["symbol"]
+        theme = cand["theme"]
+        reason = None
+        if theme_counts.get(theme, 0) >= int(max_per_theme):
+            reason = f"Theme cap: already selected best candidate in {theme}"
+        else:
+            for s in selected:
+                key = tuple(sorted([sym, s["symbol"]]))
+                if key not in pair_cache:
+                    pair_cache[key] = v25_4_pair_correlation(key[0], key[1]).get("correlation")
+                corr = pair_cache.get(key)
+                if corr is not None and corr >= float(correlation_threshold):
+                    reason = f"High correlation with selected {s['symbol']} ({corr})"
+                    break
+        if reason:
+            cand["selected"] = 0
+            cand["reject_reason"] = reason
+            rejected.append(cand)
+        else:
+            cand["selected"] = 1
+            cand["reject_reason"] = ""
+            selected.append(cand)
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+
+    # Store candidates and high-level decision.
+    now = v25_4_now_iso()
+    try:
+        for rank, c in enumerate(selected + rejected, start=1):
+            v24_conn_execute("""
+                INSERT INTO v25_4_signal_candidates
+                (created_at, symbol, theme, technical_score, flow_score, news_score, risk_grade, side, final_score, quality_score, rank_in_theme, selected, reject_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now, c.get("symbol"), c.get("theme"), v25_4_float(c.get("technical_score")), v25_4_float(c.get("flow_score")),
+                  v25_4_float(c.get("news_score")), c.get("risk_grade"), c.get("side"), v25_4_float(c.get("final_score") or c.get("technical_score")),
+                  v25_4_float(c.get("quality_score")), rank, int(c.get("selected") or 0), c.get("reject_reason") or ""))
+        avg_corr = 0.0
+        corr_vals = []
+        for i, a in enumerate(selected):
+            for b in selected[i+1:]:
+                val = v25_4_pair_correlation(a["symbol"], b["symbol"]).get("correlation")
+                if val is not None:
+                    corr_vals.append(val)
+        if corr_vals:
+            avg_corr = round(sum(corr_vals) / len(corr_vals), 4)
+        portfolio_quality = round(sum(v25_4_float(x.get("quality_score")) for x in selected) / max(1, len(selected)), 2)
+        v24_conn_execute("""
+            INSERT INTO correlation_decisions
+            (created_at, group_name, selected_symbol, rejected_symbols, reason, selected_score, selected_flow_score, avg_correlation, portfolio_quality_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (now, "theme_selection", ",".join(x.get("symbol") for x in selected), ",".join(x.get("symbol") for x in rejected),
+              "Best-of-theme + correlation suppression", v25_4_float(selected[0].get("technical_score")) if selected else 0,
+              v25_4_float(selected[0].get("flow_score")) if selected else 0, avg_corr, portfolio_quality))
+    except Exception as e:
+        print("v25.4 decision persist warning:", e)
+
+    return {
+        "ok": True,
+        "version": V25_4_VERSION,
+        "correlation_threshold": float(correlation_threshold),
+        "max_per_theme": int(max_per_theme),
+        "selected": selected,
+        "rejected": rejected,
+        "summary": {
+            "selected_count": len(selected),
+            "rejected_count": len(rejected),
+            "themes_selected": sorted(set(x.get("theme") for x in selected)),
+            "portfolio_quality_score": round(sum(v25_4_float(x.get("quality_score")) for x in selected) / max(1, len(selected)), 2),
+        }
+    }
+
+
+def v25_4_should_send_alert(candidate, current_candidates=None):
+    result = v25_4_select_best_candidate(current_candidates or [candidate])
+    selected_symbols = {x.get("symbol") for x in result.get("selected", [])}
+    sym = str(candidate.get("symbol") or "").upper()
+    return {"ok": True, "symbol": sym, "send": sym in selected_symbols, "decision": result}
+
+
+def v25_4_recent(table, limit=50):
+    allowed = {"correlation_matrix", "correlation_decisions", "v25_4_signal_candidates"}
+    if table not in allowed:
+        return []
+    try:
+        return v24_conn_execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (int(limit),), fetch="all") or []
+    except Exception:
+        return []
+
+
+def v25_4_dashboard_html():
+    corr = v25_4_recent("correlation_matrix", 60)
+    decisions = v25_4_recent("correlation_decisions", 30)
+    candidates = v25_4_recent("v25_4_signal_candidates", 60)
+    def html_table(rows):
+        if not rows:
+            return "<p>No records yet.</p>"
+        keys = list(rows[0].keys())
+        return "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:13px;'><tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>" + "".join("<tr>" + "".join(f"<td>{r.get(k)}</td>" for k in keys) + "</tr>" for r in rows) + "</table>"
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V25_4_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+      <h1>{V25_4_VERSION}</h1>
+      <p>Correlation Matrix · Best-of-Theme Selection · Sector Exposure Control · Redundant Alert Suppression</p>
+      <h2>Quick Test</h2>
+      <ul>
+        <li><a href='/v25/correlation/build?symbols=NVDA,AMD,AVGO,TSM'>Build NVDA/AMD/AVGO/TSM Matrix</a></li>
+        <li><a href='/v25/theme-select?candidates=NVDA:91:88:A:CALL,AMD:88:82:B:CALL,AVGO:86:80:B:CALL,TSM:84:78:B:CALL'>Theme Select Test</a></li>
+        <li><a href='/v25/correlation/NVDA/AMD'>NVDA vs AMD Correlation</a></li>
+      </ul>
+      <h2>Correlation Decisions</h2>{html_table(decisions)}
+      <h2>Signal Candidates</h2>{html_table(candidates)}
+      <h2>Recent Correlation Matrix</h2>{html_table(corr)}
+    </body></html>
+    """
+
+
+@app.route('/v25/correlation/build')
+def v25_4_route_build_corr():
+    raw = request.args.get("symbols") or ",".join(V25_4_DEFAULT_UNIVERSE[:20])
+    symbols = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    return jsonify(v25_4_build_matrix(symbols, request.args.get("lookback_days") or 60))
+
+
+@app.route('/v25/correlation/<symbol_a>/<symbol_b>')
+def v25_4_route_pair_corr(symbol_a, symbol_b):
+    return jsonify(v25_4_pair_correlation(symbol_a, symbol_b))
+
+
+@app.route('/v25/theme-select')
+def v25_4_route_theme_select():
+    candidates = v25_4_parse_candidates_from_query()
+    return jsonify(v25_4_select_best_candidate(
+        candidates,
+        request.args.get("correlation_threshold") or 0.75,
+        request.args.get("max_per_theme") or 1,
+    ))
+
+
+@app.route('/v25/alert-portfolio-gate')
+def v25_4_route_alert_portfolio_gate():
+    candidates = v25_4_parse_candidates_from_query()
+    candidate = candidates[0] if candidates else {"symbol": "NVDA"}
+    return jsonify(v25_4_should_send_alert(candidate, candidates))
+
+
+@app.route('/v25/correlation-matrix')
+def v25_4_route_recent_matrix():
+    return jsonify({"ok": True, "version": V25_4_VERSION, "rows": v25_4_recent("correlation_matrix", request.args.get("limit") or 100)})
+
+
+@app.route('/v25/correlation-dashboard')
+def v25_4_route_dashboard():
+    return Response(v25_4_dashboard_html(), mimetype='text/html')
+
+
+try:
+    v25_4_init_db()
+except Exception as e:
+    print('v25.4 init warning:', e)
+
+# ============================================================
+# END V25.4 CORRELATION MATRIX + THEME SELECTION ENGINE
+# ============================================================
+
+
+# ============================================================
+# V25.5 TRADE QUALITY PREDICTION ENGINE
+# Predictive quality gate before sending alerts:
+# - Predicted Win Rate
+# - Expected Return (R)
+# - Expected Drawdown (R)
+# - Historical Similarity
+# This module is additive and does not remove legacy engines.
+# ============================================================
+V25_5_VERSION = "V25.5 Trade Quality Prediction Engine"
+V25_5_MIN_WIN_RATE = float(os.getenv("V25_5_MIN_WIN_RATE", "58"))
+V25_5_MIN_EXPECTED_R = float(os.getenv("V25_5_MIN_EXPECTED_R", "0.15"))
+V25_5_MIN_SIMILARITY = float(os.getenv("V25_5_MIN_SIMILARITY", "45"))
+V25_5_MIN_QUALITY_SCORE = float(os.getenv("V25_5_MIN_QUALITY_SCORE", "70"))
+
+
+def v25_5_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v25_5_text(x, default=""):
+    try:
+        if x is None:
+            return default
+        return str(x).strip()
+    except Exception:
+        return default
+
+
+def v25_5_init_db():
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS trade_quality_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT,
+            strategy TEXT,
+            technical_score REAL,
+            flow_score REAL,
+            context_score REAL,
+            risk_grade TEXT,
+            predicted_win_rate REAL,
+            expected_return_r REAL,
+            expected_drawdown_r REAL,
+            historical_similarity REAL,
+            quality_score REAL,
+            quality_grade TEXT,
+            decision TEXT,
+            reasons TEXT,
+            sample_size INTEGER DEFAULT 0
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS trade_quality_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            prediction_id INTEGER,
+            symbol TEXT NOT NULL,
+            side TEXT,
+            entry REAL,
+            tp1 REAL,
+            tp2 REAL,
+            sl REAL,
+            outcome TEXT,
+            realized_r REAL,
+            notes TEXT
+        )
+    """)
+
+
+def v25_5_grade_to_num(grade):
+    g = v25_5_text(grade, "C").upper()
+    if g == "A+": return 95
+    if g == "A": return 90
+    if g == "B+": return 82
+    if g == "B": return 75
+    if g == "C+": return 65
+    if g == "C": return 55
+    if g == "D": return 40
+    return 50
+
+
+def v25_5_quality_grade(score):
+    s = v25_5_float(score)
+    if s >= 88: return "A"
+    if s >= 80: return "B+"
+    if s >= 72: return "B"
+    if s >= 62: return "C+"
+    if s >= 52: return "C"
+    return "D"
+
+
+def v25_5_load_historical(symbol=None, side=None, strategy=None, limit=400):
+    """Best-effort historical sample loader.
+    Works even if older tables do not exist. It tries known V23/V24/V25 tables first.
+    """
+    candidates = []
+    queries = [
+        ("trade_quality_outcomes", "SELECT symbol, side, outcome, realized_r, notes FROM trade_quality_outcomes ORDER BY id DESC LIMIT ?"),
+        ("performance_signals", "SELECT symbol, side, outcome, realized_r, strategy FROM performance_signals ORDER BY id DESC LIMIT ?"),
+        ("alert_journal", "SELECT symbol, side, outcome, realized_r, strategy FROM alert_journal ORDER BY id DESC LIMIT ?"),
+        ("signals", "SELECT symbol, signal_type as side, score, probability, report FROM signals ORDER BY id DESC LIMIT ?"),
+    ]
+    for table, sql in queries:
+        try:
+            rows = v24_conn_execute(sql, (int(limit),), fetch="all") or []
+            for r in rows:
+                d = dict(r)
+                d["_source_table"] = table
+                candidates.append(d)
+        except Exception:
+            pass
+    if symbol:
+        sym = symbol.upper()
+        candidates = [r for r in candidates if v25_5_text(r.get("symbol")).upper() == sym or not r.get("symbol")]
+    if side:
+        sd = side.upper()
+        candidates = [r for r in candidates if sd in v25_5_text(r.get("side")).upper() or not r.get("side")]
+    if strategy:
+        st = strategy.upper()
+        candidates = [r for r in candidates if st in v25_5_text(r.get("strategy")).upper() or not r.get("strategy")]
+    return candidates[:limit]
+
+
+def v25_5_historical_stats(symbol=None, side=None, strategy=None):
+    rows = v25_5_load_historical(symbol, side, strategy)
+    wins = losses = breakeven = 0
+    r_values = []
+    usable = 0
+    for r in rows:
+        outcome = v25_5_text(r.get("outcome") or r.get("result") or "").upper()
+        rr = r.get("realized_r") if r.get("realized_r") is not None else r.get("r_multiple")
+        rr = v25_5_float(rr, None)
+        if rr is not None:
+            usable += 1
+            r_values.append(rr)
+            if rr > 0: wins += 1
+            elif rr < 0: losses += 1
+            else: breakeven += 1
+        elif outcome:
+            usable += 1
+            if any(x in outcome for x in ["TP", "WIN", "PROFIT"]):
+                wins += 1; r_values.append(1.0)
+            elif any(x in outcome for x in ["SL", "LOSS", "LOSE"]):
+                losses += 1; r_values.append(-1.0)
+            else:
+                breakeven += 1; r_values.append(0.0)
+    sample = usable
+    if sample <= 0:
+        return {"sample_size": 0, "win_rate": None, "avg_win_r": 1.30, "avg_loss_r": -1.00, "expectancy_r": None, "profit_factor": None}
+    win_rate = wins / sample * 100.0
+    win_rs = [x for x in r_values if x > 0]
+    loss_rs = [x for x in r_values if x < 0]
+    avg_win = sum(win_rs)/len(win_rs) if win_rs else 1.30
+    avg_loss = sum(loss_rs)/len(loss_rs) if loss_rs else -1.00
+    gross_win = sum(win_rs)
+    gross_loss = abs(sum(loss_rs))
+    pf = gross_win / gross_loss if gross_loss else (gross_win if gross_win else None)
+    exp = sum(r_values)/sample if sample else None
+    return {"sample_size": sample, "win_rate": round(win_rate,2), "avg_win_r": round(avg_win,3), "avg_loss_r": round(avg_loss,3), "expectancy_r": round(exp,3) if exp is not None else None, "profit_factor": round(pf,3) if pf is not None else None}
+
+
+def v25_5_predict_trade_quality(symbol, side="CALL", strategy="UNKNOWN", technical_score=50, flow_score=50, context_score=50, risk_grade="C", market_regime="UNKNOWN", rvol=None, rsi=None):
+    symbol = v25_5_text(symbol, "UNKNOWN").upper()
+    side = v25_5_text(side, "CALL").upper()
+    strategy = v25_5_text(strategy, "UNKNOWN").upper()
+    technical_score = v25_5_float(technical_score, 50)
+    flow_score = v25_5_float(flow_score, 50)
+    context_score = v25_5_float(context_score, 50)
+    risk_num = v25_5_grade_to_num(risk_grade)
+    rvol = v25_5_float(rvol, None)
+    rsi = v25_5_float(rsi, None)
+    hist = v25_5_historical_stats(symbol, side, strategy)
+
+    # Historical similarity blends available sample size with quality of matching dimensions.
+    sample = int(hist.get("sample_size") or 0)
+    sample_factor = min(35, sample * 2.5)
+    symbol_factor = 18 if sample >= 5 else 8 if sample > 0 else 0
+    strategy_factor = 14 if strategy not in {"", "UNKNOWN", "MANUAL"} and sample >= 5 else 5 if strategy not in {"", "UNKNOWN"} else 0
+    score_factor = max(0, 20 - abs(technical_score - 80) * 0.4) if technical_score >= 70 else max(0, technical_score - 50) * 0.25
+    historical_similarity = max(0, min(100, sample_factor + symbol_factor + strategy_factor + score_factor))
+
+    # Predicted win rate: conservative blend of model components + actual history if available.
+    model_wr = 50
+    model_wr += (technical_score - 50) * 0.28
+    model_wr += (flow_score - 50) * 0.18
+    model_wr += (context_score - 50) * 0.12
+    model_wr += (risk_num - 50) * 0.08
+    if rvol is not None and rvol >= 1.5: model_wr += 3
+    if rvol is not None and rvol < 1.0: model_wr -= 4
+    if rsi is not None and rsi >= 72: model_wr -= 6
+    if "RANGE" in v25_5_text(market_regime).upper(): model_wr -= 3
+    if "DOWNTREND" in v25_5_text(market_regime).upper() and side.startswith("CALL"): model_wr -= 6
+    if "UPTREND" in v25_5_text(market_regime).upper() and side.startswith("PUT"): model_wr -= 6
+
+    hist_wr = hist.get("win_rate")
+    if hist_wr is not None and sample >= 10:
+        hist_weight = min(0.55, sample / 100.0)
+        predicted_wr = model_wr * (1 - hist_weight) + hist_wr * hist_weight
+    elif hist_wr is not None and sample > 0:
+        predicted_wr = model_wr * 0.82 + hist_wr * 0.18
+    else:
+        predicted_wr = model_wr
+    predicted_wr = max(35, min(78, predicted_wr))
+
+    avg_win = v25_5_float(hist.get("avg_win_r"), 1.30)
+    avg_loss = abs(v25_5_float(hist.get("avg_loss_r"), -1.00))
+    p = predicted_wr / 100.0
+    expected_return_r = p * avg_win - (1-p) * avg_loss
+    # Expected drawdown proxy for a 5-signal cluster, intentionally conservative.
+    expected_drawdown_r = -abs((1-p) * avg_loss * 2.2)
+
+    quality_score = 0.0
+    quality_score += predicted_wr * 0.42
+    quality_score += max(0, min(100, (expected_return_r + 1.0) * 50)) * 0.24
+    quality_score += historical_similarity * 0.18
+    quality_score += risk_num * 0.10
+    quality_score += max(0, min(100, flow_score)) * 0.06
+    quality_score = max(0, min(100, quality_score))
+    grade = v25_5_quality_grade(quality_score)
+
+    reasons = []
+    decision = "PASS"
+    if predicted_wr < V25_5_MIN_WIN_RATE:
+        decision = "REJECT"
+        reasons.append(f"Predicted Win Rate ต่ำกว่า {V25_5_MIN_WIN_RATE}%")
+    if expected_return_r < V25_5_MIN_EXPECTED_R:
+        decision = "REJECT"
+        reasons.append(f"Expected Return ต่ำกว่า {V25_5_MIN_EXPECTED_R}R")
+    if historical_similarity < V25_5_MIN_SIMILARITY:
+        # Not always a hard reject when model is very strong, but warn.
+        reasons.append("Historical Similarity ยังต่ำ/ข้อมูลย้อนหลังไม่พอ")
+        if quality_score < 82:
+            decision = "REJECT"
+    if quality_score < V25_5_MIN_QUALITY_SCORE:
+        decision = "REJECT"
+        reasons.append(f"Quality Score ต่ำกว่า {V25_5_MIN_QUALITY_SCORE}")
+    if not reasons:
+        reasons.append("Trade Quality ผ่านเกณฑ์: Win Rate/Expected Return/Similarity เหมาะสม")
+
+    result = {
+        "ok": True,
+        "version": V25_5_VERSION,
+        "symbol": symbol,
+        "side": side,
+        "strategy": strategy,
+        "technical_score": round(technical_score, 2),
+        "flow_score": round(flow_score, 2),
+        "context_score": round(context_score, 2),
+        "risk_grade": v25_5_text(risk_grade, "C"),
+        "predicted_win_rate": round(predicted_wr, 2),
+        "expected_return_r": round(expected_return_r, 3),
+        "expected_drawdown_r": round(expected_drawdown_r, 3),
+        "historical_similarity": round(historical_similarity, 2),
+        "quality_score": round(quality_score, 2),
+        "quality_grade": grade,
+        "decision": decision,
+        "reasons": reasons,
+        "historical_stats": hist,
+    }
+    try:
+        v24_conn_execute("""
+            INSERT INTO trade_quality_predictions
+            (created_at, symbol, side, strategy, technical_score, flow_score, context_score, risk_grade,
+             predicted_win_rate, expected_return_r, expected_drawdown_r, historical_similarity,
+             quality_score, quality_grade, decision, reasons, sample_size)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (now_text(), symbol, side, strategy, technical_score, flow_score, context_score, v25_5_text(risk_grade, "C"),
+              result["predicted_win_rate"], result["expected_return_r"], result["expected_drawdown_r"], result["historical_similarity"],
+              result["quality_score"], result["quality_grade"], result["decision"], json.dumps(reasons, ensure_ascii=False), sample))
+    except Exception as e:
+        print("v25.5 persist warning:", e)
+    return result
+
+
+def v25_5_recent_predictions(limit=50):
+    try:
+        return v24_conn_execute("SELECT * FROM trade_quality_predictions ORDER BY id DESC LIMIT ?", (int(limit),), fetch="all") or []
+    except Exception:
+        return []
+
+
+def v25_5_dashboard_html():
+    rows = v25_5_recent_predictions(80)
+    passed = [r for r in rows if v25_5_text(r.get("decision")).upper() == "PASS"]
+    rejected = [r for r in rows if v25_5_text(r.get("decision")).upper() != "PASS"]
+    def table(rs):
+        if not rs:
+            return "<p>No records yet.</p>"
+        keys = ["created_at","symbol","side","strategy","technical_score","flow_score","context_score","predicted_win_rate","expected_return_r","expected_drawdown_r","historical_similarity","quality_score","quality_grade","decision","sample_size"]
+        return "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:13px;'><tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>" + "".join("<tr>" + "".join(f"<td>{r.get(k)}</td>" for k in keys) + "</tr>" for r in rs) + "</table>"
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V25_5_VERSION}</title></head>
+    <body style='font-family:Arial; padding:24px;'>
+      <h1>{V25_5_VERSION}</h1>
+      <p>เปลี่ยนจาก "มีสัญญาณ" เป็น "สัญญาณนี้มีโอกาสทำเงินจริงแค่ไหน"</p>
+      <h2>Quick Test</h2>
+      <ul>
+        <li><a href='/v25/trade-quality/NVDA?score=91&flow_score=88&context_score=82&risk_grade=A&side=CALL&strategy=BREAKOUT&rvol=2.1&rsi=64&regime=UPTREND'>NVDA Quality Test</a></li>
+        <li><a href='/v25/trade-quality/AAPL?score=84&flow_score=52&context_score=70&risk_grade=B&side=CALL&strategy=PULLBACK&rvol=1.2&rsi=70&regime=RANGE'>AAPL Quality Test</a></li>
+      </ul>
+      <h2>Passed Predictions</h2>{table(passed)}
+      <h2>Rejected Predictions</h2>{table(rejected)}
+    </body></html>
+    """
+
+
+@app.route('/v25/trade-quality/<symbol>')
+def v25_5_route_trade_quality(symbol):
+    return jsonify(v25_5_predict_trade_quality(
+        symbol=symbol,
+        side=request.args.get("side") or "CALL",
+        strategy=request.args.get("strategy") or "UNKNOWN",
+        technical_score=request.args.get("score") or request.args.get("technical_score") or 50,
+        flow_score=request.args.get("flow_score") or 50,
+        context_score=request.args.get("context_score") or 50,
+        risk_grade=request.args.get("risk_grade") or "C",
+        market_regime=request.args.get("regime") or "UNKNOWN",
+        rvol=request.args.get("rvol"),
+        rsi=request.args.get("rsi"),
+    ))
+
+
+@app.route('/v25/trade-quality-gate')
+def v25_5_route_trade_quality_gate():
+    symbol = request.args.get("symbol") or "NVDA"
+    return jsonify(v25_5_predict_trade_quality(
+        symbol=symbol,
+        side=request.args.get("side") or "CALL",
+        strategy=request.args.get("strategy") or "UNKNOWN",
+        technical_score=request.args.get("score") or request.args.get("technical_score") or 50,
+        flow_score=request.args.get("flow_score") or 50,
+        context_score=request.args.get("context_score") or 50,
+        risk_grade=request.args.get("risk_grade") or "C",
+        market_regime=request.args.get("regime") or "UNKNOWN",
+        rvol=request.args.get("rvol"),
+        rsi=request.args.get("rsi"),
+    ))
+
+
+@app.route('/v25/trade-quality/recent')
+def v25_5_route_recent():
+    return jsonify({"ok": True, "version": V25_5_VERSION, "rows": v25_5_recent_predictions(request.args.get("limit") or 100)})
+
+
+@app.route('/v25/trade-quality-dashboard')
+def v25_5_route_dashboard():
+    return Response(v25_5_dashboard_html(), mimetype='text/html')
+
+
+try:
+    v25_5_init_db()
+except Exception as e:
+    print('v25.5 init warning:', e)
+
+# ============================================================
+# END V25.5 TRADE QUALITY PREDICTION ENGINE
+# ============================================================
+
+# ============================================================
+# V26.0 PROFESSIONAL EXECUTION INTELLIGENCE SUITE
+# V26.1 Real Options Chain Intelligence
+# V26.2 Liquidity Engine
+# V26.3 Regime Switching AI
+# V26.4 Position Management AI
+# V26.5 Portfolio Simulation
+# Appended without removing previous V25.x engines.
+# ============================================================
+V26_VERSION = "V26.0 Professional Execution Intelligence Suite"
+
+
+def v26_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def v26_int(x, default=0):
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(str(x).replace(",", "").strip()))
+    except Exception:
+        return default
+
+
+def v26_text(x, default=""):
+    try:
+        s = str(x if x is not None else default).strip()
+        return s if s else default
+    except Exception:
+        return default
+
+
+def v26_now():
+    try:
+        return now_text()
+    except Exception:
+        return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M")
+
+
+def v26_init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v26_options_chain_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            expiration TEXT,
+            underlying_price REAL,
+            call_volume REAL,
+            put_volume REAL,
+            put_call_ratio REAL,
+            call_oi REAL,
+            put_oi REAL,
+            max_call_oi_strike REAL,
+            max_call_oi REAL,
+            max_put_oi_strike REAL,
+            max_put_oi REAL,
+            call_wall REAL,
+            put_wall REAL,
+            zero_gamma_proxy REAL,
+            flow_score REAL,
+            bias TEXT,
+            notes TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v26_liquidity_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            vix REAL,
+            dxy REAL,
+            us10y REAL,
+            spy_price REAL,
+            qqq_price REAL,
+            liquidity_score REAL,
+            risk_mode TEXT,
+            notes TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v26_regime_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT,
+            base_regime TEXT,
+            volatility_state TEXT,
+            liquidity_state TEXT,
+            final_regime TEXT,
+            score_adjustment REAL,
+            model_profile TEXT,
+            notes TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v26_position_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            entry REAL,
+            stop_loss REAL,
+            tp1 REAL,
+            tp2 REAL,
+            tp3 REAL,
+            trailing_stop REAL,
+            scale_out_plan TEXT,
+            risk_per_unit REAL,
+            reward_r REAL,
+            position_size REAL,
+            notes TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS v26_portfolio_simulations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            candidates TEXT,
+            selected TEXT,
+            rejected TEXT,
+            total_risk_pct REAL,
+            sector_exposure TEXT,
+            correlation_warning TEXT,
+            portfolio_score REAL,
+            notes TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def v26_recent(table, limit=50):
+    allowed = {
+        "v26_options_chain_snapshots", "v26_liquidity_snapshots", "v26_regime_snapshots",
+        "v26_position_plans", "v26_portfolio_simulations"
+    }
+    if table not in allowed:
+        return []
+    try:
+        conn = db()
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (v26_int(limit, 50),)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def v26_get_last_close(symbol, period="1y"):
+    try:
+        t = yf.Ticker(symbol)
+        data = t.history(period=period, interval="1d", auto_adjust=False)
+        if data is None or data.empty:
+            return None, []
+        closes = [float(x) for x in data["Close"].dropna().tolist()]
+        return closes[-1] if closes else None, closes
+    except Exception:
+        return None, []
+
+
+def v26_ema(values, period):
+    try:
+        return ema(values, period)
+    except Exception:
+        if len(values) < period:
+            return None
+        k = 2 / (period + 1)
+        out = values[0]
+        for p in values[1:]:
+            out = p * k + out * (1-k)
+        return out
+
+
+def v26_real_options_chain(symbol, expiration=None):
+    """Use real option chain fields available from yfinance: volume and openInterest.
+    Greeks/GEX are not reliably free; GEX/zero-gamma are represented as transparent proxies.
+    """
+    symbol = v26_text(symbol, "NVDA").upper()
+    result = {"ok": False, "version": V26_VERSION, "symbol": symbol}
+    try:
+        ticker = yf.Ticker(symbol)
+        expirations = list(getattr(ticker, "options", []) or [])
+        if not expirations:
+            raise RuntimeError("No options expirations available from yfinance")
+        exp = expiration or expirations[0]
+        chain = ticker.option_chain(exp)
+        calls = chain.calls.copy()
+        puts = chain.puts.copy()
+        underlying, _ = v26_get_last_close(symbol, "1mo")
+        if underlying is None:
+            try:
+                underlying = v26_float(ticker.fast_info.get("last_price"), None)
+            except Exception:
+                underlying = None
+
+        def colsum(df, col):
+            try:
+                return float(df[col].fillna(0).sum())
+            except Exception:
+                return 0.0
+
+        call_vol = colsum(calls, "volume")
+        put_vol = colsum(puts, "volume")
+        call_oi = colsum(calls, "openInterest")
+        put_oi = colsum(puts, "openInterest")
+        pcr = round(put_vol / call_vol, 4) if call_vol else None
+
+        max_call_strike = max_call_oi = max_put_strike = max_put_oi = None
+        if "openInterest" in calls.columns and not calls.empty:
+            row = calls.sort_values("openInterest", ascending=False).iloc[0]
+            max_call_strike = v26_float(row.get("strike"), None)
+            max_call_oi = v26_float(row.get("openInterest"), None)
+        if "openInterest" in puts.columns and not puts.empty:
+            row = puts.sort_values("openInterest", ascending=False).iloc[0]
+            max_put_strike = v26_float(row.get("strike"), None)
+            max_put_oi = v26_float(row.get("openInterest"), None)
+
+        # Transparent proxy: weighted OI magnet; not true dealer gamma.
+        call_wall = max_call_strike
+        put_wall = max_put_strike
+        if max_call_strike and max_put_strike:
+            zero_gamma_proxy = round((max_call_strike + max_put_strike) / 2.0, 2)
+        else:
+            zero_gamma_proxy = None
+
+        score = 50
+        notes = []
+        bias = "NEUTRAL"
+        if pcr is not None:
+            if pcr < 0.70:
+                score += 16; bias = "BULLISH"; notes.append("PCR < 0.70: call demand stronger")
+            elif pcr > 1.20:
+                score -= 16; bias = "BEARISH"; notes.append("PCR > 1.20: put demand stronger")
+            else:
+                notes.append("PCR neutral")
+        total_vol = call_vol + put_vol
+        total_oi = call_oi + put_oi
+        if total_vol >= 50000:
+            score += 8; notes.append("High option volume")
+        elif total_vol >= 15000:
+            score += 4; notes.append("Moderate option volume")
+        if total_oi >= 100000:
+            score += 8; notes.append("High OI liquidity")
+        elif total_oi >= 30000:
+            score += 4; notes.append("Moderate OI liquidity")
+        if underlying and call_wall and put_wall:
+            if underlying > call_wall:
+                score += 5; notes.append("Underlying above call wall proxy")
+            elif underlying < put_wall:
+                score -= 5; notes.append("Underlying below put wall proxy")
+        flow_score = int(max(0, min(100, score)))
+
+        result.update({
+            "ok": True,
+            "expiration": exp,
+            "available_expirations": expirations[:8],
+            "underlying_price": underlying,
+            "call_volume": call_vol,
+            "put_volume": put_vol,
+            "put_call_ratio": pcr,
+            "call_open_interest": call_oi,
+            "put_open_interest": put_oi,
+            "max_call_oi_strike": max_call_strike,
+            "max_call_oi": max_call_oi,
+            "max_put_oi_strike": max_put_strike,
+            "max_put_oi": max_put_oi,
+            "call_wall": call_wall,
+            "put_wall": put_wall,
+            "zero_gamma_proxy": zero_gamma_proxy,
+            "flow_score": flow_score,
+            "bias": bias,
+            "notes": notes,
+            "warning": "Uses real yfinance option volume/OI. Greeks/GEX are proxy estimates, not dealer-grade paid gamma data."
+        })
+        try:
+            conn = db()
+            conn.execute("""
+                INSERT INTO v26_options_chain_snapshots
+                (created_at, symbol, expiration, underlying_price, call_volume, put_volume, put_call_ratio,
+                 call_oi, put_oi, max_call_oi_strike, max_call_oi, max_put_oi_strike, max_put_oi,
+                 call_wall, put_wall, zero_gamma_proxy, flow_score, bias, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (v26_now(), symbol, exp, underlying, call_vol, put_vol, pcr, call_oi, put_oi,
+                  max_call_strike, max_call_oi, max_put_strike, max_put_oi, call_wall, put_wall,
+                  zero_gamma_proxy, flow_score, bias, json.dumps(notes, ensure_ascii=False)))
+            conn.commit(); conn.close()
+        except Exception as e:
+            result["db_warning"] = str(e)
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+
+def v26_liquidity_engine():
+    def close(sym):
+        p, _ = v26_get_last_close(sym, "6mo")
+        return p
+    vix = close("^VIX")
+    dxy = close("DX-Y.NYB") or close("UUP")
+    us10y = close("^TNX")
+    spy = close("SPY")
+    qqq = close("QQQ")
+    score = 50
+    notes = []
+    if vix is not None:
+        if vix > 30:
+            score -= 22; notes.append("VIX > 30: panic/high volatility")
+        elif vix > 25:
+            score -= 14; notes.append("VIX > 25: reduce CALL risk")
+        elif vix < 16:
+            score += 8; notes.append("VIX calm")
+    if dxy is not None:
+        # DXY around >105 often tightens conditions for gold/risk assets.
+        if dxy > 105:
+            score -= 8; notes.append("DXY strong: pressure on gold/risk assets")
+        elif dxy < 102:
+            score += 4; notes.append("DXY soft")
+    if us10y is not None:
+        if us10y > 4.7:
+            score -= 12; notes.append("US10Y elevated: pressure on growth/tech")
+        elif us10y < 4.1:
+            score += 5; notes.append("US10Y supportive")
+    risk_mode = "RISK_ON" if score >= 60 else "RISK_OFF" if score <= 40 else "NEUTRAL"
+    out = {"ok": True, "version": V26_VERSION, "vix": vix, "dxy": dxy, "us10y": us10y, "spy_price": spy, "qqq_price": qqq,
+           "liquidity_score": int(max(0, min(100, score))), "risk_mode": risk_mode, "notes": notes}
+    try:
+        conn = db()
+        conn.execute("""
+            INSERT INTO v26_liquidity_snapshots
+            (created_at, vix, dxy, us10y, spy_price, qqq_price, liquidity_score, risk_mode, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v26_now(), vix, dxy, us10y, spy, qqq, out["liquidity_score"], risk_mode, json.dumps(notes, ensure_ascii=False)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        out["db_warning"] = str(e)
+    return out
+
+
+def v26_spy_ema200_context():
+    price, closes = v26_get_last_close("SPY", "2y")
+    e200 = v26_ema(closes, 200) if closes else None
+    state = "UNKNOWN"
+    if price and e200:
+        state = "ABOVE_EMA200" if price > e200 else "BELOW_EMA200"
+    return {"spy_price": price, "spy_ema200": e200, "state": state}
+
+
+def v26_regime_switching_ai(symbol="SPY", base_score=50, side="CALL"):
+    symbol = v26_text(symbol, "SPY").upper()
+    base_score = v26_float(base_score, 50)
+    side = v26_text(side, "CALL").upper()
+    price, closes = v26_get_last_close(symbol, "1y")
+    e50 = v26_ema(closes, 50) if closes else None
+    e200 = v26_ema(closes, 200) if closes else None
+    vix_data = v26_liquidity_engine()
+    vix = v26_float(vix_data.get("vix"), None)
+    liq_score = v26_float(vix_data.get("liquidity_score"), 50)
+    volatility_state = "NORMAL"
+    if vix is not None:
+        if vix >= 30: volatility_state = "PANIC"
+        elif vix >= 25: volatility_state = "VOL_EXPANSION"
+        elif vix <= 15: volatility_state = "VOL_COMPRESSION"
+    trend_state = "UNKNOWN"
+    if price and e50 and e200:
+        if price > e50 > e200: trend_state = "TREND_UP"
+        elif price < e50 < e200: trend_state = "TREND_DOWN"
+        else: trend_state = "RANGE_TRANSITION"
+    final_regime = trend_state
+    if volatility_state == "PANIC":
+        final_regime = "PANIC"
+    elif volatility_state == "VOL_EXPANSION" and "TREND" not in trend_state:
+        final_regime = "VOLATILITY_EXPANSION"
+    elif volatility_state == "VOL_COMPRESSION":
+        final_regime = "VOLATILITY_COMPRESSION"
+
+    adj = 0
+    model_profile = "BALANCED"
+    if final_regime == "TREND_UP":
+        model_profile = "MOMENTUM_BREAKOUT"; adj += 8 if side.startswith("CALL") else -8
+    elif final_regime == "TREND_DOWN":
+        model_profile = "DEFENSIVE_PUT_OR_AVOID"; adj += 8 if side.startswith("PUT") else -10
+    elif final_regime == "PANIC":
+        model_profile = "RISK_OFF_CAPITAL_PRESERVATION"; adj -= 18
+    elif final_regime == "VOLATILITY_EXPANSION":
+        model_profile = "WIDER_STOPS_SMALLER_SIZE"; adj -= 8
+    elif final_regime == "VOLATILITY_COMPRESSION":
+        model_profile = "RANGE_OR_BREAKOUT_WAIT"; adj -= 4
+    if liq_score < 40:
+        adj -= 8
+    elif liq_score > 60:
+        adj += 4
+    adjusted = int(max(0, min(100, base_score + adj)))
+    notes = [f"trend={trend_state}", f"volatility={volatility_state}", f"liquidity={vix_data.get('risk_mode')}", f"profile={model_profile}"]
+    out = {"ok": True, "version": V26_VERSION, "symbol": symbol, "base_score": base_score, "adjusted_score": adjusted,
+           "score_adjustment": adj, "base_regime": trend_state, "volatility_state": volatility_state,
+           "liquidity_state": vix_data.get("risk_mode"), "final_regime": final_regime,
+           "model_profile": model_profile, "notes": notes}
+    try:
+        conn = db()
+        conn.execute("""
+            INSERT INTO v26_regime_snapshots
+            (created_at, symbol, base_regime, volatility_state, liquidity_state, final_regime, score_adjustment, model_profile, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v26_now(), symbol, trend_state, volatility_state, vix_data.get("risk_mode"), final_regime, adj, model_profile, json.dumps(notes, ensure_ascii=False)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        out["db_warning"] = str(e)
+    return out
+
+
+def v26_position_management_ai(symbol, side="CALL", entry=None, atr=None, score=50, quality_score=50, account_equity=10000, risk_pct=1.0):
+    symbol = v26_text(symbol, "UNKNOWN").upper()
+    side = v26_text(side, "CALL").upper()
+    entry = v26_float(entry, None)
+    if entry is None or entry <= 0:
+        entry, _ = v26_get_last_close(symbol, "1mo")
+    if not entry:
+        return {"ok": False, "error": "entry or market price required", "symbol": symbol}
+    atr = v26_float(atr, None)
+    if not atr or atr <= 0:
+        _, closes = v26_get_last_close(symbol, "3mo")
+        if closes and len(closes) > 15:
+            # lightweight ATR proxy from close-to-close range
+            diffs = [abs(closes[i]-closes[i-1]) for i in range(1, len(closes))]
+            atr = sum(diffs[-14:]) / 14
+        else:
+            atr = max(entry * 0.015, 0.01)
+    score = v26_float(score, 50); quality_score = v26_float(quality_score, 50)
+    if side.startswith("PUT"):
+        sl = entry + atr * (1.1 if quality_score >= 80 else 0.9)
+        tp1 = entry - atr * 0.9
+        tp2 = entry - atr * 1.6
+        tp3 = entry - atr * 2.4
+        trailing = entry + atr * 0.75
+    else:
+        sl = entry - atr * (1.1 if quality_score >= 80 else 0.9)
+        tp1 = entry + atr * 0.9
+        tp2 = entry + atr * 1.6
+        tp3 = entry + atr * 2.4
+        trailing = entry - atr * 0.75
+    risk_per_unit = abs(entry - sl)
+    risk_cash = v26_float(account_equity, 10000) * v26_float(risk_pct, 1.0) / 100.0
+    if quality_score < 70:
+        risk_cash *= 0.5
+    if score < 80:
+        risk_cash *= 0.5
+    size = int(risk_cash / risk_per_unit) if risk_per_unit > 0 else 0
+    reward_r = abs(tp2 - entry) / risk_per_unit if risk_per_unit else 0
+    scale_plan = "TP1 sell 30%, TP2 sell 40%, TP3/trailing keep 30%"
+    notes = []
+    if quality_score >= 85: notes.append("High quality: normal size")
+    elif quality_score >= 70: notes.append("Medium quality: reduced size")
+    else: notes.append("Low quality: half size or avoid")
+    out = {"ok": True, "version": V26_VERSION, "symbol": symbol, "side": side, "entry": round(entry, 4),
+           "stop_loss": round(sl, 4), "tp1": round(tp1, 4), "tp2": round(tp2, 4), "tp3": round(tp3, 4),
+           "trailing_stop": round(trailing, 4), "scale_out_plan": scale_plan,
+           "risk_per_unit": round(risk_per_unit, 4), "reward_r_to_tp2": round(reward_r, 2),
+           "position_size": size, "risk_cash": round(risk_cash, 2), "notes": notes}
+    try:
+        conn = db()
+        conn.execute("""
+            INSERT INTO v26_position_plans
+            (created_at, symbol, side, entry, stop_loss, tp1, tp2, tp3, trailing_stop, scale_out_plan, risk_per_unit, reward_r, position_size, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v26_now(), symbol, side, entry, sl, tp1, tp2, tp3, trailing, scale_plan, risk_per_unit, reward_r, size, json.dumps(notes, ensure_ascii=False)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        out["db_warning"] = str(e)
+    return out
+
+
+V26_SECTOR_MAP = {
+    "NVDA":"SEMICONDUCTOR", "AMD":"SEMICONDUCTOR", "AVGO":"SEMICONDUCTOR", "TSM":"SEMICONDUCTOR", "MRVL":"SEMICONDUCTOR", "AMKR":"SEMICONDUCTOR", "INTC":"SEMICONDUCTOR",
+    "AAPL":"MEGA_CAP_TECH", "MSFT":"MEGA_CAP_TECH", "GOOGL":"MEGA_CAP_TECH", "GOOG":"MEGA_CAP_TECH", "META":"MEGA_CAP_TECH", "AMZN":"MEGA_CAP_TECH",
+    "TSLA":"EV_HIGH_BETA", "PLTR":"AI_SOFTWARE", "CRWV":"AI_INFRA", "AVAV":"AEROSPACE", "RKLB":"SPACE", "ASTS":"SPACE", "OKLO":"NUCLEAR", "CEG":"ENERGY", "VST":"ENERGY", "LEU":"URANIUM", "UUUU":"URANIUM",
+    "QQQ":"ETF", "SPY":"ETF", "IWM":"ETF", "GOLD":"GOLD", "XAUUSD":"GOLD"
+}
+
+
+def v26_parse_candidates(raw):
+    # Format: NVDA:92:A:CALL:SEMICONDUCTOR,AMD:88:B:CALL:SEMICONDUCTOR
+    candidates = []
+    for part in v26_text(raw).split(","):
+        p = [x.strip() for x in part.split(":")]
+        if not p or not p[0]:
+            continue
+        sym = p[0].upper()
+        score = v26_float(p[1], 50) if len(p) > 1 else 50
+        grade = p[2].upper() if len(p) > 2 else "C"
+        side = p[3].upper() if len(p) > 3 else "CALL"
+        sector = p[4].upper() if len(p) > 4 else V26_SECTOR_MAP.get(sym, "OTHER")
+        candidates.append({"symbol": sym, "score": score, "grade": grade, "side": side, "sector": sector})
+    return candidates
+
+
+def v26_portfolio_simulation(candidates_raw=None, max_per_sector=1, max_total=3):
+    candidates = v26_parse_candidates(candidates_raw or "NVDA:92:A:CALL:SEMICONDUCTOR,AMD:88:B:CALL:SEMICONDUCTOR,TSM:86:B:CALL:SEMICONDUCTOR,AAPL:84:B:CALL:MEGA_CAP_TECH,GOLD:82:B:CALL:GOLD")
+    # Add quality proxies from V25.5 if available.
+    enriched = []
+    for c in candidates:
+        quality = c["score"]
+        try:
+            pred = v25_5_predict_trade_quality(c["symbol"], c["side"], "V26_PORTFOLIO", c["score"], 70, 70, c["grade"])
+            quality = v26_float(pred.get("quality_score"), c["score"])
+            c["predicted_win_rate"] = pred.get("predicted_win_rate")
+            c["quality_score"] = quality
+        except Exception:
+            c["quality_score"] = quality
+        enriched.append(c)
+    enriched.sort(key=lambda x: (v26_float(x.get("quality_score")), v26_float(x.get("score"))), reverse=True)
+    selected = []
+    rejected = []
+    sector_count = {}
+    for c in enriched:
+        sector = c.get("sector") or "OTHER"
+        if len(selected) >= v26_int(max_total, 3):
+            c["reject_reason"] = "max_total_reached"; rejected.append(c); continue
+        if sector_count.get(sector, 0) >= v26_int(max_per_sector, 1):
+            c["reject_reason"] = f"sector_cap_{sector}"; rejected.append(c); continue
+        selected.append(c)
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+    portfolio_score = round(sum(v26_float(x.get("quality_score"), x.get("score")) for x in selected) / len(selected), 2) if selected else 0
+    warnings = []
+    if any(x.get("sector") == "SEMICONDUCTOR" for x in rejected):
+        warnings.append("Semiconductor cluster detected; best-of-theme selected")
+    total_risk_pct = round(len(selected) * 1.0, 2)
+    out = {"ok": True, "version": V26_VERSION, "selected": selected, "rejected": rejected,
+           "sector_exposure": sector_count, "total_risk_pct": total_risk_pct,
+           "portfolio_score": portfolio_score, "correlation_warning": warnings,
+           "rule": "Max one alert per sector/theme by default; scan many, send few."}
+    try:
+        conn = db()
+        conn.execute("""
+            INSERT INTO v26_portfolio_simulations
+            (created_at, candidates, selected, rejected, total_risk_pct, sector_exposure, correlation_warning, portfolio_score, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (v26_now(), json.dumps(candidates, ensure_ascii=False), json.dumps(selected, ensure_ascii=False), json.dumps(rejected, ensure_ascii=False), total_risk_pct,
+              json.dumps(sector_count, ensure_ascii=False), json.dumps(warnings, ensure_ascii=False), portfolio_score, "V26 portfolio simulation"))
+        conn.commit(); conn.close()
+    except Exception as e:
+        out["db_warning"] = str(e)
+    return out
+
+
+def v26_dashboard_html():
+    liquidity = v26_recent("v26_liquidity_snapshots", 5)
+    option_flow = v26_recent("v26_options_chain_snapshots", 10)
+    regimes = v26_recent("v26_regime_snapshots", 10)
+    positions = v26_recent("v26_position_plans", 10)
+    sims = v26_recent("v26_portfolio_simulations", 10)
+    def table(rows):
+        if not rows: return "<p>No records yet.</p>"
+        keys = list(rows[0].keys())[:12]
+        return "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:12px;'><tr>" + ''.join(f"<th>{k}</th>" for k in keys) + "</tr>" + ''.join("<tr>" + ''.join(f"<td>{r.get(k)}</td>" for k in keys) + "</tr>" for r in rows) + "</table>"
+    return f"""
+    <html><head><meta charset='utf-8'><title>{V26_VERSION}</title></head>
+    <body style='font-family:Arial;padding:24px;'>
+      <h1>{V26_VERSION}</h1>
+      <p>Execution Intelligence: Options Chain, Liquidity, Regime Switching, Position Management, Portfolio Simulation.</p>
+      <h2>Quick Tests</h2>
+      <ul>
+        <li><a href='/v26/options-chain/NVDA'>Options Chain NVDA</a></li>
+        <li><a href='/v26/liquidity'>Liquidity Engine</a></li>
+        <li><a href='/v26/regime/NVDA?score=91&side=CALL'>Regime Switching NVDA</a></li>
+        <li><a href='/v26/position-plan/NVDA?entry=214&side=CALL&score=90&quality_score=86'>Position Plan NVDA</a></li>
+        <li><a href='/v26/portfolio-sim?candidates=NVDA:92:A:CALL:SEMICONDUCTOR,AMD:89:B:CALL:SEMICONDUCTOR,TSM:86:B:CALL:SEMICONDUCTOR,AAPL:84:B:CALL:MEGA_CAP_TECH,GOLD:82:B:CALL:GOLD'>Portfolio Simulation</a></li>
+      </ul>
+      <h2>Liquidity</h2>{table(liquidity)}
+      <h2>Options Chain Snapshots</h2>{table(option_flow)}
+      <h2>Regime Snapshots</h2>{table(regimes)}
+      <h2>Position Plans</h2>{table(positions)}
+      <h2>Portfolio Simulations</h2>{table(sims)}
+    </body></html>
+    """
+
+
+@app.route('/v26')
+@app.route('/v26/dashboard')
+def v26_route_dashboard():
+    return Response(v26_dashboard_html(), mimetype='text/html')
+
+
+@app.route('/v26/options-chain/<symbol>')
+def v26_route_options_chain(symbol):
+    return jsonify(v26_real_options_chain(symbol, request.args.get("expiration")))
+
+
+@app.route('/v26/liquidity')
+def v26_route_liquidity():
+    return jsonify(v26_liquidity_engine())
+
+
+@app.route('/v26/spy-ema200')
+def v26_route_spy_ema200():
+    return jsonify({"ok": True, "version": V26_VERSION, **v26_spy_ema200_context()})
+
+
+@app.route('/v26/regime/<symbol>')
+def v26_route_regime(symbol):
+    return jsonify(v26_regime_switching_ai(symbol, request.args.get("score") or 50, request.args.get("side") or "CALL"))
+
+
+@app.route('/v26/position-plan/<symbol>')
+def v26_route_position_plan(symbol):
+    return jsonify(v26_position_management_ai(
+        symbol=symbol,
+        side=request.args.get("side") or "CALL",
+        entry=request.args.get("entry"),
+        atr=request.args.get("atr"),
+        score=request.args.get("score") or 50,
+        quality_score=request.args.get("quality_score") or 50,
+        account_equity=request.args.get("equity") or 10000,
+        risk_pct=request.args.get("risk_pct") or 1.0,
+    ))
+
+
+@app.route('/v26/portfolio-sim')
+def v26_route_portfolio_sim():
+    return jsonify(v26_portfolio_simulation(request.args.get("candidates"), request.args.get("max_per_sector") or 1, request.args.get("max_total") or 3))
+
+
+@app.route('/v26/json')
+def v26_route_json():
+    return jsonify({
+        "ok": True,
+        "version": V26_VERSION,
+        "liquidity_recent": v26_recent("v26_liquidity_snapshots", 5),
+        "options_chain_recent": v26_recent("v26_options_chain_snapshots", 5),
+        "regime_recent": v26_recent("v26_regime_snapshots", 5),
+        "position_recent": v26_recent("v26_position_plans", 5),
+        "portfolio_recent": v26_recent("v26_portfolio_simulations", 5),
+    })
+
+
+try:
+    v26_init_db()
+except Exception as e:
+    print('v26 init warning:', e)
+
+# ============================================================
+# END V26.0 PROFESSIONAL EXECUTION INTELLIGENCE SUITE
+# ============================================================
+
+
+
+# ============================================================
+# V26.6 TRADE DNA + CONVICTION ENGINE
+# ============================================================
+V26_6_VERSION = "V26.6 Trade DNA + Conviction Engine"
+
+def v26_6_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+def v26_6_int(x, default=0):
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(str(x).replace(",", "").strip()))
+    except Exception:
+        return default
+
+def v26_6_text(x, default=""):
+    try:
+        if x is None:
+            return default
+        return str(x).strip()
+    except Exception:
+        return default
+
+def v26_6_safe_json(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return "{}"
+
+def v26_6_init_db():
+    """Create V26.6 tables without disturbing legacy tables."""
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS trade_dna_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            dna_key TEXT UNIQUE NOT NULL,
+            symbol TEXT,
+            sector TEXT,
+            side TEXT,
+            strategy TEXT,
+            ema_state TEXT,
+            rsi_zone TEXT,
+            rvol_zone TEXT,
+            market_regime TEXT,
+            vix_state TEXT,
+            news_state TEXT,
+            flow_state TEXT,
+            risk_grade TEXT,
+            feature_json TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS dna_statistics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            updated_at TEXT NOT NULL,
+            dna_key TEXT UNIQUE NOT NULL,
+            occurrences INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            breakeven INTEGER DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            avg_return_r REAL DEFAULT 0,
+            expected_return_r REAL DEFAULT 0,
+            expected_drawdown_r REAL DEFAULT 0,
+            profit_factor REAL DEFAULT 0,
+            sample_quality TEXT,
+            source TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS conviction_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT,
+            sector TEXT,
+            dna_key TEXT,
+            technical_score REAL,
+            flow_score REAL,
+            context_score REAL,
+            quality_score REAL,
+            dna_win_rate REAL,
+            expected_return_r REAL,
+            expected_drawdown_r REAL,
+            historical_similarity REAL,
+            conviction_score REAL,
+            conviction_grade TEXT,
+            decision TEXT,
+            reasons TEXT
+        )
+    """)
+
+def v26_6_zone_rsi(rsi):
+    rsi = v26_6_float(rsi, None)
+    if rsi is None:
+        return "RSI_UNKNOWN"
+    if rsi >= 75:
+        return "RSI_OVERHEATED"
+    if rsi >= 68:
+        return "RSI_HOT"
+    if rsi >= 55:
+        return "RSI_BULL_MOMENTUM"
+    if rsi >= 45:
+        return "RSI_NEUTRAL"
+    if rsi >= 35:
+        return "RSI_WEAK"
+    return "RSI_OVERSOLD"
+
+def v26_6_zone_rvol(rvol):
+    rvol = v26_6_float(rvol, None)
+    if rvol is None:
+        return "RVOL_UNKNOWN"
+    if rvol >= 3:
+        return "RVOL_EXPLOSIVE"
+    if rvol >= 1.8:
+        return "RVOL_STRONG"
+    if rvol >= 1.2:
+        return "RVOL_OK"
+    if rvol >= 0.8:
+        return "RVOL_LIGHT"
+    return "RVOL_WEAK"
+
+def v26_6_zone_score(score):
+    score = v26_6_float(score, 50)
+    if score >= 90:
+        return "SCORE_ELITE"
+    if score >= 85:
+        return "SCORE_STRONG"
+    if score >= 75:
+        return "SCORE_GOOD"
+    if score >= 60:
+        return "SCORE_MEDIUM"
+    return "SCORE_LOW"
+
+def v26_6_flow_state(flow_score):
+    flow_score = v26_6_float(flow_score, None)
+    if flow_score is None:
+        return "FLOW_UNKNOWN"
+    if flow_score >= 85:
+        return "FLOW_ELITE"
+    if flow_score >= 75:
+        return "FLOW_STRONG"
+    if flow_score >= 60:
+        return "FLOW_OK"
+    return "FLOW_WEAK"
+
+def v26_6_context_state(context_score):
+    context_score = v26_6_float(context_score, None)
+    if context_score is None:
+        return "CONTEXT_UNKNOWN"
+    if context_score >= 85:
+        return "CONTEXT_TAILWIND"
+    if context_score >= 70:
+        return "CONTEXT_OK"
+    if context_score >= 50:
+        return "CONTEXT_MIXED"
+    return "CONTEXT_HEADWIND"
+
+def v26_6_normalize_regime(regime):
+    r = v26_6_text(regime, "UNKNOWN").upper()
+    if "STRONG" in r and "UP" in r:
+        return "REGIME_STRONG_UPTREND"
+    if "UP" in r:
+        return "REGIME_UPTREND"
+    if "STRONG" in r and "DOWN" in r:
+        return "REGIME_STRONG_DOWNTREND"
+    if "DOWN" in r:
+        return "REGIME_DOWNTREND"
+    if "RANGE" in r:
+        return "REGIME_RANGE"
+    if "PANIC" in r:
+        return "REGIME_PANIC"
+    return "REGIME_MIXED"
+
+def v26_6_sector_for_symbol(symbol):
+    symbol = v26_6_text(symbol).upper()
+    sector_map = {
+        "NVDA":"SEMICONDUCTOR", "AMD":"SEMICONDUCTOR", "AVGO":"SEMICONDUCTOR", "TSM":"SEMICONDUCTOR",
+        "MRVL":"SEMICONDUCTOR", "MU":"SEMICONDUCTOR", "AMKR":"SEMICONDUCTOR", "INTC":"SEMICONDUCTOR",
+        "AAPL":"MEGA_TECH", "MSFT":"MEGA_TECH", "GOOGL":"MEGA_TECH", "GOOG":"MEGA_TECH", "META":"MEGA_TECH",
+        "AMZN":"MEGA_TECH", "TSLA":"EV_HIGH_BETA", "PLTR":"AI_SOFTWARE", "CRWD":"CYBERSECURITY",
+        "NET":"CYBERSECURITY", "SNOW":"CLOUD_DATA", "DDOG":"CLOUD_DATA", "QQQ":"ETF_INDEX", "SPY":"ETF_INDEX",
+        "IWM":"ETF_INDEX", "SOXL":"LEVERAGED_SEMI", "TQQQ":"LEVERAGED_TECH", "OKLO":"NUCLEAR_ENERGY",
+        "CEG":"POWER_ENERGY", "VST":"POWER_ENERGY", "LEU":"URANIUM", "UUUU":"URANIUM",
+        "RKLB":"SPACE_AEROSPACE", "ASTS":"SPACE_AEROSPACE", "AVAV":"DEFENSE_DRONE",
+        "HOOD":"FINTECH_CRYPTO", "COIN":"FINTECH_CRYPTO", "MSTR":"CRYPTO_PROXY",
+        "GOLD":"GOLD", "XAUUSD":"GOLD", "XAU/USD":"GOLD"
+    }
+    return sector_map.get(symbol, "OTHER")
+
+def v26_6_build_dna_key(symbol, side="CALL", strategy="UNKNOWN", technical_score=50, rsi=None,
+                         rvol=None, market_regime="UNKNOWN", vix_state="UNKNOWN",
+                         news_state="UNKNOWN", flow_score=None, risk_grade="NA", sector=None):
+    symbol = v26_6_text(symbol).upper()
+    side = v26_6_text(side, "CALL").upper()
+    sector = sector or v26_6_sector_for_symbol(symbol)
+    features = {
+        "sector": sector,
+        "side": side,
+        "strategy": v26_6_text(strategy, "UNKNOWN").upper(),
+        "score_zone": v26_6_zone_score(technical_score),
+        "rsi_zone": v26_6_zone_rsi(rsi),
+        "rvol_zone": v26_6_zone_rvol(rvol),
+        "regime": v26_6_normalize_regime(market_regime),
+        "vix_state": v26_6_text(vix_state, "VIX_UNKNOWN").upper(),
+        "news_state": v26_6_text(news_state, "NEWS_UNKNOWN").upper(),
+        "flow_state": v26_6_flow_state(flow_score),
+        "risk_grade": v26_6_text(risk_grade, "NA").upper(),
+    }
+    dna_key = "|".join([
+        features["sector"], features["side"], features["strategy"], features["score_zone"],
+        features["rsi_zone"], features["rvol_zone"], features["regime"], features["vix_state"],
+        features["news_state"], features["flow_state"], features["risk_grade"]
+    ])
+    return dna_key, features
+
+def v26_6_upsert_dna_pattern(symbol, dna_key, features):
+    try:
+        v24_conn_execute("""
+            INSERT INTO trade_dna_patterns
+            (created_at, dna_key, symbol, sector, side, strategy, ema_state, rsi_zone, rvol_zone,
+             market_regime, vix_state, news_state, flow_state, risk_grade, feature_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dna_key) DO UPDATE SET
+                symbol=excluded.symbol,
+                sector=excluded.sector,
+                side=excluded.side,
+                strategy=excluded.strategy,
+                rsi_zone=excluded.rsi_zone,
+                rvol_zone=excluded.rvol_zone,
+                market_regime=excluded.market_regime,
+                vix_state=excluded.vix_state,
+                news_state=excluded.news_state,
+                flow_state=excluded.flow_state,
+                risk_grade=excluded.risk_grade,
+                feature_json=excluded.feature_json
+        """, (
+            now_text(), dna_key, symbol, features.get("sector"), features.get("side"), features.get("strategy"),
+            features.get("score_zone"), features.get("rsi_zone"), features.get("rvol_zone"),
+            features.get("regime"), features.get("vix_state"), features.get("news_state"),
+            features.get("flow_state"), features.get("risk_grade"), v26_6_safe_json(features)
+        ))
+    except Exception as e:
+        print("v26_6_upsert_dna_pattern warning:", e)
+
+def v26_6_query_outcome_rows(symbol=None, sector=None, strategy=None, limit=500):
+    """Use available historical outcome tables. Works even if some tables do not exist."""
+    rows = []
+    queries = []
+    # V24 quant outcomes usually store realized_r / outcome.
+    queries.append(("quant_signal_outcomes", "symbol, sector, strategy, realized_r, outcome"))
+    queries.append(("trade_quality_outcomes", "symbol, NULL as sector, NULL as strategy, realized_r, outcome"))
+    for table, cols in queries:
+        try:
+            sql = f"SELECT {cols} FROM {table}"
+            params = []
+            cond = []
+            if symbol:
+                cond.append("UPPER(symbol)=?")
+                params.append(v26_6_text(symbol).upper())
+            if sector and table == "quant_signal_outcomes":
+                cond.append("UPPER(sector)=?")
+                params.append(v26_6_text(sector).upper())
+            if strategy and table == "quant_signal_outcomes":
+                cond.append("UPPER(strategy)=?")
+                params.append(v26_6_text(strategy).upper())
+            if cond:
+                sql += " WHERE " + " AND ".join(cond)
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(int(limit))
+            part = v24_conn_execute(sql, tuple(params), fetch="all") or []
+            rows.extend(part)
+        except Exception:
+            pass
+    return rows
+
+def v26_6_stats_from_rows(rows):
+    rs = []
+    wins = losses = breakeven = 0
+    for r in rows or []:
+        rr = v26_6_float(r.get("realized_r"), None)
+        outcome = v26_6_text(r.get("outcome")).upper()
+        if rr is None:
+            if outcome in ("TP1", "TP2", "WIN", "PROFIT"):
+                rr = 1.0
+            elif outcome in ("SL", "LOSS"):
+                rr = -1.0
+            else:
+                rr = 0.0
+        rs.append(rr)
+        if rr > 0:
+            wins += 1
+        elif rr < 0:
+            losses += 1
+        else:
+            breakeven += 1
+    n = len(rs)
+    if n == 0:
+        return {
+            "occurrences": 0, "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
+            "avg_return_r": 0, "expected_return_r": 0, "expected_drawdown_r": 0,
+            "profit_factor": 0, "sample_quality": "NO_SAMPLE"
+        }
+    gross_win = sum(x for x in rs if x > 0)
+    gross_loss = abs(sum(x for x in rs if x < 0))
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for x in list(reversed(rs)):
+        equity += x
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity - peak)
+    win_rate = wins / n * 100
+    return {
+        "occurrences": n,
+        "wins": wins,
+        "losses": losses,
+        "breakeven": breakeven,
+        "win_rate": round(win_rate, 2),
+        "avg_return_r": round(sum(rs) / n, 3),
+        "expected_return_r": round(sum(rs) / n, 3),
+        "expected_drawdown_r": round(max_dd, 3),
+        "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else round(gross_win, 3),
+        "sample_quality": "GOOD" if n >= 50 else "MEDIUM" if n >= 20 else "LOW_SAMPLE"
+    }
+
+def v26_6_blended_dna_stats(symbol, sector, strategy, dna_key):
+    symbol_rows = v26_6_query_outcome_rows(symbol=symbol, limit=300)
+    sector_rows = v26_6_query_outcome_rows(sector=sector, limit=500)
+    strategy_rows = v26_6_query_outcome_rows(strategy=strategy, limit=500)
+    all_rows = v26_6_query_outcome_rows(limit=1000)
+
+    s1 = v26_6_stats_from_rows(symbol_rows)
+    s2 = v26_6_stats_from_rows(sector_rows)
+    s3 = v26_6_stats_from_rows(strategy_rows)
+    s4 = v26_6_stats_from_rows(all_rows)
+
+    weights = []
+    values = []
+    for stat, weight in [(s1, 0.40), (s2, 0.25), (s3, 0.20), (s4, 0.15)]:
+        if stat["occurrences"] > 0:
+            weights.append(weight)
+            values.append((stat, weight))
+    if not values:
+        # Conservative prior until enough real journal data exists.
+        blended = {
+            "occurrences": 0, "wins": 0, "losses": 0, "breakeven": 0,
+            "win_rate": 52.0, "avg_return_r": 0.10, "expected_return_r": 0.10,
+            "expected_drawdown_r": -1.0, "profit_factor": 1.05, "sample_quality": "PRIOR_ONLY"
+        }
+    else:
+        total_w = sum(w for _, w in values)
+        blended = {
+            "occurrences": sum(st["occurrences"] for st, _ in values),
+            "wins": sum(st["wins"] for st, _ in values),
+            "losses": sum(st["losses"] for st, _ in values),
+            "breakeven": sum(st["breakeven"] for st, _ in values),
+            "win_rate": round(sum(st["win_rate"] * w for st, w in values) / total_w, 2),
+            "avg_return_r": round(sum(st["avg_return_r"] * w for st, w in values) / total_w, 3),
+            "expected_return_r": round(sum(st["expected_return_r"] * w for st, w in values) / total_w, 3),
+            "expected_drawdown_r": round(sum(st["expected_drawdown_r"] * w for st, w in values) / total_w, 3),
+            "profit_factor": round(sum(st["profit_factor"] * w for st, w in values) / total_w, 3),
+            "sample_quality": "BLENDED_GOOD" if sum(st["occurrences"] for st, _ in values) >= 50 else "BLENDED_LOW_SAMPLE"
+        }
+    try:
+        v24_conn_execute("""
+            INSERT INTO dna_statistics
+            (updated_at, dna_key, occurrences, wins, losses, breakeven, win_rate, avg_return_r,
+             expected_return_r, expected_drawdown_r, profit_factor, sample_quality, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dna_key) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                occurrences=excluded.occurrences,
+                wins=excluded.wins,
+                losses=excluded.losses,
+                breakeven=excluded.breakeven,
+                win_rate=excluded.win_rate,
+                avg_return_r=excluded.avg_return_r,
+                expected_return_r=excluded.expected_return_r,
+                expected_drawdown_r=excluded.expected_drawdown_r,
+                profit_factor=excluded.profit_factor,
+                sample_quality=excluded.sample_quality,
+                source=excluded.source
+        """, (
+            now_text(), dna_key, blended["occurrences"], blended["wins"], blended["losses"],
+            blended["breakeven"], blended["win_rate"], blended["avg_return_r"],
+            blended["expected_return_r"], blended["expected_drawdown_r"], blended["profit_factor"],
+            blended["sample_quality"], "symbol/sector/strategy/all blended"
+        ))
+    except Exception as e:
+        print("v26_6 stats upsert warning:", e)
+    return blended, {"symbol": s1, "sector": s2, "strategy": s3, "all": s4}
+
+def v26_6_historical_similarity(features, stats):
+    # Similarity is conservative when sample size is low.
+    score = 50.0
+    sample = v26_6_int(stats.get("occurrences"), 0)
+    score += min(20, sample / 3.0)
+    if features.get("rvol_zone") in ("RVOL_STRONG", "RVOL_EXPLOSIVE"):
+        score += 6
+    if features.get("flow_state") in ("FLOW_STRONG", "FLOW_ELITE"):
+        score += 8
+    if features.get("regime") in ("REGIME_UPTREND", "REGIME_STRONG_UPTREND") and features.get("side") == "CALL":
+        score += 6
+    if features.get("regime") in ("REGIME_DOWNTREND", "REGIME_STRONG_DOWNTREND") and features.get("side") == "PUT":
+        score += 6
+    if features.get("rsi_zone") in ("RSI_HOT", "RSI_OVERHEATED"):
+        score -= 8
+    return round(max(0, min(100, score)), 2)
+
+def v26_6_conviction_engine(symbol, side="CALL", strategy="UNKNOWN", technical_score=50, flow_score=50,
+                            context_score=50, quality_score=50, rsi=None, rvol=None, market_regime="UNKNOWN",
+                            vix_state="UNKNOWN", news_state="UNKNOWN", risk_grade="NA", sector=None):
+    symbol = v26_6_text(symbol).upper()
+    side = v26_6_text(side, "CALL").upper()
+    strategy = v26_6_text(strategy, "UNKNOWN").upper()
+    sector = sector or v26_6_sector_for_symbol(symbol)
+
+    dna_key, features = v26_6_build_dna_key(
+        symbol=symbol, side=side, strategy=strategy, technical_score=technical_score,
+        rsi=rsi, rvol=rvol, market_regime=market_regime, vix_state=vix_state,
+        news_state=news_state, flow_score=flow_score, risk_grade=risk_grade, sector=sector
+    )
+    v26_6_upsert_dna_pattern(symbol, dna_key, features)
+    stats, component_stats = v26_6_blended_dna_stats(symbol, sector, strategy, dna_key)
+    similarity = v26_6_historical_similarity(features, stats)
+
+    tech = v26_6_float(technical_score, 50)
+    flow = v26_6_float(flow_score, 50)
+    context = v26_6_float(context_score, 50)
+    quality = v26_6_float(quality_score, 50)
+    dna_win = v26_6_float(stats.get("win_rate"), 52)
+    exp_ret = v26_6_float(stats.get("expected_return_r"), 0.10)
+    exp_dd = v26_6_float(stats.get("expected_drawdown_r"), -1.0)
+
+    conviction = (
+        tech * 0.24 +
+        flow * 0.20 +
+        context * 0.16 +
+        quality * 0.16 +
+        dna_win * 0.14 +
+        similarity * 0.10
+    )
+    # Reward good expectancy; penalize bad drawdown.
+    conviction += max(-8, min(8, exp_ret * 4.0))
+    if exp_dd < -2.0:
+        conviction -= 5
+    if stats.get("sample_quality") in ("PRIOR_ONLY", "LOW_SAMPLE", "BLENDED_LOW_SAMPLE"):
+        conviction -= 4
+
+    conviction = round(max(0, min(100, conviction)), 2)
+    if conviction >= 90 and exp_ret >= 1.2 and similarity >= 75:
+        grade = "INSTITUTIONAL"
+    elif conviction >= 82:
+        grade = "HIGH"
+    elif conviction >= 70:
+        grade = "MEDIUM"
+    else:
+        grade = "LOW"
+
+    decision = "SEND" if grade in ("HIGH", "INSTITUTIONAL") and tech >= 85 and flow >= 75 and context >= 60 and exp_ret >= 0 else "BLOCK"
+    reasons = []
+    reasons.append(f"DNA sample={stats.get('occurrences')} quality={stats.get('sample_quality')}")
+    reasons.append(f"Predicted win rate={dna_win:.2f}%")
+    reasons.append(f"Expected return={exp_ret:.2f}R")
+    reasons.append(f"Expected drawdown={exp_dd:.2f}R")
+    reasons.append(f"Historical similarity={similarity:.2f}%")
+    if decision == "BLOCK":
+        if tech < 85:
+            reasons.append("BLOCK: technical score below strict threshold")
+        if flow < 75:
+            reasons.append("BLOCK: option flow score too weak")
+        if context < 60:
+            reasons.append("BLOCK: market context not supportive")
+        if exp_ret < 0:
+            reasons.append("BLOCK: negative expected return")
+
+    try:
+        v24_conn_execute("""
+            INSERT INTO conviction_history
+            (created_at, symbol, side, sector, dna_key, technical_score, flow_score, context_score,
+             quality_score, dna_win_rate, expected_return_r, expected_drawdown_r, historical_similarity,
+             conviction_score, conviction_grade, decision, reasons)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            now_text(), symbol, side, sector, dna_key, tech, flow, context, quality,
+            dna_win, exp_ret, exp_dd, similarity, conviction, grade, decision,
+            " | ".join(reasons)
+        ))
+    except Exception as e:
+        print("v26_6 conviction insert warning:", e)
+
+    return {
+        "ok": True,
+        "version": V26_6_VERSION,
+        "symbol": symbol,
+        "side": side,
+        "sector": sector,
+        "strategy": strategy,
+        "dna_key": dna_key,
+        "features": features,
+        "predicted_win_rate": round(dna_win, 2),
+        "expected_return_r": round(exp_ret, 3),
+        "expected_drawdown_r": round(exp_dd, 3),
+        "historical_similarity": similarity,
+        "conviction_score": conviction,
+        "conviction_grade": grade,
+        "decision": decision,
+        "reasons": reasons,
+        "dna_stats": stats,
+        "component_stats": component_stats,
+    }
+
+def v26_6_recent(table, limit=50):
+    allowed = {"trade_dna_patterns", "dna_statistics", "conviction_history"}
+    if table not in allowed:
+        return []
+    try:
+        return v24_conn_execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (v26_6_int(limit, 50),), fetch="all") or []
+    except Exception as e:
+        return [{"error": str(e)}]
+
+@app.route('/v26/dna/<symbol>')
+def v26_6_route_dna(symbol):
+    result = v26_6_conviction_engine(
+        symbol=symbol,
+        side=request.args.get("side") or "CALL",
+        strategy=request.args.get("strategy") or "UNKNOWN",
+        technical_score=request.args.get("technical_score") or request.args.get("score") or 50,
+        flow_score=request.args.get("flow_score") or 50,
+        context_score=request.args.get("context_score") or 50,
+        quality_score=request.args.get("quality_score") or 50,
+        rsi=request.args.get("rsi"),
+        rvol=request.args.get("rvol"),
+        market_regime=request.args.get("regime") or "UNKNOWN",
+        vix_state=request.args.get("vix_state") or "UNKNOWN",
+        news_state=request.args.get("news_state") or "UNKNOWN",
+        risk_grade=request.args.get("risk_grade") or "NA",
+        sector=request.args.get("sector"),
+    )
+    return jsonify(result)
+
+@app.route('/v26/conviction')
+def v26_6_route_conviction():
+    symbol = request.args.get("symbol") or "NVDA"
+    return v26_6_route_dna(symbol)
+
+@app.route('/v26/conviction-gate')
+def v26_6_route_conviction_gate():
+    symbol = request.args.get("symbol") or "NVDA"
+    result = v26_6_conviction_engine(
+        symbol=symbol,
+        side=request.args.get("side") or "CALL",
+        strategy=request.args.get("strategy") or "UNKNOWN",
+        technical_score=request.args.get("technical_score") or request.args.get("score") or 50,
+        flow_score=request.args.get("flow_score") or 50,
+        context_score=request.args.get("context_score") or 50,
+        quality_score=request.args.get("quality_score") or 50,
+        rsi=request.args.get("rsi"),
+        rvol=request.args.get("rvol"),
+        market_regime=request.args.get("regime") or "UNKNOWN",
+        vix_state=request.args.get("vix_state") or "UNKNOWN",
+        news_state=request.args.get("news_state") or "UNKNOWN",
+        risk_grade=request.args.get("risk_grade") or "NA",
+        sector=request.args.get("sector"),
+    )
+    return jsonify({
+        "ok": True,
+        "symbol": result["symbol"],
+        "decision": result["decision"],
+        "conviction_grade": result["conviction_grade"],
+        "conviction_score": result["conviction_score"],
+        "predicted_win_rate": result["predicted_win_rate"],
+        "expected_return_r": result["expected_return_r"],
+        "expected_drawdown_r": result["expected_drawdown_r"],
+        "historical_similarity": result["historical_similarity"],
+        "reasons": result["reasons"],
+    })
+
+@app.route('/v26/dna-stats')
+def v26_6_route_dna_stats():
+    return jsonify({
+        "ok": True,
+        "version": V26_6_VERSION,
+        "top_dna": v26_6_recent("dna_statistics", request.args.get("limit") or 50),
+        "patterns": v26_6_recent("trade_dna_patterns", request.args.get("limit") or 50),
+    })
+
+@app.route('/v26/conviction-history')
+def v26_6_route_conviction_history():
+    return jsonify({
+        "ok": True,
+        "version": V26_6_VERSION,
+        "history": v26_6_recent("conviction_history", request.args.get("limit") or 100),
+    })
+
+@app.route('/v26/conviction-dashboard')
+def v26_6_route_dashboard():
+    rows = v26_6_recent("conviction_history", 30)
+    stats = v26_6_recent("dna_statistics", 30)
+    html = "<h1>V26.6 Trade DNA + Conviction Engine</h1>"
+    html += "<p>ระบบนี้ตอบก่อนส่ง Alert ว่า: Win Rate คาดการณ์, Expected Return, Expected Drawdown และ Historical Similarity เป็นอย่างไร</p>"
+    html += "<h2>Recent Conviction Decisions</h2><table border='1' cellpadding='6'><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Conviction</th><th>Grade</th><th>Decision</th><th>Win%</th><th>Exp R</th><th>Similarity</th></tr>"
+    for r in rows:
+        html += f"<tr><td>{r.get('created_at','')}</td><td>{r.get('symbol','')}</td><td>{r.get('side','')}</td><td>{r.get('conviction_score','')}</td><td>{r.get('conviction_grade','')}</td><td>{r.get('decision','')}</td><td>{r.get('dna_win_rate','')}</td><td>{r.get('expected_return_r','')}</td><td>{r.get('historical_similarity','')}</td></tr>"
+    html += "</table><h2>DNA Statistics</h2><table border='1' cellpadding='6'><tr><th>DNA</th><th>Sample</th><th>Win%</th><th>Exp R</th><th>PF</th><th>Quality</th></tr>"
+    for r in stats:
+        html += f"<tr><td>{str(r.get('dna_key',''))[:80]}</td><td>{r.get('occurrences','')}</td><td>{r.get('win_rate','')}</td><td>{r.get('expected_return_r','')}</td><td>{r.get('profit_factor','')}</td><td>{r.get('sample_quality','')}</td></tr>"
+    html += "</table>"
+    return Response(html, mimetype="text/html")
+
+try:
+    v26_6_init_db()
+except Exception as e:
+    print("v26.6 init warning:", e)
+
+# ============================================================
+# END V26.6 TRADE DNA + CONVICTION ENGINE
+# ============================================================
+
+
+
+# ============================================================
+# V26.7 MARKET BREADTH + SECTOR ROTATION + RELATIVE STRENGTH
+# ============================================================
+V26_7_VERSION = "V26.7 Market Breadth + Sector Rotation Intelligence"
+
+V26_7_SECTOR_ETFS = {
+    "Technology": "XLK",
+    "Semiconductor": "SMH",
+    "AI": "BOTZ",
+    "Energy": "XLE",
+    "Financial": "XLF",
+    "Healthcare": "XLV",
+    "Industrial": "XLI",
+    "Consumer_Discretionary": "XLY",
+    "Consumer_Staples": "XLP",
+    "Utilities": "XLU",
+    "Real_Estate": "XLRE",
+    "Materials": "XLB",
+    "Communications": "XLC",
+    "Aerospace_Defense": "ITA",
+    "Crypto_Proxy": "BITQ",
+    "Quantum_Proxy": "QTUM",
+}
+
+V26_7_SYMBOL_SECTOR = {
+    # Mega cap / AI / Tech
+    "NVDA": "Semiconductor", "AMD": "Semiconductor", "AVGO": "Semiconductor", "TSM": "Semiconductor",
+    "MRVL": "Semiconductor", "AMKR": "Semiconductor", "INTC": "Semiconductor", "MU": "Semiconductor",
+    "SMCI": "Semiconductor", "ARM": "Semiconductor", "WDC": "Semiconductor", "AAOI": "Semiconductor",
+    "AEHR": "Semiconductor", "AXTI": "Semiconductor",
+    "AAPL": "Technology", "MSFT": "Technology", "META": "Technology", "GOOGL": "Technology",
+    "GOOG": "Technology", "AMZN": "Consumer_Discretionary", "NFLX": "Communications",
+    "PLTR": "AI", "CRWD": "Technology", "SNOW": "Technology", "NET": "Technology", "DDOG": "Technology",
+    "CRDO": "Semiconductor", "CRWV": "AI", "NBIS": "AI", "LAES": "Technology",
+    # High beta / themes
+    "TSLA": "Consumer_Discretionary", "HOOD": "Financial", "COIN": "Crypto_Proxy", "MSTR": "Crypto_Proxy",
+    "RKLB": "Aerospace_Defense", "ASTS": "Aerospace_Defense", "KTOS": "Aerospace_Defense",
+    "AVAV": "Aerospace_Defense", "BKSY": "Aerospace_Defense", "PL": "Aerospace_Defense",
+    "OKLO": "Energy", "CEG": "Energy", "VST": "Energy", "LEU": "Energy", "UUUU": "Energy",
+    "QBTS": "Quantum_Proxy", "IONQ": "Quantum_Proxy", "RGTI": "Quantum_Proxy", "QUBT": "Quantum_Proxy",
+    # ETFs
+    "SPY": "Index", "QQQ": "Index", "IWM": "Index", "TQQQ": "Index", "SQQQ": "Index", "SOXL": "Semiconductor",
+}
+
+V26_7_THEME_GROUPS = {
+    "Semiconductor": ["NVDA", "AMD", "AVGO", "TSM", "MRVL", "AMKR", "INTC", "MU", "SMCI", "ARM", "WDC", "AAOI", "AEHR", "AXTI", "CRDO"],
+    "AI": ["NVDA", "PLTR", "MSFT", "GOOGL", "META", "CRWV", "NBIS", "SMCI"],
+    "MegaCap_Tech": ["AAPL", "MSFT", "AMZN", "META", "GOOGL", "GOOG", "NVDA", "AVGO"],
+    "Aerospace_Defense": ["RKLB", "ASTS", "KTOS", "AVAV", "BKSY", "PL"],
+    "Energy_Nuclear": ["OKLO", "CEG", "VST", "LEU", "UUUU"],
+    "Quantum": ["QBTS", "IONQ", "RGTI", "QUBT"],
+    "Crypto": ["COIN", "MSTR", "HOOD", "BITQ"],
+}
+
+def v26_7_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def v26_7_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
+
+def v26_7_int(x, default=0):
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(str(x).replace(",", "").strip()))
+    except Exception:
+        return default
+
+def v26_7_json(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return "{}"
+
+def v26_7_init_db():
+    """Create V26.7 tables without disturbing legacy tables."""
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS market_breadth (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            universe TEXT,
+            advancers INTEGER DEFAULT 0,
+            decliners INTEGER DEFAULT 0,
+            unchanged INTEGER DEFAULT 0,
+            advance_decline_ratio REAL DEFAULT 0,
+            new_highs INTEGER DEFAULT 0,
+            new_lows INTEGER DEFAULT 0,
+            up_volume REAL DEFAULT 0,
+            down_volume REAL DEFAULT 0,
+            up_down_volume_ratio REAL DEFAULT 0,
+            breadth_score REAL DEFAULT 50,
+            status TEXT,
+            raw_json TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS sector_rotation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            sector TEXT,
+            etf_symbol TEXT,
+            return_1d REAL DEFAULT 0,
+            return_5d REAL DEFAULT 0,
+            return_20d REAL DEFAULT 0,
+            volume_ratio REAL DEFAULT 1,
+            relative_strength REAL DEFAULT 50,
+            money_flow_score REAL DEFAULT 50,
+            rank_no INTEGER DEFAULT 0,
+            status TEXT,
+            raw_json TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS money_flow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            theme TEXT,
+            theme_score REAL DEFAULT 50,
+            leaders TEXT,
+            laggards TEXT,
+            status TEXT,
+            raw_json TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS relative_strength (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT,
+            sector TEXT,
+            return_1d REAL DEFAULT 0,
+            return_5d REAL DEFAULT 0,
+            return_20d REAL DEFAULT 0,
+            relative_strength_score REAL DEFAULT 50,
+            rank_no INTEGER DEFAULT 0,
+            raw_json TEXT
+        )
+    """)
+    v24_conn_execute("""
+        CREATE TABLE IF NOT EXISTS suppressed_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            original_score REAL DEFAULT 0,
+            adjusted_score REAL DEFAULT 0,
+            breadth_score REAL DEFAULT 50,
+            sector_score REAL DEFAULT 50,
+            relative_strength_score REAL DEFAULT 50,
+            action TEXT,
+            reason TEXT,
+            raw_json TEXT
+        )
+    """)
+
+def v26_7_recent(table, limit=50):
+    limit = max(1, min(500, v26_7_int(limit, 50)))
+    try:
+        return v24_conn_execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT {limit}", fetch="all") or []
+    except Exception:
+        return []
+
+def v26_7_price_series(symbol, period="3mo", interval="1d"):
+    """Free Yahoo series helper. Returns closes, highs, lows, volumes."""
+    try:
+        data = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
+        if data is None or data.empty:
+            return [], [], [], []
+        data = data.dropna()
+        closes = [float(x) for x in data["Close"].tolist()]
+        highs = [float(x) for x in data["High"].tolist()]
+        lows = [float(x) for x in data["Low"].tolist()]
+        volumes = [float(x) for x in data["Volume"].fillna(0).tolist()]
+        return closes, highs, lows, volumes
+    except Exception as e:
+        print("v26.7 price series error:", symbol, e)
+        return [], [], [], []
+
+def v26_7_returns(symbol):
+    closes, highs, lows, volumes = v26_7_price_series(symbol)
+    if len(closes) < 22:
+        return {"symbol": symbol, "ok": False, "return_1d": 0, "return_5d": 0, "return_20d": 0, "volume_ratio": 1}
+    def ret(n):
+        try:
+            return (closes[-1] - closes[-n-1]) / closes[-n-1] * 100 if closes[-n-1] else 0
+        except Exception:
+            return 0
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 and sum(volumes[-21:-1]) > 0 else 0
+    volume_ratio = volumes[-1] / avg_vol if avg_vol else 1
+    return {
+        "symbol": symbol, "ok": True,
+        "price": closes[-1],
+        "high_20": max(highs[-20:]) if highs else None,
+        "low_20": min(lows[-20:]) if lows else None,
+        "volume": volumes[-1] if volumes else 0,
+        "return_1d": round(ret(1), 3),
+        "return_5d": round(ret(5), 3),
+        "return_20d": round(ret(20), 3),
+        "volume_ratio": round(volume_ratio, 3),
+    }
+
+def v26_7_score_from_returns(r1, r5, r20, volume_ratio=1.0):
+    score = 50 + (r1 * 2.0) + (r5 * 2.5) + (r20 * 1.2)
+    if volume_ratio >= 1.5:
+        score += 6
+    elif volume_ratio < 0.7:
+        score -= 5
+    return round(max(0, min(100, score)), 2)
+
+def v26_7_breadth_universe():
+    raw = os.getenv("V26_7_BREADTH_UNIVERSE", "")
+    if raw.strip():
+        return [x.strip().upper() for x in raw.split(",") if x.strip()]
+    base = []
+    try:
+        base += list(US_WATCHLIST or [])
+        base += list(TIER_A_WATCHLIST or [])
+        base += list(TIER_B_WATCHLIST or [])
+    except Exception:
+        pass
+    base += ["NVDA","AAPL","MSFT","AMZN","META","GOOGL","TSLA","AMD","AVGO","PLTR","TSM","MRVL","QQQ","SPY","IWM","SMH","XLK","XLE","XLF","XLV","XLI","XLY"]
+    # de-dup, no Thai, cap for free API stability.
+    seen, out = set(), []
+    for s in base:
+        s = str(s).upper().replace(".BK", "")
+        if s and s not in seen and s not in {"GOLD","XAUUSD"}:
+            seen.add(s); out.append(s)
+    return out[:80]
+
+def v26_7_market_breadth(universe=None, save=True):
+    symbols = universe or v26_7_breadth_universe()
+    adv = dec = unch = new_highs = new_lows = 0
+    up_vol = down_vol = 0.0
+    rows = []
+    for sym in symbols:
+        data = v26_7_returns(sym)
+        if not data.get("ok"):
+            continue
+        r1 = data["return_1d"]
+        if r1 > 0.05:
+            adv += 1; up_vol += data.get("volume", 0)
+        elif r1 < -0.05:
+            dec += 1; down_vol += data.get("volume", 0)
+        else:
+            unch += 1
+        price = data.get("price")
+        if price and data.get("high_20") and price >= data["high_20"] * 0.995:
+            new_highs += 1
+        if price and data.get("low_20") and price <= data["low_20"] * 1.005:
+            new_lows += 1
+        rows.append(data)
+    total = max(1, adv + dec + unch)
+    ad_ratio = adv / max(1, dec)
+    ud_vol_ratio = up_vol / max(1.0, down_vol)
+    adv_pct = adv / total * 100
+    nhnl = (new_highs - new_lows) / max(1, total) * 100
+    breadth_score = 50 + (adv_pct - 50) * 0.7 + min(20, max(-20, (ad_ratio - 1) * 10)) + min(15, max(-15, nhnl))
+    breadth_score = round(max(0, min(100, breadth_score)), 2)
+    if breadth_score >= 70:
+        status = "HEALTHY / RISK-ON"
+    elif breadth_score >= 55:
+        status = "NEUTRAL POSITIVE"
+    elif breadth_score >= 40:
+        status = "WEAK / CAUTION"
+    else:
+        status = "RISK-OFF / SUPPRESS ALERTS"
+    result = {
+        "ok": True, "version": V26_7_VERSION, "universe_size": len(rows),
+        "advancers": adv, "decliners": dec, "unchanged": unch,
+        "advance_decline_ratio": round(ad_ratio, 3),
+        "new_highs": new_highs, "new_lows": new_lows,
+        "up_volume": round(up_vol, 2), "down_volume": round(down_vol, 2),
+        "up_down_volume_ratio": round(ud_vol_ratio, 3),
+        "breadth_score": breadth_score, "status": status, "rows": rows[:120],
+    }
+    if save:
+        try:
+            v24_conn_execute("""
+                INSERT INTO market_breadth
+                (created_at, universe, advancers, decliners, unchanged, advance_decline_ratio, new_highs, new_lows, up_volume, down_volume, up_down_volume_ratio, breadth_score, status, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (v26_7_now_iso(), ",".join(symbols), adv, dec, unch, round(ad_ratio,3), new_highs, new_lows, round(up_vol,2), round(down_vol,2), round(ud_vol_ratio,3), breadth_score, status, v26_7_json(result)))
+        except Exception as e:
+            print("v26.7 save breadth error:", e)
+    return result
+
+def v26_7_sector_rotation(save=True):
+    items = []
+    spy = v26_7_returns("SPY")
+    spy_20 = spy.get("return_20d", 0) if spy.get("ok") else 0
+    for sector, etf in V26_7_SECTOR_ETFS.items():
+        data = v26_7_returns(etf)
+        if not data.get("ok"):
+            continue
+        rs = v26_7_score_from_returns(data["return_1d"], data["return_5d"], data["return_20d"] - spy_20, data["volume_ratio"])
+        money_flow = round(max(0, min(100, rs + (data["volume_ratio"] - 1) * 8)), 2)
+        status = "LEADER" if money_flow >= 70 else "IMPROVING" if money_flow >= 58 else "LAGGARD" if money_flow < 42 else "NEUTRAL"
+        item = {
+            "sector": sector, "etf_symbol": etf,
+            "return_1d": data["return_1d"], "return_5d": data["return_5d"], "return_20d": data["return_20d"],
+            "volume_ratio": data["volume_ratio"], "relative_strength": rs, "money_flow_score": money_flow, "status": status,
+        }
+        items.append(item)
+    items.sort(key=lambda x: x["money_flow_score"], reverse=True)
+    for i, it in enumerate(items, 1):
+        it["rank_no"] = i
+        if save:
+            try:
+                v24_conn_execute("""
+                    INSERT INTO sector_rotation
+                    (created_at, sector, etf_symbol, return_1d, return_5d, return_20d, volume_ratio, relative_strength, money_flow_score, rank_no, status, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (v26_7_now_iso(), it["sector"], it["etf_symbol"], it["return_1d"], it["return_5d"], it["return_20d"], it["volume_ratio"], it["relative_strength"], it["money_flow_score"], it["rank_no"], it["status"], v26_7_json(it)))
+            except Exception as e:
+                print("v26.7 save sector error:", e)
+    return {"ok": True, "version": V26_7_VERSION, "sectors": items, "leaders": items[:5], "laggards": items[-5:]}
+
+def v26_7_symbol_sector(symbol):
+    sym = str(symbol or "").upper().replace(".BK","")
+    return V26_7_SYMBOL_SECTOR.get(sym, "Other")
+
+def v26_7_relative_strength(symbols=None, save=True):
+    if symbols is None:
+        symbols = v26_7_breadth_universe()
+    rows = []
+    spy = v26_7_returns("SPY")
+    spy20 = spy.get("return_20d", 0) if spy.get("ok") else 0
+    for sym in symbols:
+        sym = str(sym).upper().replace(".BK","")
+        if not sym or sym in {"GOLD","XAUUSD"}:
+            continue
+        data = v26_7_returns(sym)
+        if not data.get("ok"):
+            continue
+        rs = v26_7_score_from_returns(data["return_1d"], data["return_5d"], data["return_20d"] - spy20, data["volume_ratio"])
+        row = {
+            "symbol": sym, "sector": v26_7_symbol_sector(sym),
+            "return_1d": data["return_1d"], "return_5d": data["return_5d"], "return_20d": data["return_20d"],
+            "relative_strength_score": rs, "volume_ratio": data["volume_ratio"],
+        }
+        rows.append(row)
+    rows.sort(key=lambda x: x["relative_strength_score"], reverse=True)
+    for i, row in enumerate(rows, 1):
+        row["rank_no"] = i
+        if save:
+            try:
+                v24_conn_execute("""
+                    INSERT INTO relative_strength
+                    (created_at, symbol, sector, return_1d, return_5d, return_20d, relative_strength_score, rank_no, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (v26_7_now_iso(), row["symbol"], row["sector"], row["return_1d"], row["return_5d"], row["return_20d"], row["relative_strength_score"], i, v26_7_json(row)))
+            except Exception as e:
+                print("v26.7 save relative strength error:", e)
+    return {"ok": True, "version": V26_7_VERSION, "ranking": rows, "top": rows[:20]}
+
+def v26_7_money_flow(save=True):
+    sector_result = v26_7_sector_rotation(save=False)
+    sector_scores = {x["sector"]: x["money_flow_score"] for x in sector_result.get("sectors", [])}
+    results = []
+    for theme, symbols in V26_7_THEME_GROUPS.items():
+        rs = v26_7_relative_strength(symbols, save=False).get("ranking", [])
+        leaders = rs[:3]
+        laggards = rs[-3:] if len(rs) >= 3 else rs
+        sector = v26_7_symbol_sector(symbols[0]) if symbols else "Other"
+        sector_score = sector_scores.get(sector, 50)
+        avg_rs = sum(x["relative_strength_score"] for x in leaders) / max(1, len(leaders)) if leaders else 50
+        theme_score = round(max(0, min(100, avg_rs * 0.6 + sector_score * 0.4)), 2)
+        status = "STRONG INFLOW" if theme_score >= 75 else "INFLOW" if theme_score >= 60 else "OUTFLOW" if theme_score < 40 else "NEUTRAL"
+        item = {
+            "theme": theme, "theme_score": theme_score, "sector_score": sector_score,
+            "leaders": leaders, "laggards": laggards, "status": status,
+        }
+        results.append(item)
+        if save:
+            try:
+                v24_conn_execute("""
+                    INSERT INTO money_flow
+                    (created_at, theme, theme_score, leaders, laggards, status, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (v26_7_now_iso(), theme, theme_score, v26_7_json(leaders), v26_7_json(laggards), status, v26_7_json(item)))
+            except Exception as e:
+                print("v26.7 save money flow error:", e)
+    results.sort(key=lambda x: x["theme_score"], reverse=True)
+    return {"ok": True, "version": V26_7_VERSION, "themes": results, "leaders": results[:5], "laggards": results[-5:]}
+
+def v26_7_theme_for_symbol(symbol):
+    sym = str(symbol or "").upper().replace(".BK","")
+    for theme, symbols in V26_7_THEME_GROUPS.items():
+        if sym in symbols:
+            return theme
+    return v26_7_symbol_sector(sym)
+
+def v26_7_score_context(symbol, original_score=50, side="CALL", breadth=None, sector_rotation=None, relative_strength=None, save=True):
+    sym = str(symbol or "").upper().replace(".BK","")
+    original = v26_7_float(original_score, 50)
+    side = str(side or "CALL").upper()
+    breadth = breadth or v26_7_market_breadth(save=False)
+    sector_rotation = sector_rotation or v26_7_sector_rotation(save=False)
+    rs_result = relative_strength or v26_7_relative_strength([sym], save=False)
+    breadth_score = v26_7_float(breadth.get("breadth_score"), 50)
+    sector = v26_7_symbol_sector(sym)
+    sector_scores = {x.get("sector"): v26_7_float(x.get("money_flow_score"), 50) for x in sector_rotation.get("sectors", [])}
+    sector_score = sector_scores.get(sector, 50)
+    rs_rows = rs_result.get("ranking", [])
+    rs_score = v26_7_float(rs_rows[0].get("relative_strength_score"), 50) if rs_rows else 50
+    adjusted = original
+    reasons = []
+    action = "ALLOW"
+
+    # Weak market suppression: protect capital first.
+    if breadth_score < 40:
+        if side.startswith("CALL"):
+            adjusted -= 18
+            action = "BLOCK" if adjusted < 85 else "REDUCE_SIZE"
+            reasons.append("Breadth < 40: ตลาดอ่อนแอ กด/บล็อก CALL แม้หุ้นรายตัวสวย")
+        else:
+            adjusted += 5
+            reasons.append("Breadth < 40: สภาพตลาดสนับสนุนฝั่ง PUT มากกว่า")
+    elif breadth_score < 55:
+        adjusted -= 8 if side.startswith("CALL") else 0
+        action = "REDUCE_SIZE" if side.startswith("CALL") else action
+        reasons.append("Breadth อ่อน: ลดขนาดไม้/ลดความมั่นใจ")
+    elif breadth_score >= 70 and side.startswith("CALL"):
+        adjusted += 5
+        reasons.append("Breadth แข็งแรง: สนับสนุนสัญญาณฝั่งซื้อ")
+
+    # Sector rotation boost/penalty.
+    if sector_score >= 70:
+        adjusted += 6
+        reasons.append(f"Sector/Money Flow แข็งแรง ({sector}: {sector_score})")
+    elif sector_score < 45:
+        adjusted -= 8
+        action = "REDUCE_SIZE" if action == "ALLOW" else action
+        reasons.append(f"Sector/Money Flow อ่อน ({sector}: {sector_score})")
+
+    # Relative strength ranking.
+    if rs_score >= 75:
+        adjusted += 5
+        reasons.append(f"Relative Strength แข็งแรง ({rs_score})")
+    elif rs_score < 45:
+        adjusted -= 7
+        action = "REDUCE_SIZE" if action == "ALLOW" else action
+        reasons.append(f"Relative Strength ต่ำ ({rs_score})")
+
+    adjusted = round(max(0, min(100, adjusted)), 2)
+    if adjusted < 85 and original >= 85:
+        action = "BLOCK" if breadth_score < 40 else "REDUCE_SIZE"
+    if not reasons:
+        reasons.append("Breadth/Sector/RS เป็นกลาง ไม่ปรับคะแนนมาก")
+
+    result = {
+        "ok": True, "version": V26_7_VERSION, "symbol": sym, "side": side,
+        "original_score": original, "adjusted_score": adjusted,
+        "breadth_score": breadth_score, "breadth_status": breadth.get("status"),
+        "sector": sector, "sector_score": sector_score,
+        "relative_strength_score": rs_score,
+        "action": action,
+        "pass_gate": action != "BLOCK" and adjusted >= 85,
+        "reasons": reasons,
+    }
+    if save and action in {"BLOCK", "REDUCE_SIZE"}:
+        try:
+            v24_conn_execute("""
+                INSERT INTO suppressed_signals
+                (created_at, symbol, side, original_score, adjusted_score, breadth_score, sector_score, relative_strength_score, action, reason, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (v26_7_now_iso(), sym, side, original, adjusted, breadth_score, sector_score, rs_score, action, " | ".join(reasons), v26_7_json(result)))
+        except Exception as e:
+            print("v26.7 save suppression error:", e)
+    return result
+
+def v26_7_best_of_theme(symbols, scores=None):
+    if isinstance(symbols, str):
+        symbols = [x.strip().upper() for x in symbols.split(",") if x.strip()]
+    scores = scores or {}
+    # Build shared context once for speed.
+    breadth = v26_7_market_breadth(save=False)
+    sector_rot = v26_7_sector_rotation(save=False)
+    rs = v26_7_relative_strength(symbols, save=False)
+    rs_map = {x["symbol"]: x for x in rs.get("ranking", [])}
+    candidates = []
+    for sym in symbols:
+        sym = str(sym).upper().replace(".BK","")
+        base_score = v26_7_float(scores.get(sym), 85)
+        ctx = v26_7_score_context(sym, base_score, "CALL", breadth, sector_rot, {"ranking":[rs_map.get(sym, {})] if sym in rs_map else []}, save=False)
+        candidates.append({
+            "symbol": sym,
+            "theme": v26_7_theme_for_symbol(sym),
+            "sector": v26_7_symbol_sector(sym),
+            "base_score": base_score,
+            "adjusted_score": ctx["adjusted_score"],
+            "breadth_score": ctx["breadth_score"],
+            "sector_score": ctx["sector_score"],
+            "relative_strength_score": ctx["relative_strength_score"],
+            "action": ctx["action"],
+            "pass_gate": ctx["pass_gate"],
+            "reasons": ctx["reasons"],
+        })
+    # Select one best per theme, especially Semiconductor cluster like NVDA/AMD/AVGO/TSM.
+    grouped = {}
+    for c in candidates:
+        grouped.setdefault(c["theme"], []).append(c)
+    selected = []
+    rejected = []
+    for theme, rows in grouped.items():
+        rows.sort(key=lambda x: (x["pass_gate"], x["adjusted_score"], x["relative_strength_score"]), reverse=True)
+        if rows:
+            selected.append(rows[0])
+            rejected.extend([{**r, "reject_reason": f"Theme duplicate: selected {rows[0]['symbol']}"} for r in rows[1:]])
+    selected.sort(key=lambda x: x["adjusted_score"], reverse=True)
+    return {"ok": True, "version": V26_7_VERSION, "selected": selected, "rejected": rejected, "all_candidates": candidates}
+
+def v26_7_alert_gate(symbol, asset=None, analysis=None, sig="CALL"):
+    """Gate to be called before LINE alert. Returns (ok, reason)."""
+    analysis = analysis or {}
+    score = v26_7_float(analysis.get("score"), 50)
+    side = str(sig or "CALL").upper()
+    result = v26_7_score_context(symbol, score, side)
+    if not result["pass_gate"]:
+        return False, f"V26.7 {result['action']}: " + " | ".join(result["reasons"])
+    return True, f"V26.7 PASS adjusted_score={result['adjusted_score']} breadth={result['breadth_score']} sector={result['sector_score']} rs={result['relative_strength_score']}"
+
+# Integrate V26.7 into legacy alert gate without rewriting the old alert system.
+try:
+    _v26_7_original_should_send_alert_final = should_send_alert_final
+    def should_send_alert_final(symbol, sig, analysis, asset):
+        ok, reason = _v26_7_original_should_send_alert_final(symbol, sig, analysis, asset)
+        if not ok:
+            return ok, reason
+        try:
+            gate_ok, gate_reason = v26_7_alert_gate(symbol, asset, analysis, sig)
+            if not gate_ok:
+                return False, gate_reason
+        except Exception as e:
+            print("v26.7 gate warning:", e)
+        return True, "PASS"
+except Exception as e:
+    print("v26.7 alert gate integration warning:", e)
+
+@app.route('/v26/breadth')
+@app.route('/v26/market-breadth')
+def v26_7_route_breadth():
+    symbols = request.args.get("symbols")
+    universe = [x.strip().upper() for x in symbols.split(",") if x.strip()] if symbols else None
+    return jsonify(v26_7_market_breadth(universe=universe, save=True))
+
+@app.route('/v26/sector-rotation')
+def v26_7_route_sector_rotation():
+    return jsonify(v26_7_sector_rotation(save=True))
+
+@app.route('/v26/money-flow')
+def v26_7_route_money_flow():
+    return jsonify(v26_7_money_flow(save=True))
+
+@app.route('/v26/relative-strength')
+def v26_7_route_relative_strength():
+    symbols = request.args.get("symbols")
+    universe = [x.strip().upper() for x in symbols.split(",") if x.strip()] if symbols else None
+    return jsonify(v26_7_relative_strength(symbols=universe, save=True))
+
+@app.route('/v26/suppression/<symbol>')
+def v26_7_route_suppression(symbol):
+    return jsonify(v26_7_score_context(
+        symbol=symbol,
+        original_score=request.args.get("score") or 85,
+        side=request.args.get("side") or "CALL",
+        save=True,
+    ))
+
+@app.route('/v26/best-of-theme')
+def v26_7_route_best_of_theme():
+    symbols = request.args.get("symbols") or "NVDA,AMD,AVGO,TSM"
+    return jsonify(v26_7_best_of_theme(symbols))
+
+@app.route('/v26/suppressed-signals')
+def v26_7_route_suppressed_signals():
+    return jsonify({"ok": True, "version": V26_7_VERSION, "rows": v26_7_recent("suppressed_signals", request.args.get("limit") or 100)})
+
+@app.route('/v26/market-intelligence-dashboard')
+@app.route('/v26/v26-7-dashboard')
+def v26_7_route_dashboard():
+    breadth_rows = v26_7_recent("market_breadth", 10)
+    sector_rows = v26_7_recent("sector_rotation", 20)
+    money_rows = v26_7_recent("money_flow", 20)
+    rs_rows = v26_7_recent("relative_strength", 30)
+    suppressed_rows = v26_7_recent("suppressed_signals", 30)
+
+    html = "<h1>V26.7 Market Breadth + Sector Rotation Intelligence</h1>"
+    html += "<p>ระบบนี้ช่วยตอบว่า เงินกำลังไหลเข้า Sector/Theme ไหน และตลาดโดยรวมแข็งพอให้ส่ง Alert หรือไม่</p>"
+    html += "<p><a href='/v26/breadth'>Market Breadth</a> | <a href='/v26/sector-rotation'>Sector Rotation</a> | <a href='/v26/money-flow'>Money Flow</a> | <a href='/v26/relative-strength'>Relative Strength</a> | <a href='/v26/best-of-theme?symbols=NVDA,AMD,AVGO,TSM'>Best of Theme</a></p>"
+
+    html += "<h2>Latest Breadth</h2><table border='1' cellpadding='6'><tr><th>Time</th><th>Score</th><th>Status</th><th>Adv</th><th>Dec</th><th>A/D</th><th>NH</th><th>NL</th></tr>"
+    for r in breadth_rows:
+        html += f"<tr><td>{r.get('created_at','')}</td><td>{r.get('breadth_score','')}</td><td>{r.get('status','')}</td><td>{r.get('advancers','')}</td><td>{r.get('decliners','')}</td><td>{r.get('advance_decline_ratio','')}</td><td>{r.get('new_highs','')}</td><td>{r.get('new_lows','')}</td></tr>"
+    html += "</table>"
+
+    html += "<h2>Sector Leaders / Laggards</h2><table border='1' cellpadding='6'><tr><th>Rank</th><th>Sector</th><th>ETF</th><th>1D</th><th>5D</th><th>20D</th><th>Flow</th><th>Status</th></tr>"
+    for r in sector_rows:
+        html += f"<tr><td>{r.get('rank_no','')}</td><td>{r.get('sector','')}</td><td>{r.get('etf_symbol','')}</td><td>{r.get('return_1d','')}</td><td>{r.get('return_5d','')}</td><td>{r.get('return_20d','')}</td><td>{r.get('money_flow_score','')}</td><td>{r.get('status','')}</td></tr>"
+    html += "</table>"
+
+    html += "<h2>Theme Money Flow</h2><table border='1' cellpadding='6'><tr><th>Theme</th><th>Score</th><th>Status</th><th>Leaders</th></tr>"
+    for r in money_rows:
+        html += f"<tr><td>{r.get('theme','')}</td><td>{r.get('theme_score','')}</td><td>{r.get('status','')}</td><td>{str(r.get('leaders',''))[:160]}</td></tr>"
+    html += "</table>"
+
+    html += "<h2>Relative Strength Ranking</h2><table border='1' cellpadding='6'><tr><th>Rank</th><th>Symbol</th><th>Sector</th><th>RS</th><th>1D</th><th>5D</th><th>20D</th></tr>"
+    for r in rs_rows:
+        html += f"<tr><td>{r.get('rank_no','')}</td><td>{r.get('symbol','')}</td><td>{r.get('sector','')}</td><td>{r.get('relative_strength_score','')}</td><td>{r.get('return_1d','')}</td><td>{r.get('return_5d','')}</td><td>{r.get('return_20d','')}</td></tr>"
+    html += "</table>"
+
+    html += "<h2>Suppressed / Reduced Signals</h2><table border='1' cellpadding='6'><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Original</th><th>Adjusted</th><th>Breadth</th><th>Sector</th><th>RS</th><th>Action</th><th>Reason</th></tr>"
+    for r in suppressed_rows:
+        html += f"<tr><td>{r.get('created_at','')}</td><td>{r.get('symbol','')}</td><td>{r.get('side','')}</td><td>{r.get('original_score','')}</td><td>{r.get('adjusted_score','')}</td><td>{r.get('breadth_score','')}</td><td>{r.get('sector_score','')}</td><td>{r.get('relative_strength_score','')}</td><td>{r.get('action','')}</td><td>{r.get('reason','')}</td></tr>"
+    html += "</table>"
+    return Response(html, mimetype="text/html")
+
+try:
+    v26_7_init_db()
+except Exception as e:
+    print("v26.7 init warning:", e)
+
+# ============================================================
+# END V26.7 MARKET BREADTH + SECTOR ROTATION INTELLIGENCE
+# ============================================================
+
+
+# ============================================================
+# V28 FUND VALIDATION CORE INTEGRATION
+# ============================================================
+try:
+    from modules.v28_fund_validation_core import init_v28_db, portfolio_gate as v28_portfolio_gate
+    init_v28_db()
+    _v28_original_should_send_alert_final = should_send_alert_final
+    def should_send_alert_final(symbol, sig, analysis, asset):
+        ok, reason = _v28_original_should_send_alert_final(symbol, sig, analysis, asset)
+        if not ok:
+            return ok, reason
+        try:
+            gate_ok, gate_detail = v28_portfolio_gate(symbol, analysis, sig)
+            if isinstance(analysis, dict):
+                analysis["v28_portfolio_gate"] = gate_detail
+            if not gate_ok:
+                return False, "V28 Portfolio Risk Gate: " + " | ".join(gate_detail.get("reasons") or ["BLOCK"])
+        except Exception as e:
+            print("V28 portfolio gate warning:", e)
+        return True, "PASS"
+except Exception as e:
+    print("V28 fund validation integration warning:", e)
+# ============================================================
+# END V28 FUND VALIDATION CORE INTEGRATION
+# ============================================================
+
+
+# ============================================================
+# V29 PRODUCTION HARDENING & GOVERNANCE INTEGRATION
+# ============================================================
+try:
+    from modules.v29_governance_core import init_v29_db, governance_gate as v29_governance_gate, start_scheduler_once as v29_start_scheduler_once, V29_ENABLE_CRON
+    init_v29_db()
+    _v29_original_should_send_alert_final = should_send_alert_final
+    def should_send_alert_final(symbol, sig, analysis, asset):
+        ok, reason = _v29_original_should_send_alert_final(symbol, sig, analysis, asset)
+        if not ok:
+            return ok, reason
+        try:
+            gate_ok, gate_detail = v29_governance_gate(symbol, sig, analysis if isinstance(analysis, dict) else {})
+            if isinstance(analysis, dict):
+                analysis["v29_governance_gate"] = gate_detail
+            if not gate_ok:
+                return False, "V29 Governance Gate: " + " | ".join(gate_detail.get("reasons") or ["BLOCK"])
+        except Exception as e:
+            print("V29 governance gate warning:", e)
+        return True, "PASS"
+    if V29_ENABLE_CRON:
+        v29_start_scheduler_once()
+except Exception as e:
+    print("V29 governance integration warning:", e)
+# ============================================================
+# END V29 PRODUCTION HARDENING & GOVERNANCE INTEGRATION
+# ============================================================
+
+
+# ============================================================
+# V30 INSTITUTIONAL MODEL VALIDATION & PAPER TRADING INTEGRATION
+# ============================================================
+try:
+    from modules.v30_model_validation_core import init_v30_db, validation_gate as v30_validation_gate
+    init_v30_db()
+    _v30_original_should_send_alert_final = should_send_alert_final
+    def should_send_alert_final(symbol, sig, analysis, asset):
+        ok, reason = _v30_original_should_send_alert_final(symbol, sig, analysis, asset)
+        if not ok:
+            return ok, reason
+        try:
+            gate_ok, gate_detail = v30_validation_gate(symbol, sig, analysis if isinstance(analysis, dict) else {})
+            if isinstance(analysis, dict):
+                analysis["v30_validation_gate"] = gate_detail
+            if not gate_ok:
+                return False, "V30 Validation Gate: " + " | ".join(gate_detail.get("reasons") or ["BLOCK"])
+        except Exception as e:
+            print("V30 validation gate warning:", e)
+        return True, "PASS"
+except Exception as e:
+    print("V30 model validation integration warning:", e)
+# ============================================================
+# END V30 INSTITUTIONAL MODEL VALIDATION & PAPER TRADING INTEGRATION
+# ============================================================
+
+
+
+# ============================================================
+# V31 ALPHA RESEARCH & PERFORMANCE ATTRIBUTION INTEGRATION
+# ============================================================
+try:
+    from modules.v31_alpha_attribution_core import init_v31_db, alpha_gate as v31_alpha_gate, V31_ALPHA_GATE_MODE
+    init_v31_db()
+    _v31_original_should_send_alert_final = should_send_alert_final
+    def should_send_alert_final(symbol, sig, analysis, asset):
+        ok, reason = _v31_original_should_send_alert_final(symbol, sig, analysis, asset)
+        if not ok:
+            return ok, reason
+        try:
+            payload = analysis if isinstance(analysis, dict) else {}
+            payload.setdefault("symbol", symbol)
+            payload.setdefault("side", sig)
+            gate_ok, gate_detail = v31_alpha_gate(payload)
+            if isinstance(analysis, dict):
+                analysis["v31_alpha_gate"] = gate_detail
+            if V31_ALPHA_GATE_MODE == "block" and not gate_ok:
+                return False, "V31 Alpha Gate: alpha score below threshold"
+        except Exception as e:
+            print("V31 alpha gate warning:", e)
+        return True, "PASS"
+except Exception as e:
+    print("V31 alpha attribution integration warning:", e)
+# ============================================================
+# END V31 ALPHA RESEARCH & PERFORMANCE ATTRIBUTION INTEGRATION
+# ============================================================
+
+
+# ============================================================
+# V31 FINAL MAIN RUNNER
+# Keep this at the end so every appended route/gate is loaded before Flask starts.
+# ============================================================
 if __name__ == "__main__":
-    start_auto_alert_thread_once()
+    if ENABLE_AUTO_ALERTS and ALERT_USER_IDS:
+        threading.Thread(target=auto_alert_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
