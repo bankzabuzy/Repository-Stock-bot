@@ -46,3 +46,8 @@ def info_v28_db():
         "database": "connected",
         "version": V28_VERSION
     }
+def init_v28_db():
+    return {
+        "status": "initialized",
+        "version": V28_VERSION
+    }
