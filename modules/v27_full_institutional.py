@@ -116,3 +116,19 @@ class MarketRegimeAI:
             "regime": self.current_regime,
             "score": 50
         }
+class AutoOutcomeScheduler:
+
+    def __init__(self):
+        self.enabled = True
+
+    def run(self):
+
+        return {
+            "status": "running"
+        }
+
+    def schedule(self):
+
+        return {
+            "scheduled": True
+        }
