@@ -11,7 +11,6 @@ import html as html_lib
 from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
-
     TH_TZ = ZoneInfo("Asia/Bangkok")
 except Exception:
     TH_TZ = timezone(timedelta(hours=7))
@@ -202,7 +201,7 @@ DB_PATH = os.getenv("DB_PATH", "signals.db")
 # API keys, network providers, or the persistent volume are temporarily unavailable.
 ENABLE_YFINANCE_FALLBACK = os.getenv("ENABLE_YFINANCE_FALLBACK", "true").lower() == "true"
 ENABLE_GOLDTRADERS_FETCH = os.getenv("ENABLE_GOLDTRADERS_FETCH", "true").lower() == "true"
-ENABLE_THAI_OIL_FETCH = os.getenv("ENABLE_THAI_OIL_FETCH", "false").lower() == "true"
+ENABLE_THAI_OIL_FETCH = os.getenv("ENABLE_THAI_OIL_FETCH", "true").lower() == "true"
 
 FALLBACK_MARKET_PRICES = {
     "GOLD": 2350.0,
@@ -1905,7 +1904,34 @@ def fetch_news(asset):
         return f"ดึงข่าวไม่สำเร็จ: {e}", 0
 
 
-def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
+def plan_confidence_values(probability, asset_type=None, rsi=None):
+    """Return confidence for 3 entry levels and 3 take-profit levels.
+    Values are capped for ETFs and overbought conditions to avoid unrealistic conviction.
+    """
+    base = safe_float(probability) or 50.0
+    if asset_type == "ETF":
+        base = min(base, 85.0)
+    if rsi is not None and safe_float(rsi) and safe_float(rsi) >= 70:
+        base = max(20.0, base - 8.0)
+    buy1 = int(max(20, min(95, round(base + 6))))
+    buy2 = int(max(20, min(95, round(base))))
+    buy3 = int(max(20, min(95, round(base - 12))))
+    tp1 = int(max(10, min(95, round(base))))
+    tp2 = int(max(10, min(95, round(base - 14))))
+    tp3 = int(max(10, min(95, round(base - 28))))
+    return buy1, buy2, buy3, tp1, tp2, tp3
+
+
+def position_size_text(b1, b2, b3):
+    """Simple capital allocation suggestion based on confidence spread."""
+    if b1 >= 70:
+        return "แนะนำแบ่งเงิน: ไม้1 50% / ไม้2 30% / ไม้3 20%"
+    if b1 >= 55:
+        return "แนะนำแบ่งเงิน: ไม้1 40% / ไม้2 35% / ไม้3 25%"
+    return "แนะนำแบ่งเงิน: ไม้1 30% / ไม้2 30% / ไม้3 40% เฉพาะเมื่อรับความเสี่ยงได้"
+
+
+def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None, probability=50, rsi=None):
     if not price:
         return "ข้อมูลราคาไม่พอสำหรับทำแผน 3 ไม้"
     if not atr:
@@ -1915,20 +1941,22 @@ def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
     sell1, sell2, sell3 = price + atr * 0.50, price + atr * 1.00, price + atr * 1.60
     stop = price - atr * 1.50
 
+    b1c, b2c, b3c, tp1c, tp2c, tp3c = plan_confidence_values(probability, asset_type, rsi)
+
     def fmt_level(value):
         return fmt_num(value)
 
     return f"""🧩 แผนเข้า/ออก 3 ไม้
-ซื้อไม้ 1: {fmt_level(buy1)}
-ซื้อไม้ 2: {fmt_level(buy2)}
-ซื้อไม้ 3: {fmt_level(buy3)}
+ซื้อไม้ 1: {fmt_level(buy1)} | ความมั่นใจ {b1c}% | ไม้หลัก
+ซื้อไม้ 2: {fmt_level(buy2)} | ความมั่นใจ {b2c}% | ไม้สะสม
+ซื้อไม้ 3: {fmt_level(buy3)} | ความมั่นใจ {b3c}% | ไม้เสี่ยง/เผื่อย่อแรง
 
-ขาย/ทำกำไร 1: {fmt_level(sell1)}
-ขาย/ทำกำไร 2: {fmt_level(sell2)}
-ขาย/ทำกำไร 3: {fmt_level(sell3)}
+ขาย/ทำกำไร 1: {fmt_level(sell1)} | โอกาสถึงเป้า {tp1c}%
+ขาย/ทำกำไร 2: {fmt_level(sell2)} | โอกาสถึงเป้า {tp2c}%
+ขาย/ทำกำไร 3: {fmt_level(sell3)} | โอกาสถึงเป้า {tp3c}%
 
-จุดคุมความเสี่ยง: {fmt_level(stop)}"""
-
+จุดคุมความเสี่ยง: {fmt_level(stop)}
+{position_size_text(b1c, b2c, b3c)}"""
 
 def build_gold_report(asset, analysis, news_text, reasons):
     # Gold report intentionally uses Thai Gold Traders Association only.
@@ -1940,8 +1968,31 @@ def build_gold_report(asset, analysis, news_text, reasons):
     ornament_buy = thai_gold.get("ornament_buy")
     change = thai_gold.get("change")
 
-    if thai_gold.get("is_estimate"):
+    if thai_gold.get("is_estimate") or not bar_sell:
         return "ไม่สามารถดึงราคาทองคำสมาคมค้าทองคำได้ในขณะนี้"
+
+    base_prob = 58
+    if change is not None:
+        if change < 0:
+            view = "รอย่อซื้อ / ไม่ไล่ราคา"
+            base_prob = 62
+        elif change > 0:
+            view = "ราคาบวกแล้ว รอจังหวะย่อก่อนซื้อ"
+            base_prob = 54
+        else:
+            view = "รอจังหวะ / แบ่งไม้เท่านั้น"
+            base_prob = 56
+    else:
+        view = "รอจังหวะ / แบ่งไม้เท่านั้น"
+
+    buy1 = bar_sell - 100
+    buy2 = bar_sell - 250
+    buy3 = bar_sell - 400
+    tp1 = bar_sell + 150
+    tp2 = bar_sell + 300
+    tp3 = bar_sell + 450
+    risk = bar_sell - 550
+    b1c, b2c, b3c, tp1c, tp2c, tp3c = plan_confidence_values(base_prob, "GOLD", None)
 
     return f"""📊 ราคาทองไทย
 แหล่งราคา: {thai_gold.get('source')}
@@ -1952,8 +2003,20 @@ def build_gold_report(asset, analysis, news_text, reasons):
 ทองแท่งขายออก: {fmt_num(bar_sell, 0)} บาท
 ทองรูปพรรณรับซื้อ: {fmt_num(ornament_buy, 0)} บาท
 ทองรูปพรรณขายออก: {fmt_num(ornament_sell, 0)} บาท
-เปลี่ยนแปลง: {fmt_num(change, 0)} บาท"""
+เปลี่ยนแปลง: {fmt_num(change, 0)} บาท
 
+🧩 แผนเข้า/ออกทองไทย 3 ไม้
+ซื้อไม้ 1: {fmt_num(buy1, 0)} บาท | ความมั่นใจ {b1c}% | ไม้หลัก
+ซื้อไม้ 2: {fmt_num(buy2, 0)} บาท | ความมั่นใจ {b2c}% | ไม้สะสม
+ซื้อไม้ 3: {fmt_num(buy3, 0)} บาท | ความมั่นใจ {b3c}% | ไม้เสี่ยง/เผื่อย่อแรง
+
+ขาย/ทำกำไร 1: {fmt_num(tp1, 0)} บาท | โอกาสถึงเป้า {tp1c}%
+ขาย/ทำกำไร 2: {fmt_num(tp2, 0)} บาท | โอกาสถึงเป้า {tp2c}%
+ขาย/ทำกำไร 3: {fmt_num(tp3, 0)} บาท | โอกาสถึงเป้า {tp3c}%
+
+จุดคุมความเสี่ยง: {fmt_num(risk, 0)} บาท
+มุมมอง: {view}
+{position_size_text(b1c, b2c, b3c)}"""
 
 def build_asset_report(user_text):
     asset = normalize_asset(user_text)
@@ -1969,6 +2032,17 @@ def build_asset_report(user_text):
 
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+    # ETF score guard: avoid over-confident ETF calls when short timeframes are mixed or RSI is stretched.
+    if asset.get("asset_type") == "ETF":
+        score_cap = 85
+        if analysis.get("rsi") is not None and safe_float(analysis.get("rsi")) and safe_float(analysis.get("rsi")) >= 70:
+            score_cap = min(score_cap, 78)
+        if "MIXED" in str(analysis.get("alignment", "")).upper():
+            score_cap = min(score_cap, 80)
+        if safe_float(analysis.get("score")) and analysis.get("score") > score_cap:
+            analysis["score"] = score_cap
+            analysis["probability"] = min(int(analysis.get("probability") or 50), max(45, score_cap - 15))
+            analysis["bias"] = "BULLISH / ฝั่งซื้อได้เปรียบ" if score_cap >= 70 else "NEUTRAL / รอดูจังหวะ"
     news_text, _ = fetch_news(asset)
     reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
 
@@ -2007,7 +2081,7 @@ RVOL: {fmt_num(analysis['rvol'])}
 
 {valuation_text}
 
-{build_trade_plan(analysis['price'], analysis['atr'], analysis['bias'])}
+{build_trade_plan(analysis['price'], analysis['atr'], analysis['bias'], asset.get('asset_type'), None, analysis.get('probability'), analysis.get('rsi'))}
 
 {opt_text}
 
@@ -2281,26 +2355,17 @@ def get_bangchak_oil_prices():
 
 
 def get_thai_oil_prices():
-    # Default safe mode avoids long external oil-site timeouts on Railway.
+    # Live-first mode. Do not show hard-coded oil prices as current prices.
+    # If live fetch is disabled, report unavailable instead of returning stale values.
     if not ENABLE_THAI_OIL_FETCH:
         return {
-            "source": "SAFE_FALLBACK_PT_STATION",
+            "source": "N/A",
             "updated_at": now_text(),
             "raw_url": None,
-            "prices": {
-                "today": {
-                    "ดีเซล": 32.94,
-                    "ดีเซล B20": 32.94,
-                    "แก๊สโซฮอล์ 95": 39.35,
-                    "แก๊สโซฮอล์ 91": 38.98,
-                    "แก๊สโซฮอล์ E20": 37.14,
-                    "เบนซิน 95": 47.04,
-                },
-                "tomorrow": {},
-            },
+            "prices": {"today": {}, "tomorrow": {}},
             "has_tomorrow": False,
-            "is_estimate": True,
-            "note": "Set ENABLE_THAI_OIL_FETCH=true to fetch live oil prices.",
+            "is_estimate": False,
+            "error": "ยังไม่ได้เปิด ENABLE_THAI_OIL_FETCH=true จึงไม่ดึงราคาน้ำมันปัจจุบัน",
         }
 
     # Default: PT Station first, because user wants prices matching PT Station reference.
@@ -2396,9 +2461,7 @@ def build_oil_report():
 
 🔁 เปลี่ยนแปลง
 {chr(10).join(lines_change)}
-{tomorrow_note}
-
-หมายเหตุ: ราคาขายปลีกอ้างอิงจากแหล่งที่ระบุ อาจแตกต่างตามพื้นที่/ภาษีท้องถิ่น/สถานีบริการ"""
+{tomorrow_note}"""
 
 # ============================================================
 # LINE
