@@ -547,7 +547,7 @@ def normalize_asset(user_text):
 
     if raw in GOLD_WORDS or key in GOLD_WORDS:
         return {
-            "display": "ทองคำ / XAUUSD",
+            "display": "ทองคำไทย",
             "symbol": "XAU/USD",
             "yf_symbol": "GC=F",
             "currency": "USD",
@@ -1590,6 +1590,15 @@ def get_fundamental_data(asset):
         result["forward_pe"] = safe_float(info.get("forwardPE"))
         result["dividend_yield"] = safe_float(info.get("dividendYield"))
         result["dividend_rate"] = safe_float(info.get("dividendRate"))
+        # Yahoo/yfinance can return dividendYield in inconsistent units for some US stocks.
+        # Store internally as decimal yield (0.0047 = 0.47%) and discard impossible values.
+        _px_for_yield = safe_float(info.get("currentPrice")) or safe_float(info.get("regularMarketPrice")) or safe_float(info.get("previousClose"))
+        if result["dividend_rate"] is not None and _px_for_yield:
+            _derived_yield = result["dividend_rate"] / _px_for_yield
+            if result["dividend_yield"] is None or result["dividend_yield"] > 0.20:
+                result["dividend_yield"] = _derived_yield
+        if result["dividend_yield"] is not None and result["dividend_yield"] > 0.20:
+            result["dividend_yield"] = None
         result["fifty_two_week_low"] = safe_float(info.get("fiftyTwoWeekLow"))
         result["fifty_two_week_high"] = safe_float(info.get("fiftyTwoWeekHigh"))
 
@@ -1784,71 +1793,65 @@ def options_hybrid_engine(asset, analysis):
 
     score = analysis["score"]
     prob = analysis["probability"]
+    today_th = datetime.now(TH_TZ).date()
 
-    call_strike = round_strike(price + atr * 0.60)
-    call_sell = round_strike(price + atr * 1.70)
-    put_strike = round_strike(price - atr * 0.60)
-    put_sell = round_strike(price - atr * 1.70)
-
-    entry_low = price - atr * 0.25
-    entry_high = price + atr * 0.15
-    tp1 = price + atr * 0.90
-    tp2 = price + atr * 1.80
-    sl = price - atr * 0.90
-
-    put_entry_low = price - atr * 0.15
-    put_entry_high = price + atr * 0.25
-    put_tp1 = price - atr * 0.90
-    put_tp2 = price - atr * 1.80
-    put_sl = price + atr * 0.90
-
+    # Practical option timing from free data only.
+    # For US regular-session signals in Thailand, this normally means tonight.
+    entry_date = today_th.strftime("%d/%m/%Y")
     if score >= 70:
-        setup = f"""🧠 Options Hybrid Max Free
-Setup: CALL / Bullish
-Strike แนะนำ: {fmt_num(call_strike, 2)}C
+        side = "CALL / Bullish"
+        strike = round_strike(price + atr * 0.60)
+        sell_strike = round_strike(price + atr * 1.70)
+        trigger = analysis.get("resistance") or (price + atr)
+        entry_low = max(price, trigger - atr * 0.20)
+        entry_high = trigger + atr * 0.15
+        tp1 = trigger + atr * 0.70
+        tp2 = trigger + atr * 1.30
+        sl = trigger - atr * 0.80
+        return f"""🧠 Options Hybrid Max Free
+Setup: {side}
+เข้าวันที่: {entry_date}
+เงื่อนไขเข้า: รอราคายืนเหนือ {fmt_num(trigger)}
+ช่วงราคาเข้าอ้างอิงหุ้นแม่: {fmt_num(entry_low)} - {fmt_num(entry_high)}
+Strike แนะนำ: {fmt_num(strike, 2)}C
 Probability ประมาณ: {prob}%
+TP1 อ้างอิงหุ้นแม่: {fmt_num(tp1)}
+TP2 อ้างอิงหุ้นแม่: {fmt_num(tp2)}
+SL อ้างอิงหุ้นแม่: {fmt_num(sl)}
+Spread Scanner: Bull Call Spread Buy {fmt_num(strike, 2)}C / Sell {fmt_num(sell_strike, 2)}C"""
 
-Entry Zone: {fmt_num(entry_low)} - {fmt_num(entry_high)}
-TP1: {fmt_num(tp1)}
-TP2: {fmt_num(tp2)}
-SL: {fmt_num(sl)}
-
-Spread Scanner:
-Bull Call Spread
-Buy {fmt_num(call_strike, 2)}C
-Sell {fmt_num(call_sell, 2)}C
-
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
-    elif score <= 35:
-        setup = f"""🧠 Options Hybrid Max Free
-Setup: PUT / Bearish
-Strike แนะนำ: {fmt_num(put_strike, 2)}P
+    if score <= 35:
+        side = "PUT / Bearish"
+        strike = round_strike(price - atr * 0.60)
+        sell_strike = round_strike(price - atr * 1.70)
+        trigger = analysis.get("support") or (price - atr)
+        entry_low = trigger - atr * 0.15
+        entry_high = min(price, trigger + atr * 0.20)
+        tp1 = trigger - atr * 0.70
+        tp2 = trigger - atr * 1.30
+        sl = trigger + atr * 0.80
+        return f"""🧠 Options Hybrid Max Free
+Setup: {side}
+เข้าวันที่: {entry_date}
+เงื่อนไขเข้า: รอราคาหลุดต่ำกว่า {fmt_num(trigger)}
+ช่วงราคาเข้าอ้างอิงหุ้นแม่: {fmt_num(entry_low)} - {fmt_num(entry_high)}
+Strike แนะนำ: {fmt_num(strike, 2)}P
 Probability ประมาณ: {prob}%
+TP1 อ้างอิงหุ้นแม่: {fmt_num(tp1)}
+TP2 อ้างอิงหุ้นแม่: {fmt_num(tp2)}
+SL อ้างอิงหุ้นแม่: {fmt_num(sl)}
+Spread Scanner: Bear Put Spread Buy {fmt_num(strike, 2)}P / Sell {fmt_num(sell_strike, 2)}P"""
 
-Entry Zone: {fmt_num(put_entry_low)} - {fmt_num(put_entry_high)}
-TP1: {fmt_num(put_tp1)}
-TP2: {fmt_num(put_tp2)}
-SL: {fmt_num(put_sl)}
-
-Spread Scanner:
-Bear Put Spread
-Buy {fmt_num(put_strike, 2)}P
-Sell {fmt_num(put_sell, 2)}P
-
-ข้อควรระวัง: ไม่มี Delta/IV/OI จริง ใช้ ATR + AI Score ประมาณ"""
-    else:
-        setup = f"""🧠 Options Hybrid Max Free
+    call_trigger = analysis.get("resistance") or (price + atr)
+    put_trigger = analysis.get("support") or (price - atr)
+    call_strike = round_strike(call_trigger + atr * 0.30)
+    put_strike = round_strike(put_trigger - atr * 0.30)
+    return f"""🧠 Options Hybrid Max Free
 Setup: WAIT / Neutral
-Probability ประมาณ: {prob}%
-
-ยังไม่ควรรีบซื้อ CALL/PUT
-รอราคาเลือกทางชัดเจนเหนือแนวต้านหรือหลุดแนวรับ
-
-Idea เฝ้าดู:
-CALL เหนือ {fmt_num(analysis['resistance'])}
-PUT ใต้ {fmt_num(analysis['support'])}"""
-
-    return setup
+เข้าวันที่: {entry_date} เฉพาะเมื่อราคาเลือกทางชัดเจน
+CALL: เข้าเมื่อยืนเหนือ {fmt_num(call_trigger)} | Strike เฝ้าดู {fmt_num(call_strike, 2)}C
+PUT: เข้าเมื่อหลุดต่ำกว่า {fmt_num(put_trigger)} | Strike เฝ้าดู {fmt_num(put_strike, 2)}P
+Probability ประมาณ: {prob}%"""
 
 
 # ============================================================
@@ -1860,22 +1863,42 @@ def fetch_news(asset):
     if asset["asset_type"] == "THAI_STOCK":
         return "ข่าวหุ้นไทยยังไม่ได้เชื่อม API ข่าวเฉพาะ SET", 0
     if asset["asset_type"] == "GOLD":
-        return "ทองคำควรดูร่วมกับ USD, Bond Yield, เงินเฟ้อ, FED และดอลลาร์สหรัฐ", 0
+        return "", 0
 
     try:
         today = datetime.now(timezone.utc).date()
         week_ago = today - timedelta(days=7)
+        symbol = asset["news_symbol"].upper()
         r = requests.get(
             "https://finnhub.io/api/v1/company-news",
-            params={"symbol": asset["news_symbol"], "from": week_ago.isoformat(), "to": today.isoformat(), "token": FINNHUB_API_KEY},
+            params={"symbol": symbol, "from": week_ago.isoformat(), "to": today.isoformat(), "token": FINNHUB_API_KEY},
             headers=REQUEST_HEADERS,
             timeout=20,
         )
         items = r.json()
         if not isinstance(items, list) or not items:
             return "ไม่พบข่าวล่าสุดจาก Finnhub", 0
-        headlines = [f"- {x.get('headline')}" for x in items[:3] if x.get("headline")]
-        return "\n".join(headlines) if headlines else "ไม่มีหัวข้อข่าวสำคัญ", len(headlines)
+
+        name_keywords = {
+            "NVDA": ["NVDA", "NVIDIA"], "AAPL": ["AAPL", "APPLE"], "TSLA": ["TSLA", "TESLA"],
+            "MSFT": ["MSFT", "MICROSOFT"], "AMZN": ["AMZN", "AMAZON"], "META": ["META", "FACEBOOK"],
+            "GOOGL": ["GOOGL", "GOOGLE", "ALPHABET"], "GOOG": ["GOOG", "GOOGLE", "ALPHABET"],
+            "QQQ": ["QQQ", "NASDAQ"], "SPY": ["SPY", "S&P 500"], "MSTR": ["MSTR", "MICROSTRATEGY"],
+        }
+        keywords = name_keywords.get(symbol, [symbol])
+        headlines = []
+        for x in items:
+            h = str(x.get("headline") or "").strip()
+            if not h:
+                continue
+            hu = h.upper()
+            if any(k.upper() in hu for k in keywords):
+                headlines.append(f"- {h}")
+            if len(headlines) >= 3:
+                break
+        if not headlines:
+            return f"ไม่พบข่าวที่ตรงกับ {symbol} โดยตรงจาก Finnhub", 0
+        return "\n".join(headlines), len(headlines)
     except Exception as e:
         return f"ดึงข่าวไม่สำเร็จ: {e}", 0
 
@@ -1891,16 +1914,7 @@ def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
     stop = price - atr * 1.50
 
     def fmt_level(value):
-        if asset_type == "GOLD" and thai_factor:
-            return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿"
         return fmt_num(value)
-
-    if "BEARISH" in bias:
-        note = "แนวโน้มยังอ่อน แผนซื้อควรรอไม้ลึก/ลดขนาดไม้ และห้ามไล่ราคา"
-    elif "BULLISH" in bias:
-        note = "แนวโน้มบวก ใช้แผนย่อซื้อและแบ่งขายตามแนวต้าน"
-    else:
-        note = "แนวโน้มกลาง ใช้แผนแบ่งไม้ หลีกเลี่ยงการเข้าเต็มจำนวน"
 
     return f"""🧩 แผนเข้า/ออก 3 ไม้
 ซื้อไม้ 1: {fmt_level(buy1)}
@@ -1911,89 +1925,50 @@ def build_trade_plan(price, atr, bias, asset_type=None, thai_factor=None):
 ขาย/ทำกำไร 2: {fmt_level(sell2)}
 ขาย/ทำกำไร 3: {fmt_level(sell3)}
 
-จุดคุมความเสี่ยง: {fmt_level(stop)}
-หมายเหตุ: {note}"""
+จุดคุมความเสี่ยง: {fmt_level(stop)}"""
 
 
 def build_gold_report(asset, analysis, news_text, reasons):
-    price = analysis["price"]
-    atr = analysis["atr"] or (price * 0.01 if price else None)
-    usd_thb = get_usd_thb_rate()
-    gold_thb_oz = price * usd_thb if price else None
-    thai_gold = get_thai_gold_price_or_estimate(price, usd_thb)
-
+    # Gold report intentionally uses Thai Gold Traders Association only.
+    # No XAUUSD, USD/THB, or US technical levels are shown.
+    thai_gold = get_thai_gold_price_or_estimate(None, None)
     bar_buy = thai_gold.get("bar_buy")
     bar_sell = thai_gold.get("bar_sell")
     ornament_sell = thai_gold.get("ornament_sell")
-    thai_factor = bar_sell / price if bar_sell and price else None
+    ornament_buy = thai_gold.get("ornament_buy")
+    change = thai_gold.get("change")
 
-    s1, s2, s3 = price - atr * 0.30, price - atr * 0.70, price - atr * 1.10
-    r1, r2, r3 = price + atr * 0.50, price + atr * 1.00, price + atr * 1.60
+    if thai_gold.get("is_estimate"):
+        return "ไม่สามารถดึงราคาทองคำสมาคมค้าทองคำได้ในขณะนี้"
 
-    def gold_level(value):
-        return f"{fmt_num(value, 0)} / {fmt_num(value * thai_factor, 0)}฿" if thai_factor else "N/A"
-
-    note = "ดึงจากแหล่งอ้างอิงสมาคมค้าทองคำ" if not thai_gold.get("is_estimate") else "fallback เป็นค่าประมาณ เพราะดึงราคาสมาคมไม่สำเร็จ"
-
-    return f"""📊 วิเคราะห์ทองคำ
-
-XAUUSD
-{fmt_num(price)} USD
-
-🇹🇭 เทียบเงินบาท
-{fmt_num(gold_thb_oz, 0)} บาท/ออนซ์
-
-🏆 ราคาทองไทย
-ทองแท่งรับซื้อ: {fmt_num(bar_buy, 0)} บาท
-ทองแท่งขายออก: {fmt_num(bar_sell, 0)} บาท
-ทองรูปพรรณขายออก: {fmt_num(ornament_sell, 0)} บาท
+    return f"""📊 ราคาทองไทย
 แหล่งราคา: {thai_gold.get('source')}
 อัปเดต: {thai_gold.get('updated_at')}
 
-AI Score V3: {analysis['score']}/100
-Probability ประมาณ: {analysis['probability']}%
-มุมมอง: {analysis['bias']}
-Market Regime: {analysis['regime']}
-Trend Alignment: {analysis['alignment']}
-
-📈 Technical
-EMA6: {fmt_num(analysis['ema6'])}
-EMA12: {fmt_num(analysis['ema12'])}
-EMA50: {fmt_num(analysis['ema50'])}
-RSI14: {fmt_num(analysis['rsi'])}
-ATR14: {fmt_num(analysis['atr'])}
-
-🎯 แนวรับ / แนวต้าน
-S1: {gold_level(s1)}
-S2: {gold_level(s2)}
-S3: {gold_level(s3)}
-
-R1: {gold_level(r1)}
-R2: {gold_level(r2)}
-R3: {gold_level(r3)}
-
-{build_trade_plan(price, atr, analysis['bias'], asset_type='GOLD', thai_factor=thai_factor)}
-
-เหตุผลหลัก:
-{chr(10).join("- " + r for r in reasons)}
-
-📰 ข่าว/บริบท:
-{news_text}
-
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน ราคาทองไทย{note}"""
+🏆 สมาคมค้าทองคำ
+ทองแท่งรับซื้อ: {fmt_num(bar_buy, 0)} บาท
+ทองแท่งขายออก: {fmt_num(bar_sell, 0)} บาท
+ทองรูปพรรณรับซื้อ: {fmt_num(ornament_buy, 0)} บาท
+ทองรูปพรรณขายออก: {fmt_num(ornament_sell, 0)} บาท
+เปลี่ยนแปลง: {fmt_num(change, 0)} บาท"""
 
 
 def build_asset_report(user_text):
     asset = normalize_asset(user_text)
+
+    if asset["asset_type"] == "GOLD":
+        report = build_gold_report(asset, {}, "", [])
+        try:
+            tg = get_goldtraders_price() or {}
+            save_signal(asset["symbol"], asset["asset_type"], tg.get("bar_sell"), 50, "THAI_GOLD", "THAI_ASSOCIATION", 50, report)
+        except Exception:
+            pass
+        return report
+
     quote, closes, highs, lows, opens, volumes = get_market_data(asset)
     analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
     news_text, _ = fetch_news(asset)
     reasons = analysis["reasons"][:5] or ["ข้อมูลเทคนิคยังไม่พอ ให้ดูเป็นข้อมูลราคาเบื้องต้น"]
-
-    if asset["asset_type"] == "GOLD":
-        report = build_gold_report(asset, analysis, news_text, reasons)
-        save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], "GOLD", analysis["regime"], analysis["probability"], report)
-        return report
 
     price_label = "$" if asset["currency"] == "USD" else "฿"
     source_text = quote.get("source") if isinstance(quote, dict) and quote.get("source") else ("Yahoo Finance" if asset["asset_type"] == "THAI_STOCK" else "Yahoo Finance")
@@ -2030,12 +2005,6 @@ RVOL: {fmt_num(analysis['rvol'])}
 
 {valuation_text}
 
-🎯 โซนราคา
-แนวรับประมาณ: {price_label}{fmt_num(analysis['support'])}
-แนวต้านประมาณ: {price_label}{fmt_num(analysis['resistance'])}
-Stop loss เชิงระบบ: {price_label}{fmt_num(analysis['stop_loss'])}
-Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profit'])}
-
 {build_trade_plan(analysis['price'], analysis['atr'], analysis['bias'])}
 
 {opt_text}
@@ -2045,8 +2014,7 @@ Take profit เชิงระบบ: {price_label}{fmt_num(analysis['take_profi
 
 📰 ข่าว/บริบท:
 {news_text}
-
-หมายเหตุ: ไม่ใช่คำแนะนำการลงทุน V7 Hybrid ใช้ข้อมูลฟรีและประเมิน Options จาก underlying/ATR ไม่ใช่ Option Chain จริง"""
+"""
 
     sig_type = "BUY" if analysis["score"] >= AUTO_ALERT_MIN_SCORE else "SELL" if analysis["score"] <= AUTO_ALERT_MAX_SCORE else "NEUTRAL"
     save_signal(asset["symbol"], asset["asset_type"], analysis["price"], analysis["score"], analysis["bias"], sig_type, analysis["regime"], analysis["probability"], report)
