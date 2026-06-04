@@ -38,3 +38,10 @@ class TradeMemoryEngine:
             "best_symbols": [],
             "avoid_regimes": [],
         }
+demo_rows = [
+    {
+        "symbol": "SPY",
+        "weight": 1.0,
+        "win_rate": 0.0
+    }
+]
