@@ -28,3 +28,26 @@ def register_v26_adaptive_weight_routes(app):
         engine = AdaptiveWeightEngine()
         engine.learn_from_rows(demo_rows())
         return jsonify(engine.apply_to_score(factor_scores, base_score=base_score))
+class ForwardTestEngine:
+
+    def __init__(self):
+        self.trades = []
+
+    def record_signal(self, symbol, signal_type=None, score=None, price=None, metadata=None):
+        row = {
+            "symbol": symbol,
+            "signal_type": signal_type,
+            "score": score,
+            "price": price,
+            "metadata": metadata or {},
+        }
+        self.trades.append(row)
+        return row
+
+    def evaluate(self):
+        return {
+            "total_signals": len(self.trades),
+            "win_rate": 0.0,
+            "avg_return": 0.0,
+            "max_drawdown": 0.0,
+        }
