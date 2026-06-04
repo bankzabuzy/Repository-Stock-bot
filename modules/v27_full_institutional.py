@@ -77,3 +77,24 @@ class PortfolioHeatCorrelationEngine:
             "correlation": self.correlation_score(),
             "positions": len(self.positions)
         }
+class StrategyRankingEngine:
+
+    def __init__(self):
+        self.strategies = []
+
+    def add_strategy(self, name, score=0):
+        self.strategies.append({
+            "name": name,
+            "score": score
+        })
+
+    def rank(self):
+        return sorted(
+            self.strategies,
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+    def top_strategy(self):
+        ranked = self.rank()
+        return ranked[0] if ranked else None
