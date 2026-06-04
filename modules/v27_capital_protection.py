@@ -45,3 +45,20 @@ class DataQualityGuard:
         i = self.validate_indicator_set(indicators)
         problems = q["problems"] + i["problems"]
         return {"block": bool(problems), "reason": "; ".join(problems) if problems else "PASS", "quality": {"quote": q, "indicators": i}}
+class CapitalProtection:
+
+    def __init__(self, max_daily_loss_pct=3.0, max_drawdown_pct=8.0):
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_drawdown_pct = max_drawdown_pct
+
+    def check(self, daily_loss_pct=0.0, drawdown_pct=0.0):
+        allowed = daily_loss_pct < self.max_daily_loss_pct and drawdown_pct < self.max_drawdown_pct
+        return {
+            "allowed": allowed,
+            "daily_loss_pct": daily_loss_pct,
+            "drawdown_pct": drawdown_pct,
+            "reason": None if allowed else "capital_protection_triggered",
+        }
+
+    def allow_trade(self, daily_loss_pct=0.0, drawdown_pct=0.0):
+        return self.check(daily_loss_pct, drawdown_pct)["allowed"]
