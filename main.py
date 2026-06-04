@@ -1979,10 +1979,7 @@ def extract_pt_station_prices_from_text(text):
 
 
 def get_pt_station_prices():
-    """PT Station first, because user's reference image is PT Station."""
-    cached = cache_get("THAI_OIL_PT_STATION")
-    if cached:
-        return cached
+    # PT Station first
 
     urls = [
         "https://www.ptgenergy.co.th/",
