@@ -132,3 +132,22 @@ class AutoOutcomeScheduler:
         return {
             "scheduled": True
         }
+class InstitutionalDashboard:
+
+    def __init__(self):
+        self.status = "active"
+
+    def get_dashboard(self):
+
+        return {
+            "status": self.status,
+            "signals": [],
+            "portfolio": {},
+            "performance": {}
+        }
+
+    def summary(self):
+
+        return {
+            "status": "ok"
+        }
