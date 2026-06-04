@@ -1545,6 +1545,13 @@ def get_fundamental_data(asset):
         result["trailing_pe"] = safe_float(info.get("trailingPE"))
         result["forward_pe"] = safe_float(info.get("forwardPE"))
         result["dividend_yield"] = safe_float(info.get("dividendYield"))
+
+if result["dividend_yield"] is not None:
+    if result["dividend_yield"] <= 1:
+        result["dividend_yield"] = result["dividend_yield"] * 100
+
+    if result["dividend_yield"] > 20 or result["dividend_yield"] < 0:
+        result["dividend_yield"] = None
         result["dividend_rate"] = safe_float(info.get("dividendRate"))
         result["fifty_two_week_low"] = safe_float(info.get("fiftyTwoWeekLow"))
         result["fifty_two_week_high"] = safe_float(info.get("fiftyTwoWeekHigh"))
