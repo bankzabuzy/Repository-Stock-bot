@@ -54,3 +54,26 @@ class AlertAuditLogEngine:
 
     def count(self):
         return len(self.logs)
+class PortfolioHeatCorrelationEngine:
+
+    def __init__(self):
+        self.positions = []
+
+    def add_position(self, symbol, weight=1.0):
+        self.positions.append({
+            "symbol": symbol,
+            "weight": weight
+        })
+
+    def portfolio_heat(self):
+        return sum(p["weight"] for p in self.positions)
+
+    def correlation_score(self):
+        return 0.0
+
+    def summary(self):
+        return {
+            "heat": self.portfolio_heat(),
+            "correlation": self.correlation_score(),
+            "positions": len(self.positions)
+        }
