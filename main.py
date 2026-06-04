@@ -7,6 +7,7 @@ import base64
 import hashlib
 import sqlite3
 import threading
+import html as html_lib
 from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
@@ -197,7 +198,7 @@ DB_PATH = os.getenv("DB_PATH", "signals.db")
 
 # Production-safe fallback values. These prevent Railway from crashing when
 # API keys, network providers, or the persistent volume are temporarily unavailable.
-ENABLE_YFINANCE_FALLBACK = os.getenv("ENABLE_YFINANCE_FALLBACK", "false").lower() == "true"
+ENABLE_YFINANCE_FALLBACK = os.getenv("ENABLE_YFINANCE_FALLBACK", "true").lower() == "true"
 ENABLE_GOLDTRADERS_FETCH = os.getenv("ENABLE_GOLDTRADERS_FETCH", "true").lower() == "true"
 ENABLE_THAI_OIL_FETCH = os.getenv("ENABLE_THAI_OIL_FETCH", "false").lower() == "true"
 
@@ -1131,15 +1132,28 @@ def yf_get_quote_and_series(asset, period="3mo", interval="1d"):
 
 
 def fallback_market_data(asset, reason=""):
+    """Last-resort market data.
+
+    Important: do not fabricate a confident price for Thai stocks or gold.
+    For unavailable Thai stock data, return a neutral/no-trade series around None-safe
+    fallback only when a numeric series is required by the indicator engine.
+    """
     symbol = str(asset.get("symbol") or asset.get("yf_symbol") or "").upper()
     asset_type = asset.get("asset_type")
     base = FALLBACK_MARKET_PRICES.get(symbol)
     if base is None and asset_type == "GOLD":
-        base = FALLBACK_MARKET_PRICES["GOLD"]
+        # Try official Thai gold first, then XAU fallback.
+        real_gold = get_goldtraders_price()
+        if real_gold and real_gold.get("bar_sell"):
+            base = safe_float(real_gold.get("gold_spot")) or FALLBACK_MARKET_PRICES.get("GOLD", 2350.0)
+        else:
+            base = FALLBACK_MARKET_PRICES.get("GOLD", 2350.0)
     if base is None and asset_type == "THAI_STOCK":
-        base = 100.0
+        # Avoid using the old 100/106.32 fake price as if it were a market quote.
+        base = None
     if base is None:
         base = 100.0
+
     closes = [round(base * (1 + (i - 80) * 0.0008), 4) for i in range(160)]
     highs = [round(x * 1.006, 4) for x in closes]
     lows = [round(x * 0.994, 4) for x in closes]
@@ -1154,7 +1168,39 @@ def fallback_market_data(asset, reason=""):
         "percent_change": round(((price - prev) / prev * 100), 4) if prev else 0.0,
         "source": "SAFE_FALLBACK",
         "warning": str(reason or "market data provider unavailable")[:300],
+        "is_fallback": True,
     }
+    return quote, closes, highs, lows, opens, volumes
+
+
+def yahoo_chart_get_quote_and_series(asset, range_="6mo", interval="1d"):
+    """Direct Yahoo chart fallback without relying on yfinance internals."""
+    symbol = asset.get("yf_symbol") or asset.get("symbol")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    r = requests.get(url, params={"range": range_, "interval": interval}, headers=REQUEST_HEADERS, timeout=15)
+    data = r.json()
+    result = (((data or {}).get("chart") or {}).get("result") or [None])[0]
+    if not result:
+        raise RuntimeError(f"Yahoo chart no data for {symbol}")
+    q = (result.get("indicators") or {}).get("quote") or []
+    q = q[0] if q else {}
+    closes_raw = q.get("close") or []
+    highs_raw = q.get("high") or []
+    lows_raw = q.get("low") or []
+    opens_raw = q.get("open") or []
+    volumes_raw = q.get("volume") or []
+    closes, highs, lows, opens, volumes = [], [], [], [], []
+    for c,h,l,o,v in zip(closes_raw, highs_raw, lows_raw, opens_raw, volumes_raw):
+        if c is None or h is None or l is None or o is None:
+            continue
+        closes.append(float(c)); highs.append(float(h)); lows.append(float(l)); opens.append(float(o)); volumes.append(float(v or 0))
+    if not closes:
+        raise RuntimeError(f"Yahoo chart empty prices for {symbol}")
+    price = closes[-1]
+    prev = closes[-2] if len(closes) >= 2 else None
+    change = price - prev if prev is not None else None
+    pct = change / prev * 100 if change is not None and prev else None
+    quote = {"close": price, "previous_close": prev, "change": change, "percent_change": pct, "source": "Yahoo Chart"}
     return quote, closes, highs, lows, opens, volumes
 
 
@@ -1166,7 +1212,15 @@ def get_market_data(asset):
 
     try:
         if asset["asset_type"] == "THAI_STOCK":
-            result = yf_get_quote_and_series(asset)
+            # Thai stocks must use SET/Yahoo .BK data, never US/TwelveData fallback.
+            try:
+                result = yf_get_quote_and_series(asset)
+                result[0]["source"] = result[0].get("source") or "Yahoo Finance .BK"
+            except Exception as e1:
+                try:
+                    result = yahoo_chart_get_quote_and_series(asset)
+                except Exception as e2:
+                    result = fallback_market_data(asset, f"Thai stock data unavailable: {e1} | {e2}")
 
         elif asset["asset_type"] == "US_STOCK":
             if ENABLE_MULTI_API_FALLBACK:
@@ -1177,14 +1231,16 @@ def get_market_data(asset):
                 result = (quote, closes, highs, lows, opens, volumes)
 
         elif asset["asset_type"] == "GOLD":
+            # Keep XAU/USD technical analysis, but Thai gold report/dashboard will use GoldTraders.
             try:
                 quote = td_get_quote(asset)
                 closes, highs, lows, opens, volumes = td_get_series(asset)
                 result = (quote, closes, highs, lows, opens, volumes) if closes else yf_get_quote_and_series(asset)
             except Exception as e:
-                print("Gold data provider fallback:", e)
+                print("Gold XAU provider fallback:", e)
                 try:
                     result = yf_get_quote_and_series(asset)
+                    result[0]["source"] = result[0].get("source") or "Yahoo Finance GC=F"
                 except Exception as yf_error:
                     result = fallback_market_data(asset, yf_error)
 
@@ -1196,7 +1252,6 @@ def get_market_data(asset):
 
     cache_set(key, result)
     return result
-
 
 
 def get_mtf(asset):
@@ -1317,10 +1372,12 @@ def mtf_alignment(asset):
 
 
 def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
+    quote = quote or {}
     price = safe_float(quote.get("close"))
     previous_close = safe_float(quote.get("previous_close"))
     change = safe_float(quote.get("change"))
     percent_change = safe_float(quote.get("percent_change"))
+    provider_is_fallback = bool(quote.get("is_fallback") or quote.get("source") == "SAFE_FALLBACK")
 
     ema6 = ema(closes, 6)
     ema12 = ema(closes, 12)
@@ -1411,6 +1468,13 @@ def analyze_signal(asset, quote, closes, highs, lows, opens, volumes):
         support = resistance = stop_loss = take_profit = None
 
     probability = max(40, min(78, 50 + int((score - 50) * 0.55)))
+
+    if provider_is_fallback:
+        # Do not output BUY/SELL confidence from fake/fallback data.
+        score = 50
+        probability = 40
+        bias = "NEUTRAL / ข้อมูลตลาดจริงไม่พอ"
+        reasons = ["ข้อมูลราคาจริงจากผู้ให้บริการไม่พร้อม จึงไม่ออกสัญญาณซื้อขาย"]
 
     return {
         "price": price, "previous_close": previous_close, "change": change, "percent_change": percent_change,
@@ -2491,17 +2555,37 @@ def dashboard():
     if not require_admin():
         return Response("Unauthorized", status=401)
     conn = db()
-    rows = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 50").fetchall()
+    rows = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 80").fetchall()
     conn.close()
+
+    def cell(v):
+        return html_lib.escape("" if v is None else str(v))
+
     html_rows = "".join(
-        f"<tr><td>{r['created_at']}</td><td>{r['symbol']}</td><td>{r['asset_type']}</td><td>{fmt_num(r['price'])}</td><td>{r['score']}</td><td>{r['probability']}%</td><td>{r['signal_type']}</td><td>{r['regime']}</td><td>{r['bias']}</td></tr>"
+        f"<tr><td>{cell(r['created_at'])}</td><td>{cell(r['symbol'])}</td><td>{cell(r['asset_type'])}</td>"
+        f"<td>{cell(fmt_num(r['price']))}</td><td>{cell(r['score'])}</td><td>{cell(str(r['probability']) + '%')}</td>"
+        f"<td>{cell(r['signal_type'])}</td><td>{cell(r['regime'])}</td><td>{cell(r['bias'])}</td></tr>"
         for r in rows
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>V7 Hybrid Dashboard</title>
-<style>body{{font-family:Arial;padding:24px;background:#f7f7f7}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#111;color:#fff}}</style>
-</head><body><h1>AI Market LINE Bot V8 Final.4 Market Leaders Watchlist.4 Market Leaders Watchlist.4 Market Leaders Watchlist.3 Expanded Sector Watchlist.3 Expanded Sector Watchlist.2 US Premarket Alert Fix.2 US Premarket Alert Fix.1 Market Hours Guard</h1><p>Time TH: {now_text()}</p>
-<table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table>
-</body></html>"""
+    title = "AI Market LINE Bot V31.3 Production Dashboard"
+    return Response(f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+body{{font-family:Arial, sans-serif;padding:18px;background:#f7f7f7;color:#111}}
+h1{{font-size:24px;line-height:1.25;margin:0 0 12px}}
+.note{{font-size:13px;color:#555;margin-bottom:14px}}
+.wrap{{overflow-x:auto;background:#fff;border:1px solid #ddd}}
+table{{border-collapse:collapse;width:100%;min-width:880px;background:#fff}}
+td,th{{border:1px solid #ddd;padding:7px;font-size:13px;vertical-align:top}}
+th{{background:#111;color:#fff;position:sticky;top:0}}
+tr:nth-child(even){{background:#fafafa}}
+.badge{{display:inline-block;padding:2px 6px;border-radius:4px;background:#eee}}
+</style></head><body>
+<h1>{title}</h1>
+<div class="note">Time TH: {now_text()} | Rows: {len(rows)} | Gold uses Gold Traders Association when available.</div>
+<div class="wrap"><table><thead><tr><th>Time</th><th>Symbol</th><th>Asset</th><th>Price</th><th>Score</th><th>Prob</th><th>Signal</th><th>Regime</th><th>Bias</th></tr></thead><tbody>{html_rows}</tbody></table></div>
+</body></html>""", mimetype="text/html")
 
 
 
@@ -5009,13 +5093,31 @@ def production_scan_once(symbols=None, save_all=True):
             asset = normalize_asset(symbol)
             quote, closes, highs, lows, opens, volumes = get_market_data(asset)
             analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+
+            save_symbol = asset.get("symbol", symbol)
+            save_asset_type = asset.get("asset_type")
+            save_price = analysis.get("price")
+            save_provider = quote.get("source") if isinstance(quote, dict) else None
+
+            if asset.get("asset_type") == "GOLD":
+                try:
+                    usdthb = get_usd_thb_rate()
+                    thai_gold = get_thai_gold_price_or_estimate(analysis.get("price"), usdthb)
+                    if thai_gold and thai_gold.get("bar_sell"):
+                        save_symbol = "THAI_GOLD"
+                        save_asset_type = "THAI_GOLD"
+                        save_price = thai_gold.get("bar_sell")
+                        save_provider = thai_gold.get("source")
+                except Exception as gold_err:
+                    print("AUTO_SCAN thai gold save error:", gold_err)
+
             sig = _production_signal_type(analysis.get("score"))
             report = _production_build_scan_report(symbol, asset, analysis, quote)
             if save_all or sig not in {"NEUTRAL"}:
                 save_signal(
-                    asset.get("symbol", symbol),
-                    asset.get("asset_type"),
-                    analysis.get("price"),
+                    save_symbol,
+                    save_asset_type,
+                    save_price,
                     analysis.get("score"),
                     analysis.get("bias"),
                     sig,
@@ -5024,14 +5126,14 @@ def production_scan_once(symbols=None, save_all=True):
                     report,
                 )
             results.append({
-                "symbol": asset.get("symbol", symbol),
-                "asset_type": asset.get("asset_type"),
+                "symbol": save_symbol,
+                "asset_type": save_asset_type,
                 "ok": True,
-                "price": analysis.get("price"),
+                "price": save_price,
                 "score": analysis.get("score"),
                 "signal": sig,
                 "probability": analysis.get("probability"),
-                "provider": quote.get("source") if isinstance(quote, dict) else None,
+                "provider": save_provider,
             })
             print(f"AUTO_SCAN saved symbol={symbol} signal={sig} score={analysis.get('score')}")
         except Exception as e:
