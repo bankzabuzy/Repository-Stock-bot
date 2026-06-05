@@ -78,6 +78,14 @@ try:
 except Exception as e:
     print('V32 institutional risk routes not loaded:', e)
 
+
+# V33 Institutional Portfolio Core routes
+try:
+    from modules.v33_institutional_portfolio_routes import register_v33_institutional_portfolio_routes
+    register_v33_institutional_portfolio_routes(app)
+except Exception as e:
+    print('V33 institutional portfolio routes not loaded:', e)
+
 # V27.1 Integration Phase routes
 try:
     from modules.v27_integration_routes_snippet import register_v27_integration_routes
