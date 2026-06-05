@@ -69,6 +69,15 @@ try:
 except Exception as e:
     print('V31 alpha attribution routes not loaded:', e)
 
+
+
+# V32 Institutional Risk & Backtest routes
+try:
+    from modules.v32_institutional_risk_routes import register_v32_institutional_risk_routes
+    register_v32_institutional_risk_routes(app)
+except Exception as e:
+    print('V32 institutional risk routes not loaded:', e)
+
 # V27.1 Integration Phase routes
 try:
     from modules.v27_integration_routes_snippet import register_v27_integration_routes
