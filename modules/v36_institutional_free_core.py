@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from modules.v35_institutional_free_core import (
+from modules.v36_institutional_free_core import (
     _safe_float, fetch_ohlcv, make_indicators, latest_signal, rank_signals,
     backtest_many, walk_forward_many, forward_test_plan, portfolio_optimizer,
     position_sizing_engine, ensemble_signal, monte_carlo_many, trade_journal_ai,
