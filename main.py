@@ -2195,7 +2195,7 @@ def build_asset_report(user_text):
         report = build_gold_report(asset, {}, "", [])
         try:
             tg = get_goldtraders_price() or {}
-            save_signal(asset["symbol"], asset["asset_type"], tg.get("bar_sell"), 50, "THAI_GOLD", "THAI_ASSOCIATION", 50, report)
+            save_signal(asset["symbol"], asset["asset_type"], tg.get("bar_sell"), 50, "", "THAI_ASSOCIATION", 50, report)
         except Exception:
             pass
         return report
@@ -5370,8 +5370,8 @@ def production_scan_once(symbols=None, save_all=True):
                     usdthb = get_usd_thb_rate()
                     thai_gold = get_thai_gold_price_or_estimate(analysis.get("price"), usdthb)
                     if thai_gold and thai_gold.get("bar_sell"):
-                        save_symbol = "THAI_GOLD"
-                        save_asset_type = "THAI_GOLD"
+                        save_symbol = ""
+                        save_asset_type = ""
                         save_price = thai_gold.get("bar_sell")
                         save_provider = thai_gold.get("source")
                 except Exception as gold_err:
