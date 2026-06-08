@@ -94,6 +94,57 @@ try:
 except Exception as e:
     print('V34 free paper trading routes not loaded:', e)
 
+
+# V35.1 Free Institutional Dashboard / Signal Ranking / Backtest / Risk Gate routes
+try:
+    from modules.v35_institutional_free_routes import register_v35_institutional_free_routes
+    register_v35_institutional_free_routes(app)
+except Exception as e:
+    print('V35.1 institutional free routes not loaded:', e)
+
+
+# V36 Institutional Free routes
+try:
+    from modules.v36_institutional_free_routes import register_v36_institutional_free_routes
+    register_v36_institutional_free_routes(app)
+except Exception as e:
+    print('V36 institutional free routes not loaded:', e)
+
+
+# V37 Live Safety & Broker Ready routes
+try:
+    from modules.v37_live_safety_broker_ready_routes import register_v37_live_safety_broker_ready_routes
+    register_v37_live_safety_broker_ready_routes(app)
+except Exception as e:
+    print('V37 live safety broker ready routes not loaded:', e)
+
+
+
+# V38 Institutional Free Plus routes
+try:
+    from modules.v38_institutional_free_routes import register_v38_institutional_free_routes
+    register_v38_institutional_free_routes(app)
+except Exception as e:
+    print('V38 institutional free plus routes not loaded:', e)
+
+
+
+# V39 Validation & Paper Broker Proof routes
+try:
+    from modules.v39_validation_paper_broker_proof_routes import register_v39_validation_paper_broker_proof_routes
+    register_v39_validation_paper_broker_proof_routes(app)
+except Exception as e:
+    print('V39 validation paper broker proof routes not loaded:', e)
+
+
+
+# V40 Adaptive Multi-Agent Institutional routes
+try:
+    from modules.v40_adaptive_multi_agent_routes import register_v40_adaptive_multi_agent_routes
+    register_v40_adaptive_multi_agent_routes(app)
+except Exception as e:
+    print('V40 adaptive multi-agent routes not loaded:', e)
+
 # V27.1 Integration Phase routes
 try:
     from modules.v27_integration_routes_snippet import register_v27_integration_routes
