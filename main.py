@@ -2825,7 +2825,7 @@ def dashboard():
         f"<td>{cell(r['signal_type'])}</td><td>{cell(r['regime'])}</td><td>{cell(r['bias'])}</td></tr>"
         for r in rows
     )
-    title = "AI Market LINE Bot V31.3 Production Dashboard"
+    title = "AI Market LINE Bot V40 Adaptive Multi-Agent Institutional Dashboard"
     return Response(f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
