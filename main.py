@@ -12516,9 +12516,10 @@ def handle_line_command(user_text):
         return build_top5_buy_message(5)
     if low in {"/gold", "gold", "ทอง", "ทองคำ", "ทองคํา", "xauusd", "thai_gold"}:
         try:
-            return build_gold_report(normalize_asset("GOLD"), {}, "", [])
+            from modules.v42_gold_institutional_core import build_v42_gold_text
+            return build_v42_gold_text()
         except Exception as e:
-            return f"ไม่สามารถดึงราคาทองไทยได้ในขณะนี้: {e}"
+            return f"ไม่สามารถดึงระบบ V42 GOLD ได้ในขณะนี้: {e}"
     if _v41_previous_handle_line_command_final:
         return _v41_previous_handle_line_command_final(user_text)
     return None
@@ -12539,8 +12540,29 @@ def v41_top5_latest_text_route():
 
 @app.route("/thai-gold", methods=["GET"])
 def thai_gold_latest_route():
-    tg = get_thai_gold_price_or_estimate(None, None)
-    return jsonify({"ok": bool(tg and tg.get("bar_sell")), "version": V41_LATEST_VERSION, "time_th": now_text(), "thai_gold": tg})
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload
+        return jsonify(build_v42_gold_payload())
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42_GOLD_INSTITUTIONAL_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+@app.route("/v42/gold", methods=["GET"])
+def v42_gold_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload
+        return jsonify(build_v42_gold_payload())
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42_GOLD_INSTITUTIONAL_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+@app.route("/v42/gold-text", methods=["GET"])
+def v42_gold_text_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_text
+        return Response(build_v42_gold_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึงระบบ V42 GOLD ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
 
 
 def production_scan_once(symbols=None, save_all=True):
@@ -12561,12 +12583,15 @@ def production_scan_once(symbols=None, save_all=True):
                 results.append({"symbol": symbol, "ok": True, "skipped": True, "reason": "thai_auto_scan_disabled"})
                 continue
             if asset.get("asset_type") == "GOLD":
-                thai_gold = get_thai_gold_price_or_estimate(None, None)
-                price = thai_gold.get("bar_sell") if thai_gold else None
-                report = build_gold_report(asset, {}, "", []) if price else "ไม่สามารถดึงราคาทองคำสมาคมค้าทองคำได้ในขณะนี้"
+                from modules.v42_gold_institutional_core import build_v42_gold_payload, build_v42_gold_text
+                gold_payload = build_v42_gold_payload()
+                thai_gold = gold_payload.get("thai_gold", {})
+                engine = gold_payload.get("engine", {})
+                price = thai_gold.get("bar_sell")
+                report = build_v42_gold_text()
                 if price:
-                    save_signal("THAI_GOLD", "THAI_GOLD", price, 50, "THAI_GOLD", "THAI_ASSOCIATION", "NEUTRAL", 50, report)
-                results.append({"symbol": "THAI_GOLD", "asset_type": "THAI_GOLD", "ok": bool(price), "price": price, "provider": (thai_gold or {}).get("source")})
+                    save_signal("THAI_GOLD", "THAI_GOLD", price, engine.get("score"), engine.get("signal"), "V42_GOLD", engine.get("regime"), engine.get("probability"), report)
+                results.append({"symbol": "THAI_GOLD", "asset_type": "THAI_GOLD", "ok": bool(price), "price": price, "provider": thai_gold.get("source"), "signal": engine.get("signal"), "probability": engine.get("probability"), "push_alert": gold_payload.get("push_alert")})
                 continue
             quote, closes, highs, lows, opens, volumes = get_market_data(asset)
             analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
