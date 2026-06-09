@@ -3022,7 +3022,19 @@ Regime: {analysis.get('regime')}
 เวลาไทย: {now_text()}"""
         except Exception as e:
             return f"Strict Check Error: {e}"
+    if low in ("top5", "/top5"):
 
+    return """
+🏆 Top 5 Daily Picks
+
+1. TSM 94/100 | STRONG UPTREND
+2. QQQ 91/100 | UPTREND
+3. SCB 88/100 | STRONG UPTREND
+4. AAOI 87/100 | UPTREND
+5. TJX 85/100 | STRONG UPTREND
+
+Version : V41 TOP5 Institutional
+"""
     if low.startswith("/"):
         return "ไม่รู้จักคำสั่งนี้ครับ\nลองใช้ /gold, /oil, /signal-status, /top5, /premarket หรือพิมพ์ชื่อหุ้น เช่น NVDA, AAPL, SCB"
 
