@@ -3023,18 +3023,24 @@ Regime: {analysis.get('regime')}
         except Exception as e:
             return f"Strict Check Error: {e}"
     if low in ("top5", "/top5"):
+    from modules.v41_top5_institutional_core import build_top5
 
-        return """
-🏆 Top 5 Daily Picks
+    picks = build_top5()
 
-1. TSM 94/100 | STRONG UPTREND
-2. QQQ 91/100 | UPTREND
-3. SCB 88/100 | STRONG UPTREND
-4. AAOI 87/100 | UPTREND
-5. TJX 85/100 | STRONG UPTREND
+    lines = ["🏆 Top 5 Daily Picks (V41 Institutional)", ""]
 
-Version : V41 TOP5 Institutional
-"""
+    for i, p in enumerate(picks, 1):
+        reasons = ", ".join(p.get("reason", []))
+        lines.append(
+            f"{i}. {p['symbol']} {p['score']}/100 | Confidence {p['confidence']}% | Risk {p['risk_grade']} | {p['regime']}"
+        )
+        if reasons:
+            lines.append(f"   เหตุผล: {reasons}")
+
+    lines.append("")
+    lines.append("Version : V41 TOP5 Institutional")
+
+    return "\n".join(lines)    
     
 
     if low.startswith("/"):
