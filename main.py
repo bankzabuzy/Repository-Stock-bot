@@ -4772,8 +4772,10 @@ def rank_top5_picks():
     return [(sym, asset, analysis) for _, sym, asset, analysis in picks[:5]]
 
 
+from modules.v41_top5_institutional_core import build_top5
+
 def build_top5_daily_message():
-    picks = rank_top5_picks()
+    picks = build_top5()
     if not picks:
         return f"""🏆 Top 5 Daily Picks
 
@@ -4781,17 +4783,27 @@ def build_top5_daily_message():
 เวลาไทย: {now_text()}"""
 
     lines = []
-    for i, (sym, asset, analysis) in enumerate(picks, 1):
-        lines.append(
-            f"{i}. {sym} {analysis.get('score')}/100 | {analysis.get('bias')} | {analysis.get('regime')}"
-        )
+
+for i, p in enumerate(picks, 1):
+
+    lines.append(
+        f"{i}. {p['symbol']} {p['score']}/100 | "
+        f"Confidence {p['confidence']}% | "
+        f"Risk {p['risk_grade']} | "
+        f"{p['regime']}"
+    )
+
+    reasons = ", ".join(p.get("reason", []))
+
+    if reasons:
+        lines.append(f"เหตุผล: {reasons}")
 
     return f"""🏆 Top 5 Daily Picks
 
 {chr(10).join(lines)}
 
 เวลาไทย: {now_text()}
-หมายเหตุ: คัดจาก TOP5_UNIVERSE ด้วยระบบ V8.1"""
+Version : V41 TOP5 Institutional"""
 
 
 def should_send_top5_now():
