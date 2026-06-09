@@ -144,7 +144,14 @@ try:
     register_v40_adaptive_multi_agent_routes(app)
 except Exception as e:
     print('V40 adaptive multi-agent routes not loaded:', e)
-
+    
+# V41 Top5 Institutional
+try:
+    from modules.v41_top5_institutional_routes import v41_top5_bp
+    app.register_blueprint(v41_top5_bp)
+except Exception as e:
+    print("V41 Top5 routes not loaded:", e)
+    
 # V27.1 Integration Phase routes
 try:
     from modules.v27_integration_routes_snippet import register_v27_integration_routes
