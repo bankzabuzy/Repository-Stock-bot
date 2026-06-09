@@ -144,14 +144,7 @@ try:
     register_v40_adaptive_multi_agent_routes(app)
 except Exception as e:
     print('V40 adaptive multi-agent routes not loaded:', e)
-    
-# V41 Top5 Institutional
-try:
-    from modules.v41_top5_institutional_routes import v41_top5_bp
-    app.register_blueprint(v41_top5_bp)
-except Exception as e:
-    print("V41 Top5 routes not loaded:", e)
-    
+
 # V27.1 Integration Phase routes
 try:
     from modules.v27_integration_routes_snippet import register_v27_integration_routes
@@ -306,7 +299,7 @@ ENABLE_MULTI_API_FALLBACK = os.getenv("ENABLE_MULTI_API_FALLBACK", "true").lower
 USE_YAHOO_FIRST = os.getenv("USE_YAHOO_FIRST", "true").lower() == "true"
 USE_TWELVEDATA_BACKUP = os.getenv("USE_TWELVEDATA_BACKUP", "true").lower() == "true"
 AUTO_SCAN_INCLUDE_THAI = os.getenv("AUTO_SCAN_INCLUDE_THAI", "false").lower() == "true"
-AUTO_SCAN_INCLUDE_GOLD = os.getenv("AUTO_SCAN_INCLUDE_GOLD", "true").lower() == "true"
+AUTO_SCAN_INCLUDE_GOLD = os.getenv("AUTO_SCAN_INCLUDE_GOLD", "false").lower() == "true"
 API_FALLBACK_VERBOSE = os.getenv("API_FALLBACK_VERBOSE", "false").lower() == "true"
 
 REQUEST_HEADERS = {
@@ -336,7 +329,7 @@ THAI_SYMBOLS = {
     "ASK", "KGI", "MST", "CGH", "TQM", "MENA", "SNNP", "PLUS"
 }
 
-GOLD_WORDS = {"GOLD", "ทอง", "ทองคำ", "ทองคํา", "XAUUSD", "XAU/USD"}
+GOLD_WORDS = {"GOLD", "THAI_GOLD", "XAU", "ทอง", "ทองคำ", "ทองคํา", "XAUUSD", "XAU/USD"}
 US_INDEX_SYMBOLS = {"SPX": "SPY", "NASDAQ": "QQQ", "NDX": "QQQ", "DOW": "DIA", "RUSSELL": "IWM"}
 US_ETF_SYMBOLS = {"QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ", "SOXL", "SOXS"}
 
@@ -349,6 +342,8 @@ CACHE = {}
 # The bot should not keep scanning INTUCH.BK because Yahoo Finance often returns no data.
 # User commands for INTUCH are redirected to ADVANC as the closest active telecom proxy.
 DELISTED_SYMBOL_ALIASES = {
+    "STHAI_GOLD": "THAI_GOLD",
+    "THAI-GOLD": "THAI_GOLD",
     "INTUCH": "ADVANC",
     "INTUCH.BK": "ADVANC.BK",
     "INTUCH.SET": "ADVANC.SET",
@@ -3022,26 +3017,6 @@ Regime: {analysis.get('regime')}
 เวลาไทย: {now_text()}"""
         except Exception as e:
             return f"Strict Check Error: {e}"
-    if low in ("top5", "/top5"):
-        from modules.v41_top5_institutional_core import build_top5
-
-        picks = build_top5()
-
-        lines = ["🏆 Top 5 Daily Picks (V41 Institutional)", ""]
-
-        for i, p in enumerate(picks, 1):
-            reasons = ", ".join(p.get("reason", []))
-            lines.append(
-                f"{i}. {p['symbol']} {p['score']}/100 | Confidence {p['confidence']}% | Risk {p['risk_grade']} | {p['regime']}"
-            )
-            if reasons:
-                lines.append(f"   เหตุผล: {reasons}")
-
-        lines.append("")
-        lines.append("Version : V41 TOP5 Institutional")
-
-        return "\n".join(lines)    
-    
 
     if low.startswith("/"):
         return "ไม่รู้จักคำสั่งนี้ครับ\nลองใช้ /gold, /oil, /signal-status, /top5, /premarket หรือพิมพ์ชื่อหุ้น เช่น NVDA, AAPL, SCB"
@@ -3987,9 +3962,7 @@ Reward: {reward}
 
 
 def compact_top5_message():
-    from modules.v41_top5_institutional_core import build_top5
-
-    picks = build_top5()
+    picks = rank_top5_picks()
     if not picks:
         return f"""🏆 Top 5 Today
 
@@ -3997,7 +3970,7 @@ def compact_top5_message():
 เวลาไทย: {now_text()}"""
 
     lines = []
-    for i, p in enumerate(picks, 1):
+    for i, (s, asset, a) in enumerate(picks, 1):
         lines.append(f"{i}. {s} {a.get('score')}/100")
 
     return f"""🏆 Top 5 Today
@@ -4774,10 +4747,8 @@ def rank_top5_picks():
     return [(sym, asset, analysis) for _, sym, asset, analysis in picks[:5]]
 
 
-from modules.v41_top5_institutional_core import build_top5
-
 def build_top5_daily_message():
-    picks = build_top5()
+    picks = rank_top5_picks()
     if not picks:
         return f"""🏆 Top 5 Daily Picks
 
@@ -4785,27 +4756,17 @@ def build_top5_daily_message():
 เวลาไทย: {now_text()}"""
 
     lines = []
-
-for i, p in enumerate(picks, 1):
-
-    lines.append(
-        f"{i}. {p['symbol']} {p['score']}/100 | "
-        f"Confidence {p['confidence']}% | "
-        f"Risk {p['risk_grade']} | "
-        f"{p['regime']}"
-    )
-
-    reasons = ", ".join(p.get("reason", []))
-
-    if reasons:
-        lines.append(f"เหตุผล: {reasons}")
+    for i, (sym, asset, analysis) in enumerate(picks, 1):
+        lines.append(
+            f"{i}. {sym} {analysis.get('score')}/100 | {analysis.get('bias')} | {analysis.get('regime')}"
+        )
 
     return f"""🏆 Top 5 Daily Picks
 
 {chr(10).join(lines)}
 
 เวลาไทย: {now_text()}
-Version : V41 TOP5 Institutional"""
+หมายเหตุ: คัดจาก TOP5_UNIVERSE ด้วยระบบ V8.1"""
 
 
 def should_send_top5_now():
@@ -12086,6 +12047,538 @@ except Exception as e:
 # END V31 ALPHA RESEARCH & PERFORMANCE ATTRIBUTION INTEGRATION
 # ============================================================
 
+
+
+
+# ============================================================
+# V41 LINE TOP 5 BUY RANKING COMMAND
+# Adds natural-language LINE commands for daily Top 5 buy candidates.
+# This layer is intentionally read-only: it ranks opportunities, it does
+# not place orders and it respects V40/CRO style risk language.
+# ============================================================
+def _v41_pct_value(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        return float(str(x).replace('%', '').replace(',', '').strip())
+    except Exception:
+        return default
+
+
+def _v41_signal_text(asset, analysis):
+    try:
+        sig = signal_type_from_analysis(asset, analysis)
+        if sig and sig != 'NONE':
+            return sig
+    except Exception:
+        pass
+    try:
+        score = int(analysis.get('score', 50))
+        if score >= 70:
+            return 'BUY'
+        if score >= 58:
+            return 'WATCH_BUY'
+        if score <= 35:
+            return 'SELL'
+    except Exception:
+        pass
+    return 'NEUTRAL'
+
+
+def _v41_rank_one_symbol(sym):
+    asset = normalize_asset(sym)
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+
+    score = int(_v41_pct_value(analysis.get('score'), 50))
+    prob = int(_v41_pct_value(analysis.get('probability'), 50))
+    confidence = int(_v41_pct_value(
+        calculate_signal_confidence(analysis) if 'calculate_signal_confidence' in globals() else prob,
+        prob,
+    ))
+    signal = _v41_signal_text(asset, analysis)
+    regime = str(analysis.get('regime', '') or '').upper()
+    bias = str(analysis.get('bias', '') or '').upper()
+    rvol = _v41_pct_value(analysis.get('rvol'), 1.0)
+    rsi = _v41_pct_value(analysis.get('rsi'), 50.0)
+
+    # Opportunity score: not just raw AI score. It blends score, probability,
+    # confidence, trend regime and risk filters so Top 5 is closer to
+    # "best buy candidates today" rather than simply highest score.
+    rank = score * 0.38 + prob * 0.27 + confidence * 0.22
+
+    if signal in {'STRONG_CALL', 'BUY'}:
+        rank += 10
+    elif signal in {'WATCH_BUY', 'CALL'}:
+        rank += 6
+    elif signal in {'SELL', 'STRONG_PUT', 'PUT'}:
+        rank -= 25
+    elif signal == 'NEUTRAL':
+        rank -= 6
+
+    if 'STRONG UPTREND' in regime:
+        rank += 8
+    elif 'UPTREND' in regime:
+        rank += 5
+    elif 'DOWNTREND' in regime:
+        rank -= 12
+
+    if 'BULLISH' in bias:
+        rank += 5
+    elif 'BEARISH' in bias:
+        rank -= 8
+
+    if rvol >= 1.2:
+        rank += 3
+    elif rvol and rvol < 0.75:
+        rank -= 4
+
+    # Avoid chasing extremely hot RSI unless the rest of the signal is very strong.
+    if rsi >= 78:
+        rank -= 8
+    elif 45 <= rsi <= 68:
+        rank += 3
+    elif rsi <= 30:
+        rank -= 3
+
+    return {
+        'symbol': asset.get('symbol', sym).upper(),
+        'asset_type': asset.get('asset_type'),
+        'price': analysis.get('price'),
+        'score': score,
+        'probability': prob,
+        'confidence': confidence,
+        'signal': signal,
+        'regime': analysis.get('regime'),
+        'bias': analysis.get('bias'),
+        'rsi': analysis.get('rsi'),
+        'rvol': analysis.get('rvol'),
+        'rank_score': round(max(0, min(100, rank)), 2),
+        'reasons': [
+            f"AI Score {score}/100",
+            f"Probability {prob}%",
+            f"Confidence {confidence}%",
+            f"Signal {signal}",
+            f"Regime {analysis.get('regime')}",
+        ],
+    }
+
+
+def rank_top5_buy_candidates(limit=5, symbols=None):
+    universe = symbols or globals().get('TOP5_UNIVERSE', None) or globals().get('WATCHLIST', [])
+    rows = []
+    for sym in list(universe):
+        sym = str(sym).strip().upper()
+        if not sym:
+            continue
+        try:
+            row = _v41_rank_one_symbol(sym)
+            # Top buy list should focus on buy/watch-buy/constructive names.
+            # If the market is weak, neutral names can still appear, but sells are penalized heavily.
+            rows.append(row)
+            time.sleep(0.15)
+        except Exception as e:
+            print('V41 top5 skip', sym, e)
+    rows.sort(key=lambda r: (r.get('rank_score', 0), r.get('confidence', 0), r.get('score', 0)), reverse=True)
+    return rows[:int(limit)]
+
+
+def build_top5_buy_message(limit=5):
+    rows = rank_top5_buy_candidates(limit=limit)
+    if not rows:
+        return f"🏆 Top {limit} หุ้นน่าเข้าซื้อวันนี้\n\nยังจัดอันดับไม่ได้\nเวลาไทย: {now_text()}"
+
+    lines = []
+    for i, r in enumerate(rows, 1):
+        price = fmt_num(r.get('price')) if 'fmt_num' in globals() else r.get('price')
+        final_word = 'น่าเข้า' if r.get('signal') in {'BUY', 'STRONG_CALL'} else 'รอจังหวะ'
+        if r.get('rank_score', 0) < 55:
+            final_word = 'เฝ้าดูเท่านั้น'
+        lines.append(
+            f"{i}. {r['symbol']} | {final_word}\n"
+            f"   ราคา: {price} | ความมั่นใจ: {r.get('confidence')}% | Rank: {r.get('rank_score')}/100\n"
+            f"   Signal: {r.get('signal')} | Score: {r.get('score')}/100 | Prob: {r.get('probability')}%\n"
+            f"   Regime: {r.get('regime')} | Bias: {r.get('bias')}"
+        )
+
+    return f"""🏆 Top {limit} หุ้นน่าเข้าซื้อที่สุดของวัน
+เวลาไทย: {now_text()}
+
+{chr(10).join(lines)}
+
+กฎใช้งาน:
+- เข้าเฉพาะตัวที่ Signal เป็น BUY / WATCH_BUY และราคาไม่ไล่สูงเกินไป
+- ถ้า CRO หรือ V40 บอก BLOCK ให้รอ ไม่ฝืนเข้า
+- ใช้เป็น Paper/Decision Support ไม่ใช่คำสั่งซื้ออัตโนมัติ"""
+
+
+# Override the older daily Top 5 message so /top5 and scheduled Top5 use V41 ranking.
+def build_top5_daily_message():
+    return build_top5_buy_message(5)
+
+
+try:
+    _v41_previous_handle_line_command = handle_line_command
+except Exception:
+    _v41_previous_handle_line_command = None
+
+
+def _v41_is_top5_buy_command(text):
+    low = (text or '').strip().lower().replace(' ', '')
+    thai = (text or '').strip()
+    exact = {'/top5', 'top5', 'top5buy', '/top5buy', 'top5today', '/top5today'}
+    if low in exact:
+        return True
+    keywords = [
+        'top5', 'top 5', 'หุ้นน่าซื้อ', 'หุ้นน่าเข้า', 'หุ้นน่าเข้าซื้อ',
+        'หุ้นที่น่าซื้อ', 'หุ้นวันนี้', 'วันนี้ซื้ออะไร', 'ตัวไหนน่าซื้อ',
+        'จัดอันดับหุ้น', 'หุ้นทำกำไร', 'โอกาสทำกำไร', 'อันดับหุ้น',
+    ]
+    return any(k.replace(' ', '') in low or k in thai for k in keywords)
+
+
+def handle_line_command(user_text):
+    text = (user_text or '').strip()
+    if _v41_is_top5_buy_command(text):
+        return build_top5_buy_message(5)
+    if _v41_previous_handle_line_command:
+        return _v41_previous_handle_line_command(user_text)
+    return None
+
+
+@app.route('/api/top5-buy', methods=['GET'])
+def api_top5_buy_v41():
+    if not require_admin():
+        return jsonify({'error': 'unauthorized'}), 401
+    limit = int(request.args.get('limit', 5))
+    return jsonify({'ok': True, 'version': 'V41_LINE_TOP5_BUY_RANKING', 'time_th': now_text(), 'rows': rank_top5_buy_candidates(limit=limit)})
+
+
+@app.route('/v41/top5-buy', methods=['GET'])
+def v41_top5_buy_text():
+    if not require_admin():
+        return Response('Unauthorized', status=401)
+    limit = int(request.args.get('limit', 5))
+    return Response(build_top5_buy_message(limit), mimetype='text/plain; charset=utf-8')
+# ============================================================
+# END V41 LINE TOP 5 BUY RANKING COMMAND
+# ============================================================
+
+
+
+
+# ============================================================
+# V41.2 PRODUCTION STABILIZATION OVERRIDE
+# - All Top5/LINE/scheduled Top5 now use one V41 latest-data engine.
+# - Old V8.1 rank_top5_picks/compact_top5_message are overridden below.
+# - Thai gold is handled through GoldTraders/estimate fallback, not Yahoo THAI_GOLD.
+# ============================================================
+V41_LATEST_VERSION = "V41.2_TOP5_INSTITUTIONAL_LATEST_DATA_STABLE"
+
+
+def _v41_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v41_int(value, default=50):
+    try:
+        if value is None:
+            return default
+        return int(round(float(value)))
+    except Exception:
+        return default
+
+
+def _v41_risk_grade(rank_score, signal=None, rvol=None, rsi=None, asset_type=None, symbol=None):
+    score = _v41_num(rank_score, 0)
+    sym = str(symbol or "").upper()
+    penalty = 0
+    if sym in {"AAOI", "PLTR", "TSLA", "SOXL", "TQQQ"}:
+        penalty += 1
+    if _v41_num(rvol, 1.0) >= 2.2:
+        penalty += 1
+    if _v41_num(rsi, 50) >= 76:
+        penalty += 1
+    if str(signal or "").upper() in {"SELL", "STRONG_PUT", "PUT"}:
+        penalty += 2
+    if asset_type == "GOLD":
+        penalty += 1
+    if score >= 88 and penalty == 0:
+        return "A"
+    if score >= 82 and penalty <= 1:
+        return "B+"
+    if score >= 70:
+        return "B"
+    if score >= 55:
+        return "C"
+    return "D"
+
+
+def _v41_final_signal_text(signal, rank_score):
+    s = str(signal or "NEUTRAL").upper()
+    r = _v41_num(rank_score, 0)
+    if s in {"BUY", "STRONG_CALL", "CALL"} and r >= 70:
+        return "น่าเข้า"
+    if s in {"WATCH_BUY", "NEUTRAL"} and r >= 65:
+        return "รอจังหวะ"
+    if s in {"SELL", "STRONG_PUT", "PUT"}:
+        return "ไม่น่าเข้า"
+    return "เฝ้าดูเท่านั้น"
+
+
+def _v41_skip_top5_symbol(sym):
+    s = str(sym or "").strip().upper()
+    if not s or s.startswith("/"):
+        return True
+    if s in {"OIL", "น้ำมัน", "THAI_GOLD", "STHAI_GOLD"}:
+        return True
+    return False
+
+
+def _v41_rank_latest_symbol(sym):
+    sym = resolve_delisted_symbol(str(sym or "").strip().upper())
+    asset = normalize_asset(sym)
+    quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+    analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+
+    score = max(0, min(95, _v41_int(analysis.get("score"), 50)))
+    prob = max(0, min(95, _v41_int(analysis.get("probability"), 50)))
+    confidence = calculate_signal_confidence(analysis) if "calculate_signal_confidence" in globals() else max(40, min(95, abs(score - 50) + 45))
+    signal = signal_type_from_analysis(asset, analysis) if "signal_type_from_analysis" in globals() else "NEUTRAL"
+    regime = str(analysis.get("regime") or "NEUTRAL")
+    bias = str(analysis.get("bias") or "NEUTRAL")
+    rvol = _v41_num(analysis.get("rvol"), 1.0)
+    rsi = _v41_num(analysis.get("rsi"), 50.0)
+
+    rank = score * 0.38 + prob * 0.27 + confidence * 0.22
+    sig_upper = str(signal or "").upper()
+    reg_upper = regime.upper()
+    bias_upper = bias.upper()
+    if sig_upper in {"STRONG_CALL", "BUY"}:
+        rank += 10
+    elif sig_upper in {"WATCH_BUY", "CALL"}:
+        rank += 6
+    elif sig_upper in {"SELL", "STRONG_PUT", "PUT"}:
+        rank -= 25
+    elif sig_upper == "NEUTRAL":
+        rank -= 5
+    if "STRONG UPTREND" in reg_upper:
+        rank += 8
+    elif "UPTREND" in reg_upper:
+        rank += 5
+    elif "DOWNTREND" in reg_upper:
+        rank -= 12
+    if "BULLISH" in bias_upper:
+        rank += 5
+    elif "BEARISH" in bias_upper:
+        rank -= 8
+    if rvol >= 1.2:
+        rank += 3
+    elif rvol < 0.75:
+        rank -= 4
+    if 45 <= rsi <= 68:
+        rank += 3
+    elif rsi >= 78:
+        rank -= 8
+    elif rsi <= 30:
+        rank -= 3
+
+    # Prevent small/volatile names from becoming unrealistic 100/100 or ranking above
+    # mega-cap/liquid leaders purely from short-term momentum.
+    volatile_name = asset.get("symbol", sym).upper() in {"AAOI", "PLTR", "TSLA", "SOXL", "TQQQ"}
+    if volatile_name:
+        rank -= 7
+        confidence = min(confidence, 88)
+    rank_score = round(max(0, min(95, rank)), 2)
+    if volatile_name:
+        rank_score = min(rank_score, 88.5)
+
+    reasons = []
+    if "UPTREND" in reg_upper:
+        reasons.append("Trend สนับสนุน")
+    if sig_upper in {"BUY", "STRONG_CALL", "WATCH_BUY", "CALL"}:
+        reasons.append(f"Signal {signal}")
+    if confidence >= 75:
+        reasons.append("Confidence ดี")
+    if rvol >= 1.2:
+        reasons.append("Volume สนับสนุน")
+    if asset.get("symbol", sym).upper() in {"AAOI", "PLTR", "TSLA", "SOXL", "TQQQ"}:
+        reasons.append("มี penalty หุ้นผันผวนสูง")
+    if not reasons:
+        reasons.append("ผ่านตัวกรองพื้นฐาน")
+
+    return {
+        "symbol": asset.get("symbol", sym).upper(),
+        "asset_type": asset.get("asset_type"),
+        "price": analysis.get("price"),
+        "score": score,
+        "probability": prob,
+        "confidence": int(max(40, min(95, confidence))),
+        "signal": signal,
+        "regime": regime,
+        "bias": bias,
+        "rsi": analysis.get("rsi"),
+        "rvol": analysis.get("rvol"),
+        "rank_score": rank_score,
+        "risk_grade": _v41_risk_grade(rank_score, signal, rvol, rsi, asset.get("asset_type"), asset.get("symbol", sym)),
+        "final": _v41_final_signal_text(signal, rank_score),
+        "reasons": reasons,
+        "source": quote.get("source") if isinstance(quote, dict) else None,
+        "version": V41_LATEST_VERSION,
+    }
+
+
+def rank_top5_buy_candidates(limit=5, symbols=None):
+    universe = symbols or globals().get("TOP5_UNIVERSE") or globals().get("WATCHLIST", [])
+    rows = []
+    for sym in list(universe):
+        sym = str(sym or "").strip().upper()
+        if _v41_skip_top5_symbol(sym):
+            continue
+        try:
+            rows.append(_v41_rank_latest_symbol(sym))
+            time.sleep(0.05)
+        except Exception as e:
+            print("V41 latest top5 skip", sym, e)
+    rows.sort(key=lambda r: (r.get("rank_score", 0), r.get("confidence", 0), r.get("score", 0)), reverse=True)
+    return rows[:int(limit)]
+
+
+def rank_top5_picks(limit=5):
+    """Compatibility override: old V8 callers now receive V41 dictionaries."""
+    return rank_top5_buy_candidates(limit=limit)
+
+
+def compact_top5_message():
+    return build_top5_buy_message(5)
+
+
+def build_top5_buy_message(limit=5):
+    rows = rank_top5_buy_candidates(limit=limit)
+    if not rows:
+        return f"🏆 Top {limit} หุ้นน่าเข้าซื้อวันนี้\n\nยังจัดอันดับไม่ได้\nเวลาไทย: {now_text()}\nVersion : {V41_LATEST_VERSION}"
+    lines = []
+    for i, r in enumerate(rows, 1):
+        try:
+            price = fmt_num(r.get("price")) if "fmt_num" in globals() else r.get("price")
+        except Exception:
+            price = r.get("price")
+        reason_text = ", ".join(r.get("reasons") or [])
+        lines.append(
+            f"{i}. {r['symbol']} | {r.get('final')}\n"
+            f"   ราคา: {price} | Rank: {r.get('rank_score')}/100 | Risk: {r.get('risk_grade')}\n"
+            f"   Confidence: {r.get('confidence')}% | Score: {r.get('score')}/100 | Prob: {r.get('probability')}%\n"
+            f"   Signal: {r.get('signal')} | Regime: {r.get('regime')}\n"
+            f"   เหตุผล: {reason_text}"
+        )
+    return f"""🏆 Top {limit} หุ้นน่าเข้าซื้อที่สุดของวัน (V41 Institutional)
+เวลาไทย: {now_text()}
+
+{chr(10).join(lines)}
+
+กฎใช้งาน:
+- ใช้เป็น Decision Support / Paper Trading ก่อน
+- เข้าเฉพาะตัวที่ Signal/Regime/Rank สอดคล้องกัน
+- ถ้า Rank ต่ำกว่า 55 หรือ Risk C/D ให้เฝ้าดูเท่านั้น
+
+Version : {V41_LATEST_VERSION}"""
+
+
+def build_top5_daily_message():
+    return build_top5_buy_message(5)
+
+
+def _v41_is_top5_command(text):
+    raw = (text or "").strip()
+    low = raw.lower().replace(" ", "")
+    exact = {"top5", "/top5", "top5buy", "/top5buy", "top5today", "/top5today"}
+    if low in exact:
+        return True
+    keywords = ["หุ้นน่าซื้อ", "หุ้นน่าเข้า", "หุ้นน่าเข้าซื้อ", "หุ้นวันนี้", "จัดอันดับหุ้น", "โอกาสทำกำไร", "top5", "top 5"]
+    return any(k.replace(" ", "") in low or k in raw for k in keywords)
+
+
+try:
+    _v41_previous_handle_line_command_final = handle_line_command
+except Exception:
+    _v41_previous_handle_line_command_final = None
+
+
+def handle_line_command(user_text):
+    text = (user_text or "").strip()
+    low = text.lower()
+    if _v41_is_top5_command(text):
+        return build_top5_buy_message(5)
+    if low in {"/gold", "gold", "ทอง", "ทองคำ", "ทองคํา", "xauusd", "thai_gold"}:
+        try:
+            return build_gold_report(normalize_asset("GOLD"), {}, "", [])
+        except Exception as e:
+            return f"ไม่สามารถดึงราคาทองไทยได้ในขณะนี้: {e}"
+    if _v41_previous_handle_line_command_final:
+        return _v41_previous_handle_line_command_final(user_text)
+    return None
+
+
+@app.route("/v41/top5", methods=["GET"])
+def v41_top5_latest_route():
+    limit = int(request.args.get("limit", 5))
+    rows = rank_top5_buy_candidates(limit=limit)
+    return jsonify({"ok": True, "version": V41_LATEST_VERSION, "time_th": now_text(), "top5": rows})
+
+
+@app.route("/v41/top5-text", methods=["GET"])
+def v41_top5_latest_text_route():
+    limit = int(request.args.get("limit", 5))
+    return Response(build_top5_buy_message(limit), mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/thai-gold", methods=["GET"])
+def thai_gold_latest_route():
+    tg = get_thai_gold_price_or_estimate(None, None)
+    return jsonify({"ok": bool(tg and tg.get("bar_sell")), "version": V41_LATEST_VERSION, "time_th": now_text(), "thai_gold": tg})
+
+
+def production_scan_once(symbols=None, save_all=True):
+    """V41 stable production scan. Gold is handled without Yahoo THAI_GOLD lookup."""
+    init_db()
+    symbols = symbols or AUTO_SIGNAL_SCAN_SYMBOLS or WATCHLIST
+    symbols = [str(x).strip().upper() for x in symbols if str(x).strip()]
+    results = []
+    print(f"AUTO_SCAN V41 stable start count={len(symbols[:AUTO_SIGNAL_SCAN_LIMIT])} symbols={symbols[:AUTO_SIGNAL_SCAN_LIMIT]}")
+    for symbol in symbols[:AUTO_SIGNAL_SCAN_LIMIT]:
+        try:
+            symbol = resolve_delisted_symbol(symbol)
+            if v8_skip_symbol(symbol):
+                results.append({"symbol": symbol, "ok": False, "skipped": True, "reason": "v8_skip_symbol"})
+                continue
+            asset = normalize_asset(symbol)
+            if asset.get("asset_type") == "THAI_STOCK" and not AUTO_SCAN_INCLUDE_THAI:
+                results.append({"symbol": symbol, "ok": True, "skipped": True, "reason": "thai_auto_scan_disabled"})
+                continue
+            if asset.get("asset_type") == "GOLD":
+                thai_gold = get_thai_gold_price_or_estimate(None, None)
+                price = thai_gold.get("bar_sell") if thai_gold else None
+                report = build_gold_report(asset, {}, "", []) if price else "ไม่สามารถดึงราคาทองคำสมาคมค้าทองคำได้ในขณะนี้"
+                if price:
+                    save_signal("THAI_GOLD", "THAI_GOLD", price, 50, "THAI_GOLD", "THAI_ASSOCIATION", "NEUTRAL", 50, report)
+                results.append({"symbol": "THAI_GOLD", "asset_type": "THAI_GOLD", "ok": bool(price), "price": price, "provider": (thai_gold or {}).get("source")})
+                continue
+            quote, closes, highs, lows, opens, volumes = get_market_data(asset)
+            analysis = analyze_signal(asset, quote, closes, highs, lows, opens, volumes)
+            sig = _production_signal_type(analysis.get("score"))
+            report = _production_build_scan_report(symbol, asset, analysis, quote)
+            if save_all or sig not in {"NEUTRAL"}:
+                save_signal(asset.get("symbol", symbol), asset.get("asset_type"), analysis.get("price"), analysis.get("score"), analysis.get("bias"), sig, analysis.get("regime"), analysis.get("probability"), report)
+            results.append({"symbol": asset.get("symbol", symbol), "asset_type": asset.get("asset_type"), "ok": True, "price": analysis.get("price"), "score": analysis.get("score"), "signal": sig, "provider": quote.get("source") if isinstance(quote, dict) else None})
+        except Exception as e:
+            print(f"AUTO_SCAN V41 stable skip symbol={symbol}: {e}")
+            results.append({"symbol": symbol, "ok": False, "error": str(e)[:300]})
+    return results
 
 # ============================================================
 # V31 FINAL MAIN RUNNER
