@@ -3035,6 +3035,8 @@ Regime: {analysis.get('regime')}
 
 Version : V41 TOP5 Institutional
 """
+    
+
     if low.startswith("/"):
         return "ไม่รู้จักคำสั่งนี้ครับ\nลองใช้ /gold, /oil, /signal-status, /top5, /premarket หรือพิมพ์ชื่อหุ้น เช่น NVDA, AAPL, SCB"
 
