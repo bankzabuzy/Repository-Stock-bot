@@ -1,0 +1,3 @@
+V41_VERSION = "V41_TOP5_INSTITUTIONAL"
+
+print("V41 core loaded")
