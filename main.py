@@ -3987,7 +3987,9 @@ Reward: {reward}
 
 
 def compact_top5_message():
-    picks = rank_top5_picks()
+    from modules.v41_top5_institutional_core import build_top5
+
+    picks = build_top5()
     if not picks:
         return f"""🏆 Top 5 Today
 
@@ -3995,7 +3997,7 @@ def compact_top5_message():
 เวลาไทย: {now_text()}"""
 
     lines = []
-    for i, (s, asset, a) in enumerate(picks, 1):
+    for i, p in enumerate(picks, 1):
         lines.append(f"{i}. {s} {a.get('score')}/100")
 
     return f"""🏆 Top 5 Today
