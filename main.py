@@ -3024,7 +3024,7 @@ Regime: {analysis.get('regime')}
             return f"Strict Check Error: {e}"
     if low in ("top5", "/top5"):
 
-    return """
+        return """
 🏆 Top 5 Daily Picks
 
 1. TSM 94/100 | STRONG UPTREND
