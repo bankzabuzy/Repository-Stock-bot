@@ -1,0 +1,27 @@
+{
+  "version": "V900",
+  "mode_default": "paper",
+  "live_trading_requires": [
+    "WEBULL_API_KEY",
+    "WEBULL_API_SECRET",
+    "LIVE_TRADING_ENABLED=true",
+    "HUMAN_APPROVAL_REQUIRED=true"
+  ],
+  "risk": {
+    "max_order_pct_equity": 0.04,
+    "max_portfolio_heat": 0.12,
+    "max_symbol_exposure": 0.08,
+    "max_sector_exposure": 0.25,
+    "max_daily_loss_pct": 0.02,
+    "duplicate_window_seconds": 900
+  },
+  "assets": [
+    "US_STOCKS",
+    "GOLD",
+    "THAI_STOCKS"
+  ],
+  "alerts": {
+    "line_notify_enabled": true,
+    "line_token_env": "LINE_CHANNEL_ACCESS_TOKEN"
+  }
+}

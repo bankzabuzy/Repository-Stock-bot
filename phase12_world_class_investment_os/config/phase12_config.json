@@ -1,0 +1,42 @@
+{
+  "version": "V1200",
+  "base": "V1100_GLOBAL_HEDGEFUND_READY",
+  "safe_default_mode": "shadow",
+  "live_trading_blocked_by_default": true,
+  "assets": [
+    "US_STOCKS",
+    "THAI_STOCKS",
+    "GOLD",
+    "ETF"
+  ],
+  "risk_limits": {
+    "max_single_trade_risk_pct": 0.01,
+    "max_order_pct_equity": 0.04,
+    "max_daily_loss_pct": 0.02,
+    "max_drawdown_pause_pct": 0.08,
+    "max_sector_exposure_pct": 0.25,
+    "max_correlation_cluster_pct": 0.3,
+    "min_liquidity_score": 60,
+    "min_confidence_for_paper": "B",
+    "min_confidence_for_live": "A"
+  },
+  "inflation_defense": {
+    "enabled": true,
+    "preferred_assets": [
+      "GOLD",
+      "QUALITY_STOCKS",
+      "CASH_BUFFER"
+    ],
+    "high_cpi_threshold": 3.0
+  },
+  "behavioral_guard": {
+    "enabled": true,
+    "block_revenge_trading": true,
+    "max_trades_per_day": 10
+  },
+  "line_alerts": {
+    "enabled": true,
+    "token_env": "LINE_CHANNEL_ACCESS_TOKEN",
+    "safe_template_mode": true
+  }
+}

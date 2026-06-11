@@ -1,0 +1,74 @@
+{
+  "version": "V230_LIVE_PORTFOLIO_OS_STABLE",
+  "base_file": "Repository-Stock-bot_V220_BROKER_EXECUTION_NETWORK_COMPATIBILITY_STABLE.zip",
+  "compileall": true,
+  "compile_errors": [],
+  "route_count": 185,
+  "route_collision_count": 16,
+  "route_collisions": {
+    "/v42/gold-dashboard": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold-fund-grade": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/thai-gold": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold-text": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold-high-conviction": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold-filter": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/gold-explain": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/us-extended-hours": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/market-breadth": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/us-extended-hours-line": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/risk-performance": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/risk-dashboard": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/record-signal": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/control-center": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ],
+    "/v42/control-center-json": [
+      "main.py",
+      "modules/v42_gold_institutional_routes.py"
+    ]
+  }
+}

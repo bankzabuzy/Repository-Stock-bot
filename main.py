@@ -2971,6 +2971,219 @@ def handle_line_command(user_text):
     text = (user_text or "").strip()
     low = text.lower()
 
+    
+
+    
+
+    
+
+    
+
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    # V620/V700 LINE PHASE6+PHASE7 COMMANDS
+    if low in ("v620", "phase6", "alpha discovery", "alpha factory", "factor engine", "alpha decay", "research notebook", "ค้นหา alpha", "วิจัยกลยุทธ์"):
+        from modules.v620_phase6_alpha_discovery_engine.engine import center_text
+        return center_text("SPY", "MIXED")
+
+    if low in ("v700", "phase7", "execution edge", "position sizing", "kelly", "portfolio heat", "exposure matrix", "คุมความเสี่ยงพอร์ต", "ขนาดไม้"):
+        from modules.v700_phase7_execution_edge.core import dashboard_text
+        return dashboard_text("SPY")
+# V550 LINE PHASE5 COMMAND
+    if low in ("v550", "phase5", "webull api", "webull ready", "api health", "human approval", "dry run", "เชื่อม webull", "ตรวจ api"):
+        from modules.v550_phase5_webull_api_ready.dashboard import phase5_text
+        return phase5_text("SPY")
+# V500 LINE ARFOS COMMAND
+    if low in ("v500", "arfos", "autonomous fund os", "shadow real money", "governance", "ระบบกองทุน", "กองทุนอัตโนมัติเต็มระบบ"):
+        from modules.v500_arfos_autonomous_retail_fund_os.dashboard import phase4_text
+        return phase4_text("SPY")
+# V470 LINE PHASE3 COMMAND
+    if low in ("v470", "phase3", "meta learning", "self healing", "investor dashboard", "fund report", "รายงานกองทุน", "แดชบอร์ดนักลงทุน"):
+        from modules.v470_phase3_meta_selfheal_dashboard.dashboard import phase3_text
+        return phase3_text("SPY")
+# V430 LINE PHASE2 COMMAND
+    if low in ("v430", "phase2", "market intelligence", "microstructure", "regime ai", "digital twin", "พฤติกรรมตลาด", "ตลาดจำลอง"):
+        from modules.v430_phase2_market_intelligence.dashboard import phase2_text
+        return phase2_text("SPY")
+# V390 LINE PHASE1 COMMAND
+    if low in ("v390", "phase1", "execution verification", "attribution", "position sizing", "capital protection", "ตรวจ execution", "คุมทุน"):
+        from modules.v390_phase1_execution_attribution_risk.dashboard import phase1_text
+        return phase1_text("SPY")
+# V350 LINE PRODUCTION PROOF COMMAND
+    if low in ("v350", "production proof", "forward test", "performance proof", "line governance", "พิสูจน์ระบบ", "ตรวจผลจริง"):
+        from modules.v350_production_proof_governance.production_control import production_center_text
+        return production_center_text()
+# V300 LINE INSTITUTIONAL CONTROL CENTER COMMAND
+    if low in ("v300", "control center", "institutional control", "feature store", "model registry", "ศูนย์ควบคุม", "ระบบกองทุนเต็ม"):
+        from modules.v300_institutional_control_center.control_center import control_center_text
+        return control_center_text("SPY")
+# V240 LINE AUTONOMOUS FUND MANAGER COMMAND
+    if low in ("v240", "autonomous fund manager", "fund health", "investment committee", "ผู้จัดการกองทุน", "สุขภาพกองทุน"):
+        from modules.v240_autonomous_fund_manager.dashboard import build_v240_text
+        return build_v240_text("SPY")
+# V230 LINE PORTFOLIO OS COMMAND
+    if low in ("v230", "portfolio os", "live portfolio", "portfolio ops", "พอร์ต", "ระบบพอร์ต"):
+        from modules.v230_live_portfolio_os.dashboard import build_v230_text
+        return build_v230_text()
+# V220 LINE BROKER NETWORK COMMAND
+    if low in ("v220", "broker network", "execution network", "route test", "เครือข่ายโบรกเกอร์", "ส่งคำสั่งจำลอง"):
+        from modules.v220_broker_execution_network.dashboard import build_v220_text
+        return build_v220_text("SPY")
+# V210 LINE MULTI AGENT COMMAND
+    if low in ("v210", "multi agent", "agent center", "committee", "ai committee", "ทีม ai", "คณะกรรมการ ai"):
+        from modules.v210_multi_agent_fund_intelligence.dashboard import build_v210_text
+        return build_v210_text("SPY")
+# V200 LINE AUTONOMOUS FUND COMMAND
+    if low in ("v200", "fund manager", "autonomous fund", "retail fund", "กองทุนอัตโนมัติ", "ผู้จัดการกองทุน"):
+        from modules.v200_autonomous_retail_fund.dashboard import build_v200_text
+        return build_v200_text("SPY")
+# V190 LINE GLOBAL MACRO COMMAND
+    if low in ("v190", "macro", "global macro", "event prediction", "human behavior", "macro center", "เศรษฐกิจโลก", "พฤติกรรมมนุษย์", "คาดการณ์เหตุการณ์"):
+        from modules.v190_global_macro_behavior.dashboard import build_v190_text
+        return build_v190_text()
+# V180.1 LINE FORECAST RISK COMMAND
+    if low in ("v180.1", "v180-1", "forecast risk", "risk forecast", "คาดการณ์ความเสี่ยง", "พฤติกรรมตลาดรวม"):
+        from modules.v180_1_market_behavior_plus_risk.forecast_plus_risk import forecast_text
+        return forecast_text()
+# V170 LINE RISK STRESS COMMAND
+    if low in ("v170", "stress", "risk stress", "stress test", "var", "cvar", "ทดสอบความเสี่ยง", "ความเสี่ยงขั้นสูง"):
+        from modules.v170_advanced_risk_stress.risk_dashboard import build_v170_text
+        return build_v170_text()
+# V140 LINE SYSTEM VERSION COMMAND
+    if low in ("v140", "latest", "version", "system center", "ตรวจเวอร์ชั่น", "เวอร์ชั่นล่าสุด"):
+        from modules.v140_system_version_audit.version_registry import latest_status_text
+        return latest_status_text()
+# V130 LINE GOVERNANCE COMMAND
+    if low in ("v130", "governance", "readiness", "allocation", "autonomous", "บริหารพอร์ต", "พร้อมใช้งานจริง"):
+        from modules.v130_live_readiness_autonomous.governance_report import build_v130_text
+        return build_v130_text()
+# V120 LINE BROKER COMMAND
+    if low in ("v120", "broker", "broker center", "execution", "โบรกเกอร์", "ระบบส่งคำสั่ง"):
+        from modules.v120_broker_live_ready.broker_dashboard import build_v120_text
+        return build_v120_text()
+# V110 LINE FUND COMMAND
+    if low in ("fund", "v110", "daily fund report", "รายงานกองทุน", "ระบบกองทุน", "กองทุน"):
+        from modules.v110_retail_institutional_fund.master_dashboard import build_master_text
+        return build_master_text()
+
+    if low in ("daily report", "daily fund", "สรุปรายวัน"):
+        from modules.v110_retail_institutional_fund.daily_report import build_daily_report_text
+        return build_daily_report_text()
+# V101 LINE PRODUCTION COMMAND
+    if low in ("v101", "production", "production center", "hardening", "security", "ระบบปลอดภัย", "สถานะความปลอดภัย"):
+        from modules.v101_production_hardening.monitoring import build_v101_text
+        return build_v101_text()
+
+    if low in ("last error", "errors", "error ล่าสุด"):
+        from modules.v101_production_hardening.state import last_errors
+        data = last_errors(5)
+        items = data.get("items", [])
+        if not items:
+            return "ไม่พบ error ล่าสุด"
+        return "\n".join([f"- {e.get('component')} | {e.get('severity')} | {e.get('message')}" for e in items])
+
+    if low in ("pause alerts", "หยุดแจ้งเตือน"):
+        from modules.v101_production_hardening.state import set_state
+        set_state("maintenance_mode", "true")
+        return "หยุดแจ้งเตือนแล้ว: maintenance_mode=true"
+
+    if low in ("resume alerts", "เปิดแจ้งเตือน"):
+        from modules.v101_production_hardening.state import set_state
+        set_state("maintenance_mode", "false")
+        return "เปิดแจ้งเตือนแล้ว: maintenance_mode=false"
+# V100 LINE FUND OS COMMAND
+    if low in ("v100", "fund os", "fund dashboard", "operating system", "ระบบกองทุน", "กองทุนเต็มระบบ"):
+        from modules.v100_fund_os.fund_os import build_fund_dashboard_text
+        return build_fund_dashboard_text("SPY")
+# V51 LINE VALIDATION COMMAND
+    if low in ("v51", "validation", "backtest", "walk forward", "paper broker", "พิสูจน์ระบบ", "ทดสอบระบบ"):
+        from modules.v51_institutional_validation_execution import build_v51_dashboard_text
+        return build_v51_dashboard_text("SPY")
+# V50 LINE WORLD CLASS COMMAND
+    if low in ("v50", "world class", "fund", "portfolio", "optimizer", "กองทุน", "พอร์ต"):
+        from modules.v50_world_class_institutional_stack import build_v50_world_class_dashboard_text
+        return build_v50_world_class_dashboard_text()
+# V42.8 LINE CONTROL CENTER COMMAND
+    if low in ("dashboard", "control", "control center", "status all", "ระบบ", "แดชบอร์ด", "สถานะระบบ"):
+        from modules.v42_gold_institutional_core import build_v428_control_center_text
+        return build_v428_control_center_text()
+# V42.7 LINE RISK DASHBOARD COMMAND
+    if low in ("risk", "risk dashboard", "performance", "journal", "ผลงาน", "สถิติ", "ความเสี่ยง"):
+        from modules.v42_gold_institutional_core import build_v427_dashboard_text
+        return build_v427_dashboard_text()
+# V42.6.1 LINE US STOCK FULL REPORT + EXTENDED HOURS
+    us_symbols_v426 = {"NVDA", "AAPL", "TSLA", "META", "AMD", "QQQ", "SPY", "MSFT", "GOOGL", "AMZN", "TSM", "WDC", "AAOI", "ZS"}
+    if low in ("premarket", "pre-market", "afterhours", "after-hours", "extended", "หุ้นสหรัฐ", "ราคาหุ้นสหรัฐ", "ก่อนตลาดเปิด", "หลังตลาดปิด"):
+        from modules.v42_gold_institutional_core import build_us_extended_hours_line_message
+        return build_us_extended_hours_line_message()
+
+    if low.upper() in us_symbols_v426:
+        symbol = low.upper()
+        from modules.v42_gold_institutional_core import build_single_us_symbol_line_message
+        extended_text = build_single_us_symbol_line_message(symbol)
+
+        try:
+            if "build_asset_report" in globals():
+                full_report = build_asset_report(symbol)
+            elif "handle_message" in globals():
+                full_report = handle_message("", symbol)
+            else:
+                full_report = ""
+        except Exception as e:
+            full_report = f"ไม่สามารถดึงรายงานหุ้นตัวเต็มได้: {e}"
+
+        if full_report:
+            try:
+                from modules.v42_gold_institutional_core import build_us_extended_hours_first_line, build_us_extended_hours_short_tail
+                first_line = build_us_extended_hours_first_line(symbol)
+                short_tail = build_us_extended_hours_short_tail(symbol)
+            except Exception:
+                first_line = ""
+                short_tail = extended_text
+            if first_line:
+                return f"{first_line}\n\n{full_report}\n\n{short_tail}"
+            return f"{full_report}\n\n{short_tail}"
+        return extended_text
+
+    if low.startswith("us "):
+        from modules.v42_gold_institutional_core import build_us_extended_hours_line_message
+        parts = [p.strip().upper() for p in low[3:].replace(",", " ").split() if p.strip()]
+        return build_us_extended_hours_line_message(parts or None)
     if low in {"/health", "health"}:
         return "OK"
 
@@ -5158,6 +5371,39 @@ def market_hours_status():
         "symbol_cooldown_minutes": SYMBOL_COOLDOWN_MINUTES,
     })
 
+
+# ============================================================
+# V42.2 GOLD INSTITUTIONAL AUTO LINE PUSH
+# Sends only when the strict entry filter passes. Uses DB cooldown to avoid spam.
+# ============================================================
+def maybe_send_v42_gold_institutional_alert():
+    if not (ENABLE_AUTO_ALERTS and ALERT_USER_IDS):
+        return {"ok": False, "reason": "auto alerts disabled or no users"}
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload, build_v42_gold_text
+        payload = build_v42_gold_payload()
+        if not payload.get("push_alert"):
+            return {"ok": True, "sent": 0, "reason": "filter_not_passed", "entry_filter": payload.get("entry_filter")}
+        cooldown_symbol = "V42_GOLD_INSTITUTIONAL"
+        if not should_send_alert(cooldown_symbol, 100):
+            return {"ok": True, "sent": 0, "reason": "cooldown"}
+        msg = "🚨 GOLD INSTITUTIONAL ALERT\n\n" + build_v42_gold_text()
+        sent = 0
+        for user_id in ALERT_USER_IDS:
+            line_push(user_id, msg)
+            sent += 1
+        try:
+            thai = payload.get("thai_gold", {})
+            eng = payload.get("engine", {})
+            save_signal("THAI_GOLD", "THAI_GOLD", thai.get("bar_sell"), eng.get("score"), eng.get("signal"), "V42.3_GOLD_ALERT", eng.get("regime"), eng.get("probability"), msg)
+        except Exception as e:
+            print("V42.3 gold alert save warning:", e)
+        return {"ok": True, "sent": sent, "reason": "sent", "entry_filter": payload.get("entry_filter")}
+    except Exception as e:
+        print("V42.3 gold alert error:", e)
+        return {"ok": False, "error": str(e)}
+
+
 # ============================================================
 # AUTO ALERTS
 # ============================================================
@@ -5332,6 +5578,59 @@ def _production_build_scan_report(symbol, asset, analysis, quote=None):
     if reasons:
         lines += ["", "เหตุผล:"] + [f"- {r}" for r in reasons[:8]]
     return "\n".join(lines)
+
+
+@app.route("/v42/gold-filter-legacy", methods=["GET"], endpoint="v42_gold_filter_legacy")
+def v42_gold_filter_route_legacy():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload
+        payload = build_v42_gold_payload()
+        return jsonify({
+            "ok": payload.get("ok", False),
+            "version": payload.get("version"),
+            "time_th": payload.get("time_th"),
+            "entry_filter": payload.get("entry_filter"),
+            "engine": payload.get("engine"),
+            "trade_plan": payload.get("trade_plan"),
+            "push_alert": payload.get("push_alert"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.5_GOLD_US_EXTENDED_EXPLAINABLE_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+
+@app.route("/v42/gold-dashboard", methods=["GET"])
+def v42_gold_dashboard_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_dashboard_text
+        return Response(build_v42_gold_dashboard_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง V42.5 Gold Dashboard ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/gold-fund-grade", methods=["GET"], endpoint="v42_gold_fund_grade_unique")
+def v42_gold_fund_grade_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload
+        payload = build_v42_gold_payload()
+        return jsonify({
+            "ok": payload.get("ok", False),
+            "version": payload.get("version"),
+            "time_th": payload.get("time_th"),
+            "entry_filter": payload.get("entry_filter"),
+            "entry_score": payload.get("entry_score"),
+            "economic_calendar_filter": payload.get("economic_calendar_filter"),
+            "dxy_bond_yield_filter": payload.get("dxy_bond_yield_filter"),
+            "order_block_detection": payload.get("order_block_detection"),
+            "liquidity_sweep_detection": payload.get("liquidity_sweep_detection"),
+            "winrate_dashboard": payload.get("winrate_dashboard"),
+            "self_learning": payload.get("self_learning"),
+            "engine": payload.get("engine"),
+            "trade_plan": payload.get("trade_plan"),
+            "push_alert": payload.get("push_alert"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.5_GOLD_US_EXTENDED_EXPLAINABLE_STABLE", "error": str(e), "time_th": now_text()}), 200
 
 
 def production_scan_once(symbols=None, save_all=True):
@@ -12544,7 +12843,7 @@ def thai_gold_latest_route():
         from modules.v42_gold_institutional_core import build_v42_gold_payload
         return jsonify(build_v42_gold_payload())
     except Exception as e:
-        return jsonify({"ok": False, "version": "V42_GOLD_INSTITUTIONAL_STABLE", "error": str(e), "time_th": now_text()}), 200
+        return jsonify({"ok": False, "version": "V42.5_GOLD_US_EXTENDED_EXPLAINABLE_STABLE", "error": str(e), "time_th": now_text()}), 200
 
 
 @app.route("/v42/gold", methods=["GET"])
@@ -12553,7 +12852,7 @@ def v42_gold_route():
         from modules.v42_gold_institutional_core import build_v42_gold_payload
         return jsonify(build_v42_gold_payload())
     except Exception as e:
-        return jsonify({"ok": False, "version": "V42_GOLD_INSTITUTIONAL_STABLE", "error": str(e), "time_th": now_text()}), 200
+        return jsonify({"ok": False, "version": "V42.5_GOLD_US_EXTENDED_EXPLAINABLE_STABLE", "error": str(e), "time_th": now_text()}), 200
 
 
 @app.route("/v42/gold-text", methods=["GET"])
@@ -12563,6 +12862,32 @@ def v42_gold_text_route():
         return Response(build_v42_gold_text(), mimetype="text/plain; charset=utf-8")
     except Exception as e:
         return Response(f"ไม่สามารถดึงระบบ V42 GOLD ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+@app.route("/v42/gold-high-conviction", methods=["GET"])
+def v42_gold_high_conviction_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_high_conviction_text
+        return Response(build_v42_gold_high_conviction_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง V42.5 Fund Grade ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/gold-filter", methods=["GET"], endpoint="v42_gold_filter_unique")
+def v42_gold_filter_route_v2():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_payload
+        payload = build_v42_gold_payload()
+        return jsonify({
+            "ok": payload.get("ok", False),
+            "version": payload.get("version"),
+            "time_th": payload.get("time_th"),
+            "entry_filter": payload.get("entry_filter"),
+            "engine": payload.get("engine"),
+            "trade_plan": payload.get("trade_plan"),
+            "push_alert": payload.get("push_alert"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.5_GOLD_US_EXTENDED_EXPLAINABLE_STABLE", "error": str(e), "time_th": now_text()}), 200
 
 
 def production_scan_once(symbols=None, save_all=True):
@@ -12611,6 +12936,309 @@ def production_scan_once(symbols=None, save_all=True):
 # ============================================================
 # Start background workers when imported by Gunicorn/Railway.
 start_production_workers_once()
+
+
+# ============================================================
+# V42.5 Explainable AI + US Extended Hours + Market Breadth routes
+# ============================================================
+
+@app.route("/v42/gold-explain", methods=["GET"], endpoint="v42_gold_explain_unique")
+def v42_gold_explain_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v42_gold_explainable_text
+        return Response(build_v42_gold_explainable_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง V42.5 Explainable AI ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/us-extended-hours", methods=["GET"], endpoint="v42_us_extended_hours_unique")
+def v42_us_extended_hours_route():
+    try:
+        symbols_raw = request.args.get("symbols", "")
+        symbols = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()] if symbols_raw else None
+        from modules.v42_gold_institutional_core import build_us_extended_hours_text
+        return Response(build_us_extended_hours_text(symbols), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง US Extended Hours ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/market-breadth", methods=["GET"], endpoint="v42_market_breadth_unique")
+def v42_market_breadth_route():
+    try:
+        from modules.v42_gold_institutional_core import build_market_breadth_text
+        return Response(build_market_breadth_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง Market Breadth ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+
+# V42.6 US Extended Hours LINE text route
+@app.route("/v42/us-extended-hours-line", methods=["GET"], endpoint="v42_us_extended_hours_line_unique")
+def v42_us_extended_hours_line_route():
+    try:
+        symbols_raw = request.args.get("symbols", "")
+        symbols = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()] if symbols_raw else None
+        from modules.v42_gold_institutional_core import build_us_extended_hours_line_message
+        return Response(build_us_extended_hours_line_message(symbols), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง US Extended Hours สำหรับ LINE ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+
+# ============================================================
+# V42.7 Risk & Performance Tracker routes
+# ============================================================
+
+@app.route("/v42/risk-performance", methods=["GET"], endpoint="v427_risk_performance_unique")
+def v427_risk_performance_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v427_risk_performance_payload
+        return jsonify(build_v427_risk_performance_payload())
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.7_INSTITUTIONAL_RISK_PERFORMANCE_TRACKER_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+@app.route("/v42/risk-dashboard", methods=["GET"], endpoint="v427_risk_dashboard_unique")
+def v427_risk_dashboard_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v427_dashboard_text
+        return Response(build_v427_dashboard_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง V42.7 Risk Dashboard ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/record-signal", methods=["GET"], endpoint="v427_record_signal_unique")
+def v427_record_signal_direct_route():
+    try:
+        symbol = request.args.get("symbol", "THAI_GOLD")
+        asset_class = request.args.get("asset_class", "GOLD")
+        from modules.v42_gold_institutional_core import build_v42_gold_payload, v427_record_signal
+        payload = build_v42_gold_payload()
+        return jsonify(v427_record_signal(payload, symbol=symbol, asset_class=asset_class))
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.7_INSTITUTIONAL_RISK_PERFORMANCE_TRACKER_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+
+# V43-V50 World-Class Institutional Stack routes
+try:
+    from modules.v50_world_class_institutional_routes import v50_bp
+    app.register_blueprint(v50_bp)
+except Exception as e:
+    print("V50 world-class institutional routes not loaded:", e)
+
+# ============================================================
+# V42.8 Unified Control Center routes
+# ============================================================
+
+@app.route("/v42/control-center", methods=["GET"], endpoint="v428_control_center_unique")
+def v428_control_center_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v428_control_center_text
+        return Response(build_v428_control_center_text(), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(f"ไม่สามารถดึง V42.8 Control Center ได้ในขณะนี้: {e}", mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/v42/control-center-json", methods=["GET"], endpoint="v428_control_center_json_unique")
+def v428_control_center_json_route():
+    try:
+        from modules.v42_gold_institutional_core import build_v428_control_center_payload
+        return jsonify(build_v428_control_center_payload())
+    except Exception as e:
+        return jsonify({"ok": False, "version": "V42.8_UNIFIED_CONTROL_CENTER_DASHBOARD_STABLE", "error": str(e), "time_th": now_text()}), 200
+
+
+# V51 Institutional Validation & Execution Proof routes
+try:
+    from modules.v51_institutional_validation_routes import v51_bp
+    app.register_blueprint(v51_bp)
+except Exception as e:
+    print("V51 validation execution routes not loaded:", e)
+
+
+# V100 Fund Operating System routes
+try:
+    from modules.v100_fund_os_routes import v100_bp
+    app.register_blueprint(v100_bp)
+except Exception as e:
+    print("V100 fund operating system routes not loaded:", e)
+
+
+# V101 Production Hardening & Security routes
+try:
+    from modules.v101_production_hardening_routes import v101_bp
+    app.register_blueprint(v101_bp)
+except Exception as e:
+    print("V101 production hardening routes not loaded:", e)
+
+
+# V110 Retail Institutional Fund Platform routes
+try:
+    from modules.v110_retail_institutional_fund_routes import v110_bp
+    app.register_blueprint(v110_bp)
+except Exception as e:
+    print("V110 retail institutional fund routes not loaded:", e)
+
+
+# V120 Broker Live-Ready Safety Layer routes
+try:
+    from modules.v120_broker_live_ready_routes import v120_bp
+    app.register_blueprint(v120_bp)
+except Exception as e:
+    print("V120 broker live-ready routes not loaded:", e)
+
+
+# V130 Live Trading Readiness & Autonomous Portfolio Control routes
+try:
+    from modules.v130_live_readiness_autonomous_routes import v130_bp
+    app.register_blueprint(v130_bp)
+except Exception as e:
+    print("V130 live readiness autonomous routes not loaded:", e)
+
+
+# V140 System Version Consistency Audit routes
+try:
+    from modules.v140_system_version_audit_routes import v140_bp
+    app.register_blueprint(v140_bp)
+except Exception as e:
+    print("V140 system version audit routes not loaded:", e)
+
+
+# V170 Advanced Risk & Stress Testing routes
+try:
+    from modules.v170_advanced_risk_stress_routes import v170_bp
+    app.register_blueprint(v170_bp)
+except Exception as e:
+    print("V170 advanced risk stress routes not loaded:", e)
+
+
+# V180.1 Market Behavior Forecast + V170 Risk Stress Base routes
+try:
+    from modules.v180_1_market_behavior_plus_risk_routes import v180_1_bp
+    app.register_blueprint(v180_1_bp)
+except Exception as e:
+    print("V180.1 forecast risk routes not loaded:", e)
+
+
+# V190 Global Macro Behavior & Event Prediction routes
+try:
+    from modules.v190_global_macro_behavior_routes import v190_bp
+    app.register_blueprint(v190_bp)
+except Exception as e:
+    print("V190 global macro behavior routes not loaded:", e)
+
+
+# V200 Autonomous Retail Fund Platform routes
+try:
+    from modules.v200_autonomous_retail_fund_routes import v200_bp
+    app.register_blueprint(v200_bp)
+except Exception as e:
+    print("V200 autonomous retail fund routes not loaded:", e)
+
+
+# V210 Multi-Agent Fund Intelligence routes
+try:
+    from modules.v210_multi_agent_fund_intelligence_routes import v210_bp
+    app.register_blueprint(v210_bp)
+except Exception as e:
+    print("V210 multi-agent fund intelligence routes not loaded:", e)
+
+
+# V220 Broker Execution Network routes
+try:
+    from modules.v220_broker_execution_network_routes import v220_bp
+    app.register_blueprint(v220_bp)
+except Exception as e:
+    print("V220 broker execution network routes not loaded:", e)
+
+
+# V230 Live Portfolio OS routes
+try:
+    from modules.v230_live_portfolio_os_routes import v230_bp
+    app.register_blueprint(v230_bp)
+except Exception as e:
+    print("V230 live portfolio os routes not loaded:", e)
+
+
+# V240 Autonomous Fund Manager routes
+try:
+    from modules.v240_autonomous_fund_manager_routes import v240_bp
+    app.register_blueprint(v240_bp)
+except Exception as e:
+    print("V240 autonomous fund manager routes not loaded:", e)
+
+
+# V300 Institutional Control Center routes
+try:
+    from modules.v300_institutional_control_center_routes import v300_bp
+    app.register_blueprint(v300_bp)
+except Exception as e:
+    print("V300 institutional control center routes not loaded:", e)
+
+
+# V350 Production Proof & Governance routes
+try:
+    from modules.v350_production_proof_governance_routes import v350_bp
+    app.register_blueprint(v350_bp)
+except Exception as e:
+    print("V350 production proof governance routes not loaded:", e)
+
+
+# V390 Phase 1 Execution Attribution Risk routes
+try:
+    from modules.v390_phase1_execution_attribution_risk_routes import v390_bp
+    app.register_blueprint(v390_bp)
+except Exception as e:
+    print("V390 phase1 routes not loaded:", e)
+
+
+# V430 Phase 2 Market Intelligence routes
+try:
+    from modules.v430_phase2_market_intelligence_routes import v430_bp
+    app.register_blueprint(v430_bp)
+except Exception as e:
+    print("V430 phase2 routes not loaded:", e)
+
+
+# V470 Phase 3 Meta Self-Healing Dashboard routes
+try:
+    from modules.v470_phase3_meta_selfheal_dashboard_routes import v470_bp
+    app.register_blueprint(v470_bp)
+except Exception as e:
+    print("V470 phase3 routes not loaded:", e)
+
+
+# V500 ARFOS Autonomous Retail Fund OS routes
+try:
+    from modules.v500_arfos_autonomous_retail_fund_os_routes import v500_bp
+    app.register_blueprint(v500_bp)
+except Exception as e:
+    print("V500 ARFOS routes not loaded:", e)
+
+
+# V550 Phase 5 Webull API Ready Safe Execution routes
+try:
+    from modules.v550_phase5_webull_api_ready_routes import v550_bp
+    app.register_blueprint(v550_bp)
+except Exception as e:
+    print("V550 phase5 routes not loaded:", e)
+
+
+# V620 Phase 6 Alpha Discovery Engine routes
+try:
+    from modules.v620_phase6_alpha_discovery_engine_routes import v620_bp
+    app.register_blueprint(v620_bp)
+except Exception as e:
+    print("V620 phase6 routes not loaded:", e)
+
+
+# V700 Phase 7 Execution Edge routes - integrated on top of V620 Phase 6
+try:
+    from modules.v700_phase7_execution_edge_routes import v700_bp
+    app.register_blueprint(v700_bp)
+except Exception as e:
+    print("V700 phase7 routes not loaded:", e)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
