@@ -1,0 +1,36 @@
+{
+  "version": "V1000",
+  "base": "V900_PHASE9_LIVE_FUND_OPERATION_CURRENT_TESTED",
+  "default_mode": "shadow",
+  "live_trading": {
+    "enabled_by_default": false,
+    "requires_human_approval": true,
+    "requires_phase9_safe_gate": true,
+    "requires_environment": [
+      "WEBULL_API_KEY",
+      "WEBULL_API_SECRET",
+      "LIVE_TRADING_ENABLED=true",
+      "HUMAN_APPROVAL_REQUIRED=true"
+    ]
+  },
+  "autonomy_levels": {
+    "0": "research_only",
+    "1": "shadow_signal",
+    "2": "paper_trade",
+    "3": "human_approved_live"
+  },
+  "risk_limits": {
+    "max_order_pct_equity": 0.04,
+    "max_daily_loss_pct": 0.02,
+    "max_drawdown_pause_pct": 0.08,
+    "max_correlation_cluster_pct": 0.3,
+    "min_liquidity_score": 60,
+    "confidence_required_for_live": "A"
+  },
+  "governance": {
+    "kill_switch_default": true,
+    "audit_every_decision": true,
+    "model_drift_guard": true,
+    "no_profit_guarantee_notice": true
+  }
+}
